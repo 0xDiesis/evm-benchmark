@@ -1,0 +1,177 @@
+# BSC 3-validator + 1 RPC benchmark cluster
+#
+# Usage:
+#   docker compose up --build -d
+#   # Wait for nodes to become healthy, then connect peers
+#   make up
+#
+# Cleanup:
+#   docker compose down -v --remove-orphans
+
+services:
+  bsc-rpc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bsc-rpc
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - NODE_ROLE=rpc
+      - NETWORK_ID=714714
+      - HTTP_PORT=8545
+      - WS_PORT=8546
+      - P2P_PORT=30311
+      - CACHE_SIZE=4096
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "8545:8545"    # HTTP RPC
+      - "8546:8546"    # WebSocket
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:8545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      bsc-net:
+        ipv4_address: 10.102.0.10
+    volumes:
+      - bsc-rpc-data:/var/bsc
+      - ./genesis.json:/genesis.json:ro
+
+  bsc-validator-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bsc-validator-1
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - NODE_ROLE=validator
+      - NETWORK_ID=714714
+      # Validator 1: 0xd1c268DD16caF43221528AA0B4247F4215720cFa
+      - VALIDATOR_KEY=2c1516e6d09c094bafb49e6fc9810e0d7ebf09687a32e75cea29a4894506bc56
+      - HTTP_PORT=8545
+      - WS_PORT=8546
+      - P2P_PORT=30311
+      - CACHE_SIZE=4096
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "8645:8545"
+      - "8646:8546"
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:8545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      bsc-net:
+        ipv4_address: 10.102.0.11
+    volumes:
+      - bsc-val1-data:/var/bsc
+      - ./genesis.json:/genesis.json:ro
+
+  bsc-validator-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bsc-validator-2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - NODE_ROLE=validator
+      - NETWORK_ID=714714
+      # Validator 2: 0x34e3B5C2e476A1613F84d9323371F08d2Ad8e1b1
+      - VALIDATOR_KEY=0a2a4927e5a2a74c791b45c92e0ed7b42118d278be89e781c7a5e7ee8637c5e5
+      - HTTP_PORT=8545
+      - WS_PORT=8546
+      - P2P_PORT=30311
+      - CACHE_SIZE=4096
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "8745:8545"
+      - "8746:8546"
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:8545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      bsc-net:
+        ipv4_address: 10.102.0.12
+    volumes:
+      - bsc-val2-data:/var/bsc
+      - ./genesis.json:/genesis.json:ro
+
+  bsc-validator-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: bsc-validator-3
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - NODE_ROLE=validator
+      - NETWORK_ID=714714
+      # Validator 3: 0x2FB8d6fB92a4Dfa12DDDbf3F84d7120A7CF897D5
+      - VALIDATOR_KEY=d7e4ae48d18e4a4c7555798b4d3802898b6c5435ece21a15b89ce13300775c2c
+      - HTTP_PORT=8545
+      - WS_PORT=8546
+      - P2P_PORT=30311
+      - CACHE_SIZE=4096
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "8845:8545"
+      - "8846:8546"
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:8545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      bsc-net:
+        ipv4_address: 10.102.0.13
+    volumes:
+      - bsc-val3-data:/var/bsc
+      - ./genesis.json:/genesis.json:ro
+
+networks:
+  bsc-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.102.0.0/24
+
+volumes:
+  bsc-rpc-data:
+  bsc-val1-data:
+  bsc-val2-data:
+  bsc-val3-data:

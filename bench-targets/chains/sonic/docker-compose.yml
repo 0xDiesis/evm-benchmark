@@ -1,0 +1,171 @@
+# Sonic 4-validator fakenet for evm-benchmark comparison testing
+#
+# Usage:
+#   docker compose up --build -d
+#   ./connect-peers.sh        # form ring topology
+#   ./run-bench.sh             # benchmark with our harness
+#
+# Cleanup:
+#   docker compose down -v --remove-orphans
+
+services:
+  sonic-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sonic-node-1
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VALIDATOR_ID=1
+      - VALIDATOR_COUNT=4
+      - NAT_HOST=sonic-1
+      - HTTP_PORT=18545
+      - WS_PORT=18546
+      - P2P_PORT=5050
+      - CACHE_SIZE=12000
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "18545:18545"  # HTTP RPC
+      - "18546:18546"  # WebSocket
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:18545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      sonic-net:
+        ipv4_address: 10.101.0.11
+    volumes:
+      - sonic-1-data:/var/sonic
+
+  sonic-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sonic-node-2
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VALIDATOR_ID=2
+      - VALIDATOR_COUNT=4
+      - NAT_HOST=sonic-2
+      - HTTP_PORT=18545
+      - WS_PORT=18546
+      - P2P_PORT=5050
+      - CACHE_SIZE=12000
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "18645:18545"  # HTTP RPC
+      - "18646:18546"  # WebSocket
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:18545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      sonic-net:
+        ipv4_address: 10.101.0.12
+    volumes:
+      - sonic-2-data:/var/sonic
+
+  sonic-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sonic-node-3
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VALIDATOR_ID=3
+      - VALIDATOR_COUNT=4
+      - NAT_HOST=sonic-3
+      - HTTP_PORT=18545
+      - WS_PORT=18546
+      - P2P_PORT=5050
+      - CACHE_SIZE=12000
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "18745:18545"  # HTTP RPC
+      - "18746:18546"  # WebSocket
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:18545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      sonic-net:
+        ipv4_address: 10.101.0.13
+    volumes:
+      - sonic-3-data:/var/sonic
+
+  sonic-4:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sonic-node-4
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - VALIDATOR_ID=4
+      - VALIDATOR_COUNT=4
+      - NAT_HOST=sonic-4
+      - HTTP_PORT=18545
+      - WS_PORT=18546
+      - P2P_PORT=5050
+      - CACHE_SIZE=12000
+      - TXPOOL_GLOBAL_SLOTS=50000
+      - TXPOOL_ACCOUNT_SLOTS=5000
+      - TXPOOL_GLOBAL_QUEUE=10000
+      - TXPOOL_ACCOUNT_QUEUE=1000
+    ports:
+      - "18845:18545"  # HTTP RPC
+      - "18846:18546"  # WebSocket
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:18545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    networks:
+      sonic-net:
+        ipv4_address: 10.101.0.14
+    volumes:
+      - sonic-4-data:/var/sonic
+
+networks:
+  sonic-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.0.0/24
+
+volumes:
+  sonic-1-data:
+  sonic-2-data:
+  sonic-3-data:
+  sonic-4-data:

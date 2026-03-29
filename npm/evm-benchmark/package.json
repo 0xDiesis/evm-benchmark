@@ -1,0 +1,34 @@
+{
+  "name": "@0xdiesis/evm-benchmark",
+  "version": "0.1.0",
+  "description": "High-performance EVM load testing harness — chain-agnostic, pre-built binary",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/0xDiesis/evm-benchmark",
+    "directory": "npm/evm-benchmark"
+  },
+  "keywords": [
+    "evm",
+    "benchmark",
+    "load-testing",
+    "blockchain",
+    "ethereum",
+    "tps",
+    "throughput",
+    "latency",
+    "performance",
+    "rpc"
+  ],
+  "bin": {
+    "evm-benchmark": "bin/evm-benchmark"
+  },
+  "files": [
+    "bin/",
+    "scripts/",
+    "README.md"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/install.mjs"
+  }
+}

@@ -1,0 +1,42 @@
+name: cosmos-bench
+
+# Evmos v20.0.0 in-process 4-validator testnet.
+# All validators run in one container via `evmosd testnet start`.
+# JSON-RPC on localhost:8545, chain ID 9000.
+
+services:
+  evmos-node:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: evmos-node
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+    networks:
+      evmos-net:
+        ipv4_address: 10.103.0.11
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test:
+        - CMD
+        - sh
+        - -c
+        - |
+          curl -sf http://localhost:8545 -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+            | grep -q '"result"'
+      interval: 5s
+      timeout: 3s
+      start_period: 60s
+      retries: 30
+    restart: unless-stopped
+
+networks:
+  evmos-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.103.0.0/24

@@ -1,0 +1,71 @@
+{
+  "config": {
+    "chainId": 714714,
+    "homesteadBlock": 0,
+    "eip150Block": 0,
+    "eip155Block": 0,
+    "eip158Block": 0,
+    "byzantiumBlock": 0,
+    "constantinopleBlock": 0,
+    "petersburgBlock": 0,
+    "istanbulBlock": 0,
+    "muirGlacierBlock": 0,
+    "ramanujanBlock": 0,
+    "nielsBlock": 0,
+    "mirrorSyncBlock": 0,
+    "brunoBlock": 0,
+    "eulerBlock": 0,
+    "gibbsBlock": 0,
+    "nanoBlock": 0,
+    "moranBlock": 0,
+    "planckBlock": 0,
+    "berlinBlock": 0,
+    "londonBlock": 0,
+    "parlia": {
+      "period": 3,
+      "epoch": 200
+    }
+  },
+  "nonce": "0x0",
+  "timestamp": "0x0",
+  "extradata": "0x0000000000000000000000000000000000000000000000000000000000000000d1c268dd16caf43221528aa0b4247f4215720cfa34e3b5c2e476a1613f84d9323371f08d2ad8e1b12fb8d6fb92a4dfa12dddbf3f84d7120a7cf897d50000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+  "gasLimit": "0x2625a00",
+  "difficulty": "0x1",
+  "mixHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "alloc": {
+    "d1c268DD16caF43221528AA0B4247F4215720cFa": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "34e3B5C2e476A1613F84d9323371F08d2Ad8e1b1": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "2FB8d6fB92a4Dfa12DDDbf3F84d7120A7CF897D5": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "59b02D4d2F94ea5c55230715a58EBb0b703bCD4B": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "7fd60C817837dCFEFCa6D0A52A44980d12F70C59": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "8E1Ad6FaC6ea5871140594ABEF5b1D503385e936": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "A2bC4Cf857f3D7a22b29c71774B4d8f25cc7edD0": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "528562E4EA1DFE07B63a6dfC20f8048a9c2E49AB": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "8996D198ae008C81b52Ca95DF26BDabE8cE02684": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "953A381425358C1Abd81D95f9548f242014C7dd4": {
+      "balance": "0x152d02c7e14af6800000"
+    },
+    "13e77aB15Febd5e3D7dE08e9b402518C436dC69e": {
+      "balance": "0x152d02c7e14af6800000"
+    }
+  }
+}

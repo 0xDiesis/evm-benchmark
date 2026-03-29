@@ -1,0 +1,25 @@
+#!/usr/bin/env node
+
+/**
+ * Thin wrapper that execs the native evm-benchmark binary.
+ * The binary is downloaded during npm postinstall.
+ */
+
+import { execFileSync } from "child_process";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import { existsSync } from "fs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const binPath = join(__dirname, "evm-benchmark");
+
+if (!existsSync(binPath)) {
+  console.error("evm-benchmark: binary not found. Run `npm install` to download it.");
+  process.exit(1);
+}
+
+try {
+  execFileSync(binPath, process.argv.slice(2), { stdio: "inherit" });
+} catch (err) {
+  process.exit(err.status ?? 1);
+}

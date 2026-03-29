@@ -1,0 +1,116 @@
+services:
+  avax-1:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: avax-node-1
+    environment:
+      - NODE_ID=1
+      - PUBLIC_IP=avax-1
+    ports:
+      - "9650:9650"
+    healthcheck:
+      test: curl -sf http://localhost:9650/ext/health | grep -q '"healthy":true' || exit 1
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    networks:
+      avax-net:
+        ipv4_address: 10.0.30.2
+    volumes:
+      - avax-1-data:/data/avalanche
+
+  avax-2:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: avax-node-2
+    environment:
+      - NODE_ID=2
+      - BOOTSTRAP_IP=10.0.30.2
+      - PUBLIC_IP=avax-2
+    ports:
+      - "9660:9650"
+    networks:
+      avax-net:
+        ipv4_address: 10.0.30.3
+    volumes:
+      - avax-2-data:/data/avalanche
+    depends_on:
+      avax-1:
+        condition: service_healthy
+
+  avax-3:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: avax-node-3
+    environment:
+      - NODE_ID=3
+      - BOOTSTRAP_IP=10.0.30.2
+      - PUBLIC_IP=avax-3
+    ports:
+      - "9670:9650"
+    networks:
+      avax-net:
+        ipv4_address: 10.0.30.4
+    volumes:
+      - avax-3-data:/data/avalanche
+    depends_on:
+      avax-1:
+        condition: service_healthy
+
+  avax-4:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: avax-node-4
+    environment:
+      - NODE_ID=4
+      - BOOTSTRAP_IP=10.0.30.2
+      - PUBLIC_IP=avax-4
+    ports:
+      - "9680:9650"
+    networks:
+      avax-net:
+        ipv4_address: 10.0.30.5
+    volumes:
+      - avax-4-data:/data/avalanche
+    depends_on:
+      avax-1:
+        condition: service_healthy
+
+  avax-5:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: avax-node-5
+    environment:
+      - NODE_ID=5
+      - BOOTSTRAP_IP=10.0.30.2
+      - PUBLIC_IP=avax-5
+    ports:
+      - "9690:9650"
+    networks:
+      avax-net:
+        ipv4_address: 10.0.30.6
+    volumes:
+      - avax-5-data:/data/avalanche
+    depends_on:
+      avax-1:
+        condition: service_healthy
+
+networks:
+  avax-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.30.0/24
+
+volumes:
+  avax-1-data:
+  avax-2-data:
+  avax-3-data:
+  avax-4-data:
+  avax-5-data:

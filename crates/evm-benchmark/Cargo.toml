@@ -1,0 +1,81 @@
+[package]
+name = "evm-benchmark"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "High-performance EVM load testing harness — chain-agnostic, works with any EVM-compatible network"
+license = "MIT"
+repository = "https://github.com/0xDiesis/evm-benchmark"
+keywords = ["evm", "benchmark", "load-testing", "blockchain", "ethereum"]
+categories = ["command-line-utilities", "development-tools::testing"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# Alloy (signing, RPC, types)
+alloy-primitives = { version = "1", features = ["serde"] }
+alloy-signer-local = "1"
+alloy-provider = { version = "1", features = ["pubsub", "ws"] }
+alloy-transport-http = "1"
+alloy-transport-ws = "1"
+alloy-rpc-types = "1"
+alloy-consensus = "1"
+alloy-eips = "1"
+alloy-chains = "0.2"
+alloy-network = "1"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+url = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = "1"
+
+# Sync primitives
+parking_lot = "0.12"
+dashmap = "5"
+atomic = "0.1"
+
+# Utilities
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+rand = { version = "0.8", features = ["small_rng"] }
+time = "0.3"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Parallelization
+rayon = "1.7"
+
+# HTTP client with connection pooling
+reqwest = { version = "0.11", features = ["json"] }
+
+# Archive extraction (for downloading bench-targets from GitHub)
+flate2 = "1"
+tar = "0.4"
+
+# Raw WebSocket for block tracking (matches Node.js ws.on("block") pattern)
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# Prometheus metrics
+prometheus = "0.13"
+
+# Testing
+[dev-dependencies]
+tokio-test = "0.4"
+wiremock = "0.6"
+criterion = "0.5"
+
+[[bench]]
+name = "signing"
+harness = false
+
+[[bench]]
+name = "submission"
+harness = false

@@ -1,0 +1,54 @@
+# Berachain beacon-kit Kurtosis devnet — tuned for benchmarking.
+#
+# Minimal config: 4 validators + 1 full node, no extra services, to keep
+# resource usage comparable with other bench targets (Sonic, Sei, Avalanche).
+#
+# Reference: beacon-kit/kurtosis/beaconkit-local.yaml
+
+network_configuration:
+  chain_id: 80087
+  chain_spec: "devnet"
+  validators:
+    type: "validator"
+    nodes:
+      - el_type: reth
+        kzg_impl: crate-crypto/go-kzg-4844
+        replicas: 4
+  full_nodes:
+    type: "full"
+    nodes:
+      - el_type: reth
+        kzg_impl: crate-crypto/go-kzg-4844
+        replicas: 1
+  seed_nodes:
+    type: "seed"
+    nodes: []
+
+node_settings:
+  consensus_settings:
+    specs:
+      min_cpu: 0
+      max_cpu: 2000
+      min_memory: 0
+      max_memory: 2048
+    images:
+      beaconkit: beacond:kurtosis-local
+    config:
+      timeout_propose: 2s
+      timeout_prevote: 2s
+      timeout_precommit: 2s
+      max_num_inbound_peers: 40
+      max_num_outbound_peers: 10
+    app:
+      payload_timeout: 850ms
+  execution_settings:
+    specs:
+      min_cpu: 0
+      max_cpu: 2000
+      min_memory: 0
+      max_memory: 2048
+    images:
+      reth: ghcr.io/berachain/bera-reth:nightly
+
+# No extra services — keep it lean for benchmarking
+additional_services: []

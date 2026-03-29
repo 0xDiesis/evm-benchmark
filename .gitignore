@@ -1,0 +1,30 @@
+/target/
+/tmp/
+/.DS_Store
+/bench-targets/results/
+/reports/
+/.tx-cache/
+/.env
+
+# Editor files
+/.vscode/
+/.idea/
+
+# Python/cache artifacts from helper scripts
+**/__pycache__/
+**/.pytest_cache/
+
+# Chain-local generated state and secrets
+/bench-targets/chains/berachain/.env
+/bench-targets/chains/berachain/.beacon-kit/
+/bench-targets/chains/bsc/bsc-docker/
+/bench-targets/chains/cosmos/evmos/
+/bench-targets/chains/**/sender-keys.txt
+
+# Ad hoc benchmark output generated from chain target scripts
+/bench-targets/chains/**/report.json
+/bench-targets/chains/**/report-*.json
+.DS_Store
+
+*.log
+*.csv

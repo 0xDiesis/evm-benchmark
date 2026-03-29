@@ -1,0 +1,90 @@
+services:
+  sei-node-0:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: sei-node-0
+    environment:
+      - NODE_ID=0
+      - CLUSTER_SIZE=4
+    ports:
+      - "28545:8545"
+      - "28546:8546"
+      - "36657:26657"
+    volumes:
+      - shared-data:/shared
+      - sei-0-data:/root/.sei
+    networks:
+      sei-net:
+        ipv4_address: 192.168.20.10
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8545 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}' || exit 1"]
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+
+  sei-node-1:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: sei-node-1
+    environment:
+      - NODE_ID=1
+      - CLUSTER_SIZE=4
+    ports:
+      - "28547:8545"
+    volumes:
+      - shared-data:/shared
+      - sei-1-data:/root/.sei
+    networks:
+      sei-net:
+        ipv4_address: 192.168.20.11
+
+  sei-node-2:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: sei-node-2
+    environment:
+      - NODE_ID=2
+      - CLUSTER_SIZE=4
+    ports:
+      - "28549:8545"
+    volumes:
+      - shared-data:/shared
+      - sei-2-data:/root/.sei
+    networks:
+      sei-net:
+        ipv4_address: 192.168.20.12
+
+  sei-node-3:
+    build: .
+    cap_add:
+      - NET_ADMIN
+    container_name: sei-node-3
+    environment:
+      - NODE_ID=3
+      - CLUSTER_SIZE=4
+    ports:
+      - "28551:8545"
+    volumes:
+      - shared-data:/shared
+      - sei-3-data:/root/.sei
+    networks:
+      sei-net:
+        ipv4_address: 192.168.20.13
+
+networks:
+  sei-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.20.0/24
+
+volumes:
+  shared-data:
+  sei-0-data:
+  sei-1-data:
+  sei-2-data:
+  sei-3-data:
