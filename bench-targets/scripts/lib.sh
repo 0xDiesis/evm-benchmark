@@ -138,7 +138,7 @@ wait_for_block_advance() {
 # CHAIN_KEYS, CHAIN_UP_CMD, CHAIN_DOWN_CMD, CHAIN_CLEAN_CMD,
 # CHAIN_STATUS_CMD, CHAIN_TYPE.
 
-_REGISTERED_CHAINS="diesis sonic sei avalanche anvil geth reth berachain bsc cosmos"
+_REGISTERED_CHAINS="diesis sonic sei avalanche anvil geth reth berachain bsc cosmos optimism arbitrum scroll"
 
 chain_config_diesis() {
     CHAIN_RPC="http://localhost:8545,http://localhost:8555,http://localhost:8565,http://localhost:8575"
@@ -233,6 +233,33 @@ chain_config_cosmos() {
     CHAIN_TOPOLOGY_ENV=""
 }
 
+chain_config_optimism() {
+    local optimism_dir="${BENCH_REPO_ROOT}/bench-targets/chains/optimism"
+    CHAIN_RPC="http://127.0.0.1:9545"
+    CHAIN_WS="ws://127.0.0.1:9546"
+    CHAIN_CHAIN_ID=901
+    CHAIN_KEYS="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    CHAIN_UP_CMD="make -C ${optimism_dir} up"
+    CHAIN_DOWN_CMD="make -C ${optimism_dir} down"
+    CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
+    CHAIN_STATUS_CMD="curl -sf http://127.0.0.1:9545 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
+    CHAIN_TYPE="L2 (OP Stack via Supersim, single node)"
+    CHAIN_TOPOLOGY_ENV=""
+}
+chain_config_arbitrum() {
+    local arbitrum_dir="${BENCH_REPO_ROOT}/bench-targets/chains/arbitrum"
+    CHAIN_RPC="http://127.0.0.1:8547"
+    CHAIN_WS="ws://127.0.0.1:8548"
+    CHAIN_CHAIN_ID=412346
+    CHAIN_KEYS="0xb6b15c8cb491557369f3c7d2c287b053eb229daa9c22138887752191c9520659"
+    CHAIN_UP_CMD="make -C ${arbitrum_dir} up"
+    CHAIN_DOWN_CMD="make -C ${arbitrum_dir} down"
+    CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
+    CHAIN_STATUS_CMD="curl -sf http://127.0.0.1:8547 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
+    CHAIN_TYPE="L2 (Nitro optimistic rollup, single sequencer)"
+    CHAIN_TOPOLOGY_ENV=""
+}
+
 chain_config_anvil() {
     CHAIN_RPC="http://localhost:18888"
     CHAIN_WS="ws://localhost:18888"
@@ -284,6 +311,20 @@ chain_config_berachain() {
     CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
     CHAIN_STATUS_CMD="curl -sf \${CHAIN_RPC} -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
     CHAIN_TYPE="L1 (CometBFT, 4 validators, beacon-kit)"
+}
+
+chain_config_scroll() {
+    local scroll_dir="${BENCH_REPO_ROOT}/bench-targets/chains/scroll"
+    CHAIN_RPC="http://127.0.0.1:48545"
+    CHAIN_WS="ws://127.0.0.1:48546"
+    CHAIN_CHAIN_ID=53077
+    CHAIN_KEYS="0xc0c85dc29d5c58039e502db807b6217cbb633ccd5f574d2449097e321abb89bc"
+    CHAIN_UP_CMD="make -C ${scroll_dir} up"
+    CHAIN_DOWN_CMD="make -C ${scroll_dir} down"
+    CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
+    CHAIN_STATUS_CMD="curl -sf http://127.0.0.1:48545 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
+    CHAIN_TYPE="L2 (Scroll l2geth, standalone ZK-rollup node)"
+    CHAIN_TOPOLOGY_ENV=""
 }
 
 # ── 5. Chain loader ──────────────────────────────────────────────────────────

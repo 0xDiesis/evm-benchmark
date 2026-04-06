@@ -1,0 +1,6 @@
+services:
+  supersim:
+    image: ethereum-optimism/supersim:latest
+    container_name: supersim
+    network_mode: host
+    restart: unless-stopped

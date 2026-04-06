@@ -268,7 +268,11 @@ View with `make chains`. Currently registered:
 | `reth` | Reference EVM (reth --dev) | 1 | 38545 |
 | `geth` | Reference EVM (geth --dev) | 1 | 18889 |
 | `anvil` | Dev tool (no consensus) | 1 | 18888 |
-
+| `bsc` | L1 — Parlia PoSA | 3 | 8545 |
+| `cosmos` | L1 — CometBFT (Evmos) | 1 | 8545 |
+| `arbitrum` | L2 — Nitro optimistic rollup | 1 sequencer | 8547 |
+| `optimism` | L2 — OP Stack (Supersim) | 1 | 9545 |
+| `scroll` | L2 — zkEVM (l2geth standalone) | 1 | 48545 |
 Each chain has its own setup under `bench-targets/chains/<name>/` with a Makefile for standalone use (`make up`, `make down`, `make bench`).
 
 ## Report Organization

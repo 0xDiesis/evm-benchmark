@@ -1,0 +1,39 @@
+# Scroll l2geth standalone — single-node benchmark target
+#
+# Usage:
+#   docker compose up -d
+#   make up
+#
+# Cleanup:
+#   docker compose down -v --remove-orphans
+
+name: scroll-bench
+
+services:
+  scroll-l2geth:
+    image: scrolltech/l2geth:scroll-v5.7.25
+    container_name: scroll-l2geth
+    entrypoint: ["/entrypoint.sh"]
+    environment:
+      - NETWORK_ID=53077
+      # Signer: 0xE276ae9338be48AA89bD59eD9dCEB0826e863505
+      - SIGNER_KEY=1cedaf504d32694297b16216761a469e9b43cd04789b084fa04c165cd4bc9d87
+    ports:
+      - "48545:8545"    # HTTP RPC
+      - "48546:8546"    # WebSocket
+    healthcheck:
+      test: >
+        wget -qO- --post-data='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+        --header='Content-Type: application/json'
+        http://localhost:8545 || exit 1
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 30s
+    volumes:
+      - scroll-data:/var/scroll
+      - ./genesis.json:/genesis.json:ro
+      - ./entrypoint.sh:/entrypoint.sh:ro
+
+volumes:
+  scroll-data:
