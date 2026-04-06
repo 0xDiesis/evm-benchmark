@@ -53,15 +53,15 @@ chrono = { version = "0.4", features = ["serde"] }
 # Parallelization
 rayon = "1.7"
 
-# HTTP client with connection pooling
-reqwest = { version = "0.11", features = ["json"] }
+# HTTP client with connection pooling (rustls avoids OpenSSL system dependency)
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
 # Archive extraction (for downloading bench-targets from GitHub)
 flate2 = "1"
 tar = "0.4"
 
-# Raw WebSocket for block tracking (matches Node.js ws.on("block") pattern)
-tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+# Raw WebSocket for block tracking (rustls avoids OpenSSL system dependency)
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 
 # Prometheus metrics
 prometheus = "0.13"
