@@ -24,13 +24,16 @@ def env_or(key, default):
 chain_config = {}
 if '${chain}' == 'diesis':
     chain_config = {
-        'block_period':            env_or('E2E_BLOCK_PERIOD',          '200ms'),
-        'ordering_window':         env_or('E2E_ORDERING_WINDOW',       '20ms'),
+        'profile':                 env_or('E2E_PROFILE',               ''),
+        'block_period':            env_or('E2E_BLOCK_PERIOD',          '100ms'),
+        'ordering_window':         env_or('E2E_ORDERING_WINDOW',       '15ms'),
         'min_round_delay':         env_or('E2E_MIN_ROUND_DELAY',       '10ms'),
+        'leader_timeout':          env_or('E2E_LEADER_TIMEOUT',        ''),
         'max_block_txs':           int(env_or('E2E_MAX_BLOCK_TX_COUNT', '5000')),
-        'max_proposal_txs':        int(env_or('E2E_MAX_PROPOSAL_TX_COUNT',  '1024')),
+        'max_execution_lag':       int(env_or('E2E_MAX_EXECUTION_LAG', '32')),
+        'max_proposal_txs':        int(env_or('E2E_MAX_PROPOSAL_TX_COUNT',  '2048')),
         'max_gas_per_proposal':    int(env_or('E2E_MAX_GAS_PER_PROPOSAL', '30000000')),
-        'propagation_delay_stop_threshold': int(env_or('E2E_PROPAGATION_DELAY_STOP_THRESHOLD', '5')),
+        'propagation_delay_stop_threshold': int(env_or('E2E_PROPAGATION_DELAY_STOP_THRESHOLD', '40')),
         'parallel_execution':      env_or('E2E_PARALLEL_EXECUTION',    'full'),
         'commitment_mode':         env_or('E2E_COMMITMENT_MODE',       'verkle'),
         'fec_enabled':             env_or('E2E_FEC_ENABLED',           'true'),

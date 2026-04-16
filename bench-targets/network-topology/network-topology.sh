@@ -151,6 +151,12 @@ tc_exec() {
     return 0
 }
 
+ip_to_tc_hex() {
+    local ip="$1"
+    IFS='.' read -r oct1 oct2 oct3 oct4 <<< "$ip"
+    printf '%02x%02x%02x%02x' "$oct1" "$oct2" "$oct3" "$oct4"
+}
+
 clear_tc_rules() {
     local container="$1"
     # Delete root qdisc if one exists (restores default pfifo_fast).
@@ -311,7 +317,7 @@ cmd_verify() {
 cmd_verify_quick() {
     # Fast verification: check that TC netem rules are configured on each node and,
     # if ping is available, verify actual RTTs are within tolerance.
-    # Returns non-zero if any node fails. Intended for automated pipelines.
+    # Returns non-zero if any pair fails. Intended for automated pipelines.
     local layout="${1:?Usage: verify-quick <layout>}"
     local tolerance_pct="${2:-50}"  # default ±50% tolerance
     load_layout "$layout"
@@ -323,97 +329,81 @@ cmd_verify_quick() {
     # Detect whether ping is available in the first container
     if ! docker exec "${CONTAINERS[0]}" which ping > /dev/null 2>&1; then
         has_ping="false"
-        echo "  (ping not available in containers — verifying TC rules only)"
+        echo "  (ping not available in containers — verifying per-peer TC rules only)"
     fi
 
     for i in "${!CONTAINERS[@]}"; do
         local container="${CONTAINERS[$i]}"
-
-        # Find the farthest peer for this node
-        local max_rtt=0 max_j=0
-        for j in "${!CONTAINERS[@]}"; do
-            [[ "$i" -eq "$j" ]] && continue
-            local rtt="${LAYOUT[$i:$j]}"
-            if [[ "$rtt" -gt "$max_rtt" ]]; then
-                max_rtt="$rtt"
-                max_j="$j"
-            fi
-        done
-
-        local dst_ip="${IPS[$max_j]}"
-        local expected_rtt="$max_rtt"
-        local expected_one_way=$(( expected_rtt / 2 ))
-
-        # Step 1: Verify TC netem qdisc is configured with expected delay
         local qdisc_output
         qdisc_output=$(docker exec "$container" tc qdisc show dev eth0 2>&1)
         if ! echo "$qdisc_output" | grep -q "netem"; then
             echo "  FAIL: ${LABELS[$i]}: no netem qdisc found on eth0" >&2
             failures=$((failures + 1))
-            pairs_checked=$((pairs_checked + 1))
             continue
         fi
 
-        # Check that at least one netem delay matches our expected one-way value (±30%)
-        local found_delay="false"
-        while IFS= read -r line; do
-            local delay_ms
-            delay_ms=$(echo "$line" | sed -nE 's/.*delay ([0-9]+)ms.*/\1/p')
-            if [[ -n "$delay_ms" ]]; then
-                local lower_tc upper_tc
-                lower_tc=$(( expected_one_way * 70 / 100 ))
-                upper_tc=$(( expected_one_way * 130 / 100 ))
-                if [[ "$delay_ms" -ge "$lower_tc" && "$delay_ms" -le "$upper_tc" ]]; then
-                    found_delay="true"
-                    break
-                fi
+        local filter_output
+        filter_output=$(docker exec "$container" tc filter show dev eth0 2>&1)
+
+        for j in "${!CONTAINERS[@]}"; do
+            [[ "$i" -eq "$j" ]] && continue
+
+            local dst_ip="${IPS[$j]}"
+            local dst_hex
+            dst_hex="$(ip_to_tc_hex "$dst_ip")"
+            local expected_rtt="${LAYOUT[$i:$j]}"
+            local expected_one_way=$(( expected_rtt / 2 ))
+            local lower_tc=$(( expected_one_way * 70 / 100 ))
+            local upper_tc=$(( expected_one_way * 130 / 100 ))
+            local flowid
+            flowid=$(
+                echo "$filter_output" | awk -v hex="${dst_hex}/ffffffff" '
+                    $1 == "match" && $2 == hex { print prev; exit }
+                    { prev = $0 }
+                ' | sed -nE 's/.*\*flowid 1:([0-9]+).*/\1/p'
+            )
+            local delay_ms=""
+            if [[ -n "$flowid" ]]; then
+                delay_ms=$(echo "$qdisc_output" | sed -nE "s/.*parent 1:${flowid} .* delay ([0-9]+)ms.*/\\1/p" | head -1)
             fi
-        done <<< "$qdisc_output"
 
-        if [[ "$found_delay" != "true" ]]; then
-            # Accept if ANY netem delay is present (different peers have different delays)
-            if echo "$qdisc_output" | grep -qE 'delay [0-9]+ms'; then
-                found_delay="true"
-            fi
-        fi
-
-        if [[ "$found_delay" != "true" ]]; then
-            echo "  FAIL: ${LABELS[$i]}: netem qdisc found but no delay configured" >&2
-            failures=$((failures + 1))
-            pairs_checked=$((pairs_checked + 1))
-            continue
-        fi
-
-        # Step 2: If ping is available, verify actual RTT
-        if [[ "$has_ping" == "true" ]]; then
-            local actual
-            actual=$(docker exec "$container" ping -c 1 -W 3 "$dst_ip" 2>/dev/null | \
-                     sed -nE 's|.*time=([0-9.]+) ms.*|\1|p')
-
-            if [[ -z "$actual" ]]; then
-                echo "  FAIL: ${LABELS[$i]} → ${LABELS[$max_j]}: ping timeout (expected ~${expected_rtt}ms)" >&2
+            if [[ -z "$flowid" || -z "$delay_ms" || "$delay_ms" -lt "$lower_tc" || "$delay_ms" -gt "$upper_tc" ]]; then
+                echo "  FAIL: ${LABELS[$i]} → ${LABELS[$j]}: tc rules missing expected delay/filter (one-way ${expected_one_way}ms)" >&2
                 failures=$((failures + 1))
-            else
-                local lower upper
-                lower=$(echo "$expected_rtt $tolerance_pct" | awk '{printf "%.1f", $1 * (1 - $2/100)}')
-                upper=$(echo "$expected_rtt $tolerance_pct" | awk '{printf "%.1f", $1 * (1 + $2/100)}')
-                local in_range
-                in_range=$(echo "$actual $lower $upper" | awk '{print ($1 >= $2 && $1 <= $3) ? "yes" : "no"}')
-
-                if [[ "$in_range" == "yes" ]]; then
-                    echo "  OK:   ${LABELS[$i]} → ${LABELS[$max_j]}: ${actual}ms (expected ${expected_rtt}ms ±${tolerance_pct}%)"
-                else
-                    echo "  FAIL: ${LABELS[$i]} → ${LABELS[$max_j]}: ${actual}ms (expected ${expected_rtt}ms ±${tolerance_pct}%, range ${lower}-${upper}ms)" >&2
-                    failures=$((failures + 1))
-                fi
+                pairs_checked=$((pairs_checked + 1))
+                continue
             fi
-        else
-            echo "  OK:   ${LABELS[$i]}: netem delay configured on eth0"
-        fi
-        pairs_checked=$((pairs_checked + 1))
+
+            if [[ "$has_ping" == "true" ]]; then
+                local actual
+                actual=$(docker exec "$container" ping -c 1 -W 3 "$dst_ip" 2>/dev/null | \
+                         sed -nE 's|.*time=([0-9.]+) ms.*|\1|p')
+
+                if [[ -z "$actual" ]]; then
+                    echo "  FAIL: ${LABELS[$i]} → ${LABELS[$j]}: ping timeout (expected ~${expected_rtt}ms)" >&2
+                    failures=$((failures + 1))
+                else
+                    local lower upper
+                    lower=$(echo "$expected_rtt $tolerance_pct" | awk '{printf "%.1f", $1 * (1 - $2/100)}')
+                    upper=$(echo "$expected_rtt $tolerance_pct" | awk '{printf "%.1f", $1 * (1 + $2/100)}')
+                    local in_range
+                    in_range=$(echo "$actual $lower $upper" | awk '{print ($1 >= $2 && $1 <= $3) ? "yes" : "no"}')
+
+                    if [[ "$in_range" == "yes" ]]; then
+                        echo "  OK:   ${LABELS[$i]} → ${LABELS[$j]}: ${actual}ms (expected ${expected_rtt}ms ±${tolerance_pct}%)"
+                    else
+                        echo "  FAIL: ${LABELS[$i]} → ${LABELS[$j]}: ${actual}ms (expected ${expected_rtt}ms ±${tolerance_pct}%, range ${lower}-${upper}ms)" >&2
+                        failures=$((failures + 1))
+                    fi
+                fi
+            else
+                echo "  OK:   ${LABELS[$i]} → ${LABELS[$j]}: tc delay/filter configured"
+            fi
+            pairs_checked=$((pairs_checked + 1))
+        done
     done
 
-    echo "  Verified ${pairs_checked} nodes, ${failures} failures."
+    echo "  Verified ${pairs_checked} directed paths, ${failures} failures."
     [[ "$failures" -eq 0 ]]
 }
 

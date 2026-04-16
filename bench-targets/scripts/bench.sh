@@ -101,12 +101,25 @@ env_to_layout() {
     esac
 }
 
+default_chain_overrides() {
+    local chain_name="$1"
+
+    case "${chain_name}" in
+        diesis)
+            echo "E2E_BLOCK_PERIOD=100ms E2E_ORDERING_WINDOW=15ms E2E_MIN_ROUND_DELAY=10ms E2E_MAX_EXECUTION_LAG=32 E2E_PROPAGATION_DELAY_STOP_THRESHOLD=40 E2E_MAX_PROPOSAL_TX_COUNT=2048 E2E_MAX_GAS_PER_PROPOSAL=30000000"
+            ;;
+        *)
+            echo ""
+            ;;
+    esac
+}
+
 # ── Geo-aware chain config ──────────────────────────────────────────────
 # Consensus requires block_period > max inter-node RTT to maintain liveness.
 # Override timing parameters when running under simulated geo-latency.
 geo_chain_overrides() {
     local env_name="$1"
-    local block_period="" ordering_window="" min_round_delay="" prop_threshold=""
+    local block_period="" ordering_window="" min_round_delay="" leader_timeout="" prop_threshold=""
 
     # Use the same consensus parameters for ALL geo profiles so that cross-profile
     # comparisons are fair (Sei/Sonic also run identical configs across profiles).
@@ -129,9 +142,11 @@ geo_chain_overrides() {
     block_period="${BENCH_GEO_E2E_BLOCK_PERIOD:-${block_period}}"
     ordering_window="${BENCH_GEO_E2E_ORDERING_WINDOW:-${ordering_window}}"
     min_round_delay="${BENCH_GEO_E2E_MIN_ROUND_DELAY:-${min_round_delay}}"
+    leader_timeout="${BENCH_GEO_E2E_LEADER_TIMEOUT:-${leader_timeout}}"
     prop_threshold="${BENCH_GEO_E2E_PROPAGATION_DELAY_STOP_THRESHOLD:-${prop_threshold}}"
 
     local overrides="E2E_BLOCK_PERIOD=${block_period} E2E_ORDERING_WINDOW=${ordering_window} E2E_MIN_ROUND_DELAY=${min_round_delay}"
+    [[ -n "${leader_timeout}" ]] && overrides+=" E2E_LEADER_TIMEOUT=${leader_timeout}"
     [[ -n "${prop_threshold}" ]] && overrides+=" E2E_PROPAGATION_DELAY_STOP_THRESHOLD=${prop_threshold}"
 
     [[ -n "${BENCH_GEO_E2E_MAX_PROPOSAL_TX_COUNT:-}" ]] && overrides+=" E2E_MAX_PROPOSAL_TX_COUNT=${BENCH_GEO_E2E_MAX_PROPOSAL_TX_COUNT}"
@@ -145,9 +160,14 @@ geo_chain_overrides() {
 # ── Restart chain for consistent baseline ────────────────────────────────
 # Always restart to ensure a clean state between runs. This prevents warm-cache
 # effects and leftover TC rules from skewing results across profiles.
+BASE_OVERRIDES="$(default_chain_overrides "${CHAIN}")"
 GEO_OVERRIDES=""
 if [[ "${CHAIN}" == "diesis" ]]; then
     GEO_OVERRIDES="$(geo_chain_overrides "${ENV}")"
+fi
+CHAIN_OVERRIDES="${BASE_OVERRIDES}"
+if [[ -n "${GEO_OVERRIDES}" ]]; then
+    CHAIN_OVERRIDES="${CHAIN_OVERRIDES} ${GEO_OVERRIDES}"
 fi
 if [[ "${REBUILD}" == "true" && -n "${CHAIN_REBUILD_CMD:-}" ]]; then
     if [[ "${DEV}" == "true" && -n "${CHAIN_REBUILD_DEV_CMD:-}" ]]; then
@@ -156,16 +176,16 @@ if [[ "${REBUILD}" == "true" && -n "${CHAIN_REBUILD_CMD:-}" ]]; then
         DEV_OVERRIDES="E2E_COMMITMENT_MODE=none E2E_SKIP_STATE_ROOT_VALIDATION=true"
         echo "Rebuilding and restarting ${CHAIN} (dev/debug build — faster compile)..."
         eval "${CHAIN_DOWN_CMD}" 2>/dev/null || true
-        eval "${GEO_OVERRIDES} ${DEV_OVERRIDES} ${CHAIN_REBUILD_DEV_CMD}" || { echo "ERROR: Dev rebuild failed" >&2; exit 1; }
+        eval "${CHAIN_OVERRIDES} ${DEV_OVERRIDES} ${CHAIN_REBUILD_DEV_CMD}" || { echo "ERROR: Dev rebuild failed" >&2; exit 1; }
     else
         echo "Rebuilding and restarting ${CHAIN} (forced rebuild)..."
         eval "${CHAIN_DOWN_CMD}" 2>/dev/null || true
-        eval "${GEO_OVERRIDES} ${CHAIN_REBUILD_CMD}" || { echo "ERROR: Rebuild failed" >&2; exit 1; }
+        eval "${CHAIN_OVERRIDES} ${CHAIN_REBUILD_CMD}" || { echo "ERROR: Rebuild failed" >&2; exit 1; }
     fi
 elif [[ -n "${CHAIN_CLEAN_CMD:-}" ]]; then
     echo "Restarting ${CHAIN} from clean state..."
     eval "${CHAIN_DOWN_CMD}" 2>/dev/null || true
-    eval "${GEO_OVERRIDES} ${CHAIN_UP_CMD}" || { echo "ERROR: Restart failed" >&2; exit 1; }
+    eval "${CHAIN_OVERRIDES} ${CHAIN_UP_CMD}" || { echo "ERROR: Restart failed" >&2; exit 1; }
 fi
 
 # ── Reload config after restart (picks up dynamic ports, e.g. Berachain) ─
@@ -220,8 +240,8 @@ if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
     source "${SCRIPT_DIR}/meta.sh"
     export BENCH_TXS="${TXS}" BENCH_SENDERS="${SENDERS}" BENCH_BATCH_SIZE="${BATCH_SIZE}"
     export BENCH_WORKERS="${WORKERS}" BENCH_TPS="${TPS}" BENCH_DURATION="${DURATION}"
-    if [[ -n "${GEO_OVERRIDES}" ]]; then
-        eval "export ${GEO_OVERRIDES}"
+    if [[ -n "${CHAIN_OVERRIDES}" ]]; then
+        eval "export ${CHAIN_OVERRIDES}"
     fi
     generate_meta "${RUN_DIR}/meta.json" "${CHAIN}" "${MODE}" "${ENV}" "${RUN_TAG}" 2>/dev/null || true
 fi
