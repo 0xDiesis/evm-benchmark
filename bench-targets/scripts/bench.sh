@@ -123,11 +123,14 @@ geo_chain_overrides() {
 
     # Use the same consensus parameters for ALL geo profiles so that cross-profile
     # comparisons are fair (Sei/Sonic also run identical configs across profiles).
-    # The node defaults (1s / 300ms / 120ms / 40) are tuned for worst-case geo-global
-    # (240ms max RTT) and work safely for all lower-latency profiles too.
+    # Benchmarked on the global-spread profile (240ms max RTT): 750ms blocks
+    # materially reduce p50/p95 confirmation latency versus 1s while retaining
+    # full confirmation. 650ms blocks overran the safe envelope under the same
+    # workload, so keep the block period above 3x the worst directed RTT.
     case "${env_name}" in
         geo-eu|geo-us|geo-global|geo-degraded)
-            block_period="1s"; ordering_window="300ms"; min_round_delay="120ms"
+            block_period="750ms"; ordering_window="240ms"; min_round_delay="100ms"
+            leader_timeout="480"
             prop_threshold="40" ;;
         geo-intercontinental)
             # Max RTT 340ms exceeds the global defaults — widen margins.

@@ -245,6 +245,9 @@ Applies network topology simulation before benchmarking using Linux TC (traffic 
 | `geo-intercontinental` | `intercontinental` | 75–340ms | US / EU / Asia / South America |
 
 Topology is automatically applied before and cleared after each run.
+Diesis geo profiles use a benchmarked `750ms` block period, `240ms` ordering
+window, `100ms` minimum round delay, and `480ms` leader timeout for the
+60-240ms RTT profiles. The intercontinental profile keeps wider timing margins.
 
 ```bash
 # Single chain under global latency
