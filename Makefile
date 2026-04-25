@@ -1,9 +1,9 @@
 .PHONY: build test clippy fmt check help \
        bench bench-all compare compare-all \
        sweep sweep-all sweep-list \
-       diesis-up diesis-down diesis-restart diesis-status diesis-quick diesis-full diesis-tune \
        results results-latest results-compare results-summary \
-       chains
+       chains \
+       bytecode bytecode-check
 
 CARGO  := cargo
 HARNESS_MANIFEST := crates/evm-benchmark/Cargo.toml
@@ -49,6 +49,42 @@ check: ## Run fmt check, clippy, and tests
 	$(CARGO) fmt --all --check
 	$(MAKE) clippy
 	$(MAKE) test
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Benchmark contract bytecode
+# ══════════════════════════════════════════════════════════════════════════════
+# The Rust harness embeds creation bytecode for BenchmarkToken/Pair/NFT via
+# include_str! from crates/evm-benchmark/bytecode/*.hex. Those files are
+# regenerated from contracts/src/benchmark/*.sol via `make bytecode`. CI runs
+# `make bytecode-check` to fail if the committed .hex files have drifted from
+# what the current sources produce.
+
+CONTRACTS_DIR  := contracts
+BYTECODE_DIR   := crates/evm-benchmark/bytecode
+BYTECODE_NAMES := BenchmarkToken BenchmarkPair BenchmarkNFT
+
+bytecode: ## Regenerate Token/Pair/NFT bytecode from contracts/ into the harness embed dir
+	cd $(CONTRACTS_DIR) && forge build
+	@for name in $(BYTECODE_NAMES); do \
+	  jq -r '.bytecode.object' $(CONTRACTS_DIR)/out/$$name.sol/$$name.json \
+	    | sed 's/^0x//' | tr -d '\n' > $(BYTECODE_DIR)/$$name.hex; \
+	  echo "regenerated $(BYTECODE_DIR)/$$name.hex"; \
+	done
+
+bytecode-check: ## Fail if committed .hex files drifted from contracts/ source
+	@cd $(CONTRACTS_DIR) && forge build > /dev/null
+	@status=0; \
+	for name in $(BYTECODE_NAMES); do \
+	  fresh=$$(jq -r '.bytecode.object' $(CONTRACTS_DIR)/out/$$name.sol/$$name.json | sed 's/^0x//' | tr -d '\n'); \
+	  committed=$$(tr -d '\n' < $(BYTECODE_DIR)/$$name.hex); \
+	  if [ "$$fresh" != "$$committed" ]; then \
+	    echo "DRIFT: $(BYTECODE_DIR)/$$name.hex does not match contracts/src/benchmark/$$name.sol"; \
+	    echo "       run 'make bytecode' and commit the result"; \
+	    status=1; \
+	  fi; \
+	done; \
+	if [ $$status -eq 0 ]; then echo "bytecode-check: all .hex files in sync with contracts/"; fi; \
+	exit $$status
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Single-Chain Benchmarks
@@ -106,44 +142,6 @@ sweep-list: ## List available sweep profiles
 	@bash $(SCRIPTS)/sweep.sh --list
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Diesis Integration (shortcuts)
-# ══════════════════════════════════════════════════════════════════════════════
-
-DIESIS_REPO ?= $(abspath $(CURDIR)/../diesis)
-
-diesis-up: ## Start Diesis e2e cluster (release build)
-	$(MAKE) -C "$(DIESIS_REPO)" e2e-up-release
-
-diesis-down: ## Stop Diesis e2e cluster
-	$(MAKE) -C "$(DIESIS_REPO)" e2e-down
-
-diesis-restart: diesis-down diesis-up ## Clean restart Diesis cluster
-
-diesis-status: ## Check block heights on all Diesis validators
-	@for port in 8545 8555 8565 8575; do \
-		height=$$(curl -sf http://localhost:$$port \
-			-X POST -H "Content-Type: application/json" \
-			-d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | \
-			python3 -c "import sys,json; print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo "N/A"); \
-		echo "  :$$port -> block $$height"; \
-	done
-
-diesis-quick: build ## Quick Diesis burst benchmark (500 txs, no clean restart)
-	@$(MAKE) --no-print-directory bench CHAIN=diesis MODE=burst ENV=clean TXS=500 SENDERS=100 TAG=quick
-
-diesis-full: build ## Full Diesis benchmark suite (burst + sustained + ceiling)
-	@$(MAKE) --no-print-directory bench-all CHAIN=diesis ENV=clean
-
-diesis-tune: build ## Run all parameter sweeps against Diesis
-	@$(MAKE) --no-print-directory sweep-all
-
-diesis-geo: build ## Run Diesis benchmarks across all geo-latency profiles
-	@for geo in geo-global geo-us geo-eu geo-degraded geo-intercontinental; do \
-		echo ""; echo "═══ Diesis burst — $$geo ═══"; \
-		$(MAKE) --no-print-directory bench CHAIN=diesis MODE=burst ENV=$$geo TXS=$(TXS) SENDERS=$(SENDERS); \
-	done
-
-# ══════════════════════════════════════════════════════════════════════════════
 # Results Management
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -173,16 +171,15 @@ chains: ## List all registered chains
 
 help: ## Show this help
 	@echo ""
-	@echo "  Benchmark Suite — Diesis Performance Testing"
-	@echo "  ─────────────────────────────────────────────"
+	@echo "  EVM Benchmark Suite"
+	@echo "  ───────────────────"
 	@echo ""
 	@echo "  Quick start:"
-	@echo "    make diesis-up              # Start Diesis e2e cluster"
-	@echo "    make diesis-quick           # Quick 500-tx burst test"
-	@echo "    make bench                  # Full 10000-tx burst test"
-	@echo "    make bench MODE=ceiling     # Find max throughput"
-	@echo "    make compare                # Diesis vs Sonic head-to-head"
-	@echo "    make results                # List all results"
+	@echo "    make chains                          # List registered chains"
+	@echo "    make bench CHAIN=<chain>             # Run a 10000-tx burst against <chain>"
+	@echo "    make bench CHAIN=<chain> MODE=ceiling  # Find max throughput"
+	@echo "    make compare CHAINS=\"a b\"            # Head-to-head comparison"
+	@echo "    make results                         # List all results"
 	@echo ""
 	@grep -E '^[a-zA-Z0-9_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}'
