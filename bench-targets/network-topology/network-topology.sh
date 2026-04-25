@@ -427,7 +427,7 @@ cmd_layouts() {
                 [[ "$rtt" -gt "$max" ]] && max="$rtt"
             done
         done
-        echo "    RTT range: ${min}ms – ${max}ms"
+        echo "    RTT range: ${min}ms - ${max}ms"
         echo ""
     done
 }

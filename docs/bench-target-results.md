@@ -40,7 +40,7 @@ latencies. Latency is verified by pinging between nodes before each geo benchmar
 | Cosmos (Evmos) | 134 | 3,871ms | 4,118ms | 4,444ms | 100% |
 | Avalanche | 89 | 10,483ms | 18,518ms | 22,551ms | 100% |
 
-### Geo-US (20–60ms RTT — simulated US-distributed)
+### Geo-US (20-60ms RTT — simulated US-distributed)
 
 | Chain | Confirmed TPS | p50 | p95 | p99 | Confirmed |
 |-------|-------------:|----:|----:|----:|----------:|
@@ -50,7 +50,7 @@ latencies. Latency is verified by pinging between nodes before each geo benchmar
 | BSC | 235 | 5,751ms | 5,909ms | 8,472ms | 100% |
 | Cosmos (Evmos) | 141 | 3,660ms | 3,905ms | 4,182ms | 100% |
 
-### Geo-Global (60–240ms RTT — US / EU / Asia spread)
+### Geo-Global (60-240ms RTT — US / EU / Asia spread)
 
 | Chain | Confirmed TPS | p50 | p95 | p99 | Confirmed |
 |-------|-------------:|----:|----:|----:|----------:|
@@ -91,5 +91,5 @@ latencies. Latency is verified by pinging between nodes before each geo benchmar
 - Under geo-global latency, Sei achieves higher TPS than Diesis. Sei's tendermint consensus is well-suited for predictable high-latency environments; Diesis's DAG construction overhead is proportionally larger at 240ms RTT.
 - Berachain does not have geo-latency topology mappings configured. Berachain uses Kurtosis for orchestration, which requires manual startup.
 - BSC uses pre-Luban genesis (no BLS keys) for simplicity. Block time is 3 seconds. BSC geo results show minimal TPS variance (~2%) because Parlia's 3-second block time dominates over the added network latency.
-- Cosmos (Evmos) runs as a single-validator node (v20.0.0). The `evmosd testnet start` multi-validator in-process mode has a known bug where the port pool is never populated, making it non-functional in Docker. Geo benchmarks run without network topology simulation (single-node chains have no inter-validator consensus latency). TPS is stable (~134–158) across all geo profiles.
+- Cosmos (Evmos) runs as a single-validator node (v20.0.0). The `evmosd testnet start` multi-validator in-process mode has a known bug where the port pool is never populated, making it non-functional in Docker. Geo benchmarks run without network topology simulation (single-node chains have no inter-validator consensus latency). TPS is stable (~134-158) across all geo profiles.
 - Avalanche C-Chain block time is ~2 seconds. Only 2,000 txs run over a 5-node cluster.

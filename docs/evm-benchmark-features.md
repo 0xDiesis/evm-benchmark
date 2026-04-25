@@ -221,7 +221,7 @@ Detected ceiling at 280 TPS (step 3)
 
 ### 2. Saturation Confidence Score
 
-Analyzes variance across the final three ramp samples near saturation to estimate how reliable the measured ceiling is. Returns a 0–1 confidence score with low/high band estimates.
+Analyzes variance across the final three ramp samples near saturation to estimate how reliable the measured ceiling is. Returns a 0-1 confidence score with low/high band estimates.
 
 **How It Works:**
 - Collects TPS measurements from the last 3 ramp steps leading up to saturation
@@ -254,7 +254,7 @@ cargo run -p evm-benchmark -- --execution ceiling --out report.json
 Ceiling TPS:      450
 Confidence Score: 82% ← indicates measured value is reliable
   Band (low):     421 TPS
-  Band (high):    479 TPS  ← "true ceiling likely between 421–479 TPS"
+  Band (high):    479 TPS  ← "true ceiling likely between 421-479 TPS"
 Pending Ratio:    1.2%
 Error Rate:       0.0%
 ```
@@ -279,8 +279,8 @@ Configurable exponential backoff + random jitter for transaction submission. Cho
 **Examples:**
 ```
 Attempt 1: failed, retry immediately (attempt 1 has 0 delay)
-Attempt 2: wait 10–20ms (light), 20–40ms (moderate), 30–60ms (aggressive)
-Attempt 3: wait 20–40ms (light), 40–80ms (moderate), 60–120ms (aggressive)
+Attempt 2: wait 10-20ms (light), 20-40ms (moderate), 30-60ms (aggressive)
+Attempt 3: wait 20-40ms (light), 40-80ms (moderate), 60-120ms (aggressive)
 Attempt 4+: exponential growth with jitter
 ```
 

@@ -238,11 +238,11 @@ Applies network topology simulation before benchmarking using Linux TC (traffic 
 
 | Mode | Profile | RTT Range | Scenario |
 |------|---------|-----------|----------|
-| `geo-global` | `global-spread` | 60–240ms | US-East / US-West / EU-Frankfurt / Asia-Tokyo |
-| `geo-us` | `us-distributed` | 20–60ms | Four US regions |
-| `geo-eu` | `eu-cluster` | 2–90ms | 3 EU co-located + 1 US outlier |
-| `geo-degraded` | `degraded-wan` | 80–200ms | Congested network, high jitter |
-| `geo-intercontinental` | `intercontinental` | 75–340ms | US / EU / Asia / South America |
+| `geo-global` | `global-spread` | 60-240ms | US-East / US-West / EU-Frankfurt / Asia-Tokyo |
+| `geo-us` | `us-distributed` | 20-60ms | Four US regions |
+| `geo-eu` | `eu-cluster` | 2-90ms | 3 EU co-located + 1 US outlier |
+| `geo-degraded` | `degraded-wan` | 80-200ms | Congested network, high jitter |
+| `geo-intercontinental` | `intercontinental` | 75-340ms | US / EU / Asia / South America |
 
 Topology is automatically applied before and cleared after each run.
 Diesis geo profiles use a benchmarked `750ms` block period, `240ms` ordering
@@ -266,9 +266,9 @@ View with `make chains`. Currently registered:
 
 | Chain | Type | Validators | Port Range |
 |-------|------|------------|------------|
-| `diesis` | L1 — Mysticeti BFT | 4 | 8545–8575 |
-| `sonic` | L1 — Lachesis aBFT | 4 | 18545–18845 |
-| `sei` | L1 — sei-tendermint BFT | 4 | 28545–28551 |
+| `diesis` | L1 — Mysticeti BFT | 4 | 8545-8575 |
+| `sonic` | L1 — Lachesis aBFT | 4 | 18545-18845 |
+| `sei` | L1 — sei-tendermint BFT | 4 | 28545-28551 |
 | `avalanche` | L1 — Snowman consensus | 5 | 9650 |
 | `berachain` | L1 — CometBFT + beacon-kit | 4 | dynamic |
 | `reth` | Reference EVM (reth --dev) | 1 | 38545 |
