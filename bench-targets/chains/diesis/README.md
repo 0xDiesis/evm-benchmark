@@ -2,11 +2,11 @@
 
 This target adapter runs the chain-agnostic benchmark harness against a Diesis network.
 
-For Diesis-specific performance tuning, sweeps, and operational playbooks, see `../../../../diesis/docs/benchmarking.md` in the Diesis repository.
+Operational playbooks for the Diesis chain (cluster bring-up, sweeps, geo profiles) require the Diesis source repository. If you have access, set `DIESIS_REPO_DIR` to its path; otherwise, scripts in this directory will exit with a clear error.
 
 ## Assumptions
 
-- `evm-benchmark/` and `diesis/` live side by side
+- If you have a checkout of the Diesis source repository, place it at `../diesis/` (or set `DIESIS_REPO_DIR` to its path). Without it, only the chain-targeting scripts that talk to an already-running cluster will work.
 - Diesis e2e validators expose RPC on `8545, 8555, 8565, 8575`
 - The default benchmark keys are the deterministic validator keys from Diesis genesis
 

@@ -4,10 +4,20 @@ SCRIPT_DIR := $(shell cd "$(dir $(lastword $(MAKEFILE_LIST)))" && pwd)
 BENCH_REPO_DIR := $(shell cd "$(SCRIPT_DIR)/../../.." && pwd)
 DIESIS_REPO_DIR ?= $(abspath $(BENCH_REPO_DIR)/../diesis)
 
-up: ## Start the Diesis e2e cluster via the sibling diesis repo
+up: ## Start the Diesis e2e cluster (requires the Diesis source repo at $(DIESIS_REPO_DIR))
+	@if [ ! -d "$(DIESIS_REPO_DIR)" ]; then \
+	  echo "ERROR: Diesis source repo not found at $(DIESIS_REPO_DIR)."; \
+	  echo "       Set DIESIS_REPO_DIR to a checkout of the Diesis repository,"; \
+	  echo "       or bring up your own Diesis cluster manually before running benchmarks."; \
+	  exit 2; \
+	fi
 	$(MAKE) -C "$(DIESIS_REPO_DIR)" e2e-up-release
 
-down: ## Stop the Diesis e2e cluster via the sibling diesis repo
+down: ## Stop the Diesis e2e cluster (requires the Diesis source repo at $(DIESIS_REPO_DIR))
+	@if [ ! -d "$(DIESIS_REPO_DIR)" ]; then \
+	  echo "ERROR: Diesis source repo not found at $(DIESIS_REPO_DIR)."; \
+	  exit 2; \
+	fi
 	$(MAKE) -C "$(DIESIS_REPO_DIR)" e2e-down
 
 restart: down up ## Restart the Diesis e2e cluster

@@ -14,6 +14,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIESIS_REPO_ROOT="${DIESIS_REPO_ROOT:-${BENCH_REPO_ROOT}/../diesis}"
+
+# Diesis chain tests require the Diesis source repo. Skip them if not present.
+if [[ ! -d "${DIESIS_REPO_ROOT}" ]]; then
+    echo "WARNING: Diesis source repo not found at ${DIESIS_REPO_ROOT}; diesis-chain tests will fail." >&2
+    echo "         Set DIESIS_REPO_ROOT to a Diesis checkout, or run only non-diesis chain tests." >&2
+fi
+
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_DIR="${SCRIPT_DIR}/results/suite_${TIMESTAMP}"
 mkdir -p "$RUN_DIR"

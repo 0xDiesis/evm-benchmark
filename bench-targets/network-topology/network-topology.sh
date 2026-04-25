@@ -27,7 +27,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-$(cd "${BENCH_REPO_DIR}/../diesis" && pwd)}"
+# DIESIS_REPO_DIR points at the (private) Diesis source repo for compose files and
+# cluster lifecycle. Falls back to the conventional sibling layout when unset.
+DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-${BENCH_REPO_DIR}/../diesis}"
+if [[ ! -d "${DIESIS_REPO_DIR}" ]]; then
+    echo "ERROR: this script requires the Diesis source repo at \${DIESIS_REPO_DIR}." >&2
+    echo "       Not found at: ${DIESIS_REPO_DIR}" >&2
+    echo "       Set DIESIS_REPO_DIR to a Diesis checkout and re-run." >&2
+    exit 2
+fi
 
 # Default Diesis e2e node mapping (override with env vars for other chains)
 NODE1_CONTAINER="${NODE1_CONTAINER:-diesis-e2e-node-1}"

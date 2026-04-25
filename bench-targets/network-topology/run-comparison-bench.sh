@@ -11,7 +11,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_REPO="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-$(cd "${BENCH_REPO}/../diesis" && pwd)}"
+# DIESIS_REPO_DIR points at the (private) Diesis source repo for compose files and
+# cluster lifecycle. Falls back to the conventional sibling layout when unset.
+DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-${BENCH_REPO}/../diesis}"
+if [[ ! -d "${DIESIS_REPO_DIR}" ]]; then
+    echo "ERROR: this script requires the Diesis source repo at \${DIESIS_REPO_DIR}." >&2
+    echo "       Not found at: ${DIESIS_REPO_DIR}" >&2
+    echo "       Set DIESIS_REPO_DIR to a Diesis checkout and re-run." >&2
+    exit 2
+fi
 TOPOLOGY_SCRIPT="${SCRIPT_DIR}/network-topology.sh"
 LAYOUT="${1:-global-spread}"
 RESULTS_DIR="${BENCH_REPO}/bench-targets/results/topology-bench"

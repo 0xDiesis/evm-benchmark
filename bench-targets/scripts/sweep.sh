@@ -13,6 +13,14 @@ fi
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
+# Sweeps drive the local Diesis cluster; require the source repo.
+if [[ ! -d "${DIESIS_REPO_DIR}" ]]; then
+    echo "ERROR: Diesis source repo not found at ${DIESIS_REPO_DIR}." >&2
+    echo "       Sweeps require a Diesis checkout to bring the cluster up between runs." >&2
+    echo "       Set DIESIS_REPO_DIR=<path-to-diesis> or skip sweep mode." >&2
+    exit 2
+fi
+
 # Source sweep profiles
 if [[ ! -f "${SCRIPT_DIR}/sweep-profiles.sh" ]]; then
     echo "ERROR: sweep-profiles.sh not found at ${SCRIPT_DIR}/sweep-profiles.sh" >&2; exit 1

@@ -12,6 +12,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIESIS_REPO_ROOT="${DIESIS_REPO_ROOT:-${BENCH_REPO_ROOT}/../diesis}"
+if [[ ! -d "${DIESIS_REPO_ROOT}" ]]; then
+    echo "ERROR: this script requires the Diesis source repo at \${DIESIS_REPO_ROOT}." >&2
+    echo "       Not found at: ${DIESIS_REPO_ROOT}" >&2
+    echo "       Set DIESIS_REPO_ROOT to a Diesis checkout and re-run." >&2
+    exit 2
+fi
 RESULTS_DIR="${SCRIPT_DIR}/results"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RUN_DIR="${RESULTS_DIR}/${TIMESTAMP}"
