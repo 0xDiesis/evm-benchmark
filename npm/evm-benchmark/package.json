@@ -1,6 +1,6 @@
 {
   "name": "@0xdiesis/evm-benchmark",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "High-performance EVM load testing harness — chain-agnostic, pre-built binary",
   "license": "MIT",
   "repository": {

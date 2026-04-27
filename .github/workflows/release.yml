@@ -83,6 +83,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -90,7 +91,13 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Upgrade npm to a version with OIDC trusted publishing support
+        run: npm install -g npm@latest
+
+      - name: Sync package version with release tag
+        working-directory: npm/evm-benchmark
+        run: npm pkg set version="${GITHUB_REF_NAME#v}"
+
       - name: Publish @0xdiesis/evm-benchmark
-        run: cd npm/evm-benchmark && npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: npm/evm-benchmark
+        run: npm publish --access public --provenance
