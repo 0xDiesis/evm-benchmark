@@ -88,11 +88,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
-
-      - name: Upgrade npm to a version with OIDC trusted publishing support
-        run: npm install -g npm@latest
 
       - name: Sync package version with release tag
         working-directory: npm/evm-benchmark
