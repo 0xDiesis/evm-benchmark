@@ -306,6 +306,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_write_report_includes_ceiling_cost_efficiency_and_replay_manifest() {
         let _guard = ENV_LOCK.lock().unwrap();
         let mut config = make_test_config();
@@ -395,6 +396,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_write_report_uses_env_gas_price_when_argument_missing() {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {
@@ -428,6 +430,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_write_report_skips_cost_efficiency_for_zero_gas_price() {
         let _guard = ENV_LOCK.lock().unwrap();
         unsafe {

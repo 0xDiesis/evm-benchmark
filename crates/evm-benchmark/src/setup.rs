@@ -427,6 +427,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_download_targets_uses_default_branch_and_public_wrapper() {
         let _guard = TEST_ARCHIVE_LOCK.lock().unwrap();
         let server = MockServer::start().await;
@@ -447,6 +448,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_download_targets_uses_explicit_branch() {
         let _guard = TEST_ARCHIVE_LOCK.lock().unwrap();
         let server = MockServer::start().await;

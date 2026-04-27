@@ -679,12 +679,11 @@ mod tests {
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string()
-                    .into(),
+                    .to_string(),
             ),
             vec![
-                Message::Ping(vec![1, 2, 3].into()),
-                Message::Text(new_head.to_string().into()),
+                Message::Ping(vec![1, 2, 3]),
+                Message::Text(new_head.to_string()),
             ],
             Duration::from_millis(250),
         )
@@ -717,8 +716,7 @@ mod tests {
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "denied"}})
-                    .to_string()
-                    .into(),
+                    .to_string(),
             ),
             Vec::new(),
             Duration::from_millis(50),
@@ -748,8 +746,7 @@ mod tests {
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string()
-                    .into(),
+                    .to_string(),
             ),
             Vec::new(),
             Duration::from_millis(125),
@@ -777,7 +774,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_ws_raw_accepts_non_text_subscription_confirmation() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Ping(vec![7].into()),
+            Message::Ping(vec![7]),
             Vec::new(),
             Duration::from_millis(125),
         )
@@ -809,8 +806,7 @@ mod tests {
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string()
-                    .into(),
+                    .to_string(),
             ),
             vec![Message::Close(None)],
             Duration::from_millis(25),
@@ -923,8 +919,7 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string()
-                    .into(),
+                    .to_string(),
             ),
             vec![Message::Text(
                 json!({
@@ -932,8 +927,7 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
                     "method": "eth_subscription",
                     "params": {"subscription": "0xsub", "result": {"number": "not-hex"}}
                 })
-                .to_string()
-                .into(),
+                .to_string(),
             )],
             Duration::from_millis(125),
         )
@@ -960,8 +954,7 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string()
-                    .into(),
+                    .to_string(),
             ),
             Vec::new(),
             Duration::from_millis(150),

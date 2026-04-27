@@ -772,6 +772,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_preflight_strict_and_non_strict_paths() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let strict_guard = EnvVarGuard::set("BENCH_PREFLIGHT_STRICT", "true");
@@ -805,6 +806,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_preflight_non_strict_chain_mismatch_warns_and_continues() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let strict_guard = EnvVarGuard::set("BENCH_PREFLIGHT_STRICT", "false");
@@ -822,6 +824,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_preflight_strict_low_balance_errors() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let strict_guard = EnvVarGuard::set("BENCH_PREFLIGHT_STRICT", "true");
@@ -840,6 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_run_preflight_ignores_missing_chain_id_result_and_empty_senders() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let strict_guard = EnvVarGuard::set("BENCH_PREFLIGHT_STRICT", "true");
@@ -870,6 +874,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_runtime_deps_real_exercises_download_and_runtime_wrappers() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let bench_key_guard = EnvVarGuard::set("BENCH_KEY", "");
@@ -962,6 +967,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_runtime_download_targets_covers_test_and_real_paths() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let temp = temp_dir("evm-bench-runtime-download");
@@ -1276,6 +1282,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_async_main_surfaces_preflight_errors() {
         let _guard = test_lock().lock().expect("lock poisoned");
         let server = MockServer::start().await;

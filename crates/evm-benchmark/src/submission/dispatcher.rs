@@ -131,7 +131,7 @@ mod tests {
                     .expect("ws request should be valid json");
                 let response = handler(request);
                 socket
-                    .send(Message::Text(response.to_string().into()))
+                    .send(Message::Text(response.to_string()))
                     .await
                     .expect("failed to send ws response");
             }

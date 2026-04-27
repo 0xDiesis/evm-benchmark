@@ -1396,6 +1396,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_fund_senders_full_happy_path() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
@@ -1408,6 +1409,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_fund_senders_batch_submission_error() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
@@ -1422,6 +1424,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_fund_senders_receipt_revert_error() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
@@ -1436,6 +1439,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_fund_senders_confirm_timeout_error() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
@@ -1450,6 +1454,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_fund_senders_retry_path_succeeds() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
@@ -1465,6 +1470,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_fund_senders_retry_timeout_returns_ok_with_warning() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");

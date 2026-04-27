@@ -1005,15 +1005,14 @@ mod tests {
         Mock::given(method("POST"))
             .respond_with(|request: &Request| {
                 let method = rpc_method(request).expect("rpc method");
-                let response = if method == "eth_blockNumber" {
+                if method == "eth_blockNumber" {
                     ResponseTemplate::new(200).set_body_string("not-json")
                 } else {
                     ResponseTemplate::new(200).set_body_json(receipt_response_with_block(
                         "0x0000000000000000000000000000000000000000000000000000000000000001",
                         "0x1",
                     ))
-                };
-                response
+                }
             })
             .mount(&mock_server)
             .await;
@@ -1255,15 +1254,13 @@ mod tests {
                         "eth_getTransactionReceipt",
                     ],
                 );
-                let response = if method == "eth_blockNumber" {
+                if method == "eth_blockNumber" {
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": 1,
                         "result": "0x3"
                     }))
-                } else if method == "eth_gasPrice" {
-                    ResponseTemplate::new(200).set_body_json(balance_response("0x1"))
-                } else if method == "eth_getBalance" {
+                } else if method == "eth_gasPrice" || method == "eth_getBalance" {
                     ResponseTemplate::new(200).set_body_json(balance_response("0x1"))
                 } else if method == "eth_getTransactionCount" {
                     ResponseTemplate::new(200).set_body_json(balance_response("0x0"))
@@ -1275,8 +1272,7 @@ mod tests {
                         let hash = body["params"][0].as_str().unwrap_or_default().to_string();
                         ResponseTemplate::new(200).set_body_json(receipt_response(&hash))
                     }
-                };
-                response
+                }
             })
             .mount(&mock_server)
             .await;
@@ -1397,7 +1393,7 @@ mod tests {
                         "eth_getTransactionCount",
                     ],
                 );
-                let response = if method == "eth_blockNumber" {
+                if method == "eth_blockNumber" {
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": 1,
@@ -1409,8 +1405,7 @@ mod tests {
                     ResponseTemplate::new(200).set_body_json(balance_response("0xde0b6b3a7640000"))
                 } else {
                     ResponseTemplate::new(200).set_body_json(balance_response("0x0"))
-                };
-                response
+                }
             })
             .mount(&mock_server)
             .await;
@@ -1517,7 +1512,7 @@ mod tests {
                         "eth_getTransactionReceipt",
                     ],
                 );
-                let response = if method == "eth_blockNumber" {
+                if method == "eth_blockNumber" {
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": 1,
@@ -1532,8 +1527,7 @@ mod tests {
                 } else {
                     let hash = body["params"][0].as_str().unwrap_or_default().to_string();
                     ResponseTemplate::new(200).set_body_json(receipt_response(&hash))
-                };
-                response
+                }
             })
             .mount(&mock_server)
             .await;
@@ -1706,7 +1700,7 @@ mod tests {
     #[test]
     fn test_single_key_env() {
         let bench_key_env = "0xdeadbeef".to_string();
-        let sender_keys = vec![bench_key_env];
+        let sender_keys = [bench_key_env];
         assert_eq!(sender_keys.len(), 1);
         assert_eq!(sender_keys[0], "0xdeadbeef");
     }

@@ -272,7 +272,7 @@ mod tests {
                             .push(request.clone());
                         let response = handler(request);
                         socket
-                            .send(Message::Text(response.to_string().into()))
+                            .send(Message::Text(response.to_string()))
                             .await
                             .expect("failed to send ws response");
                     }
@@ -676,7 +676,7 @@ mod tests {
             .await
             .expect("manual ws client should connect");
         client
-            .send(Message::Ping(vec![9, 9].into()))
+            .send(Message::Ping(vec![9, 9]))
             .await
             .expect("manual ws client should send ping");
         let next_message = client
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(next_message.into_data().to_vec(), vec![9, 9]);
 
         client
-            .send(Message::Binary(vec![1, 2, 3].into()))
+            .send(Message::Binary(vec![1, 2, 3]))
             .await
             .expect("manual ws client should send binary");
         client
