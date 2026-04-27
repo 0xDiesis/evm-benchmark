@@ -187,12 +187,10 @@ mod tests {
     fn test_from_anyhow_error() {
         let anyhow_err = anyhow::anyhow!("something went wrong");
         let bench_err: BenchError = anyhow_err.into();
-        match bench_err {
-            BenchError::InternalError(msg) => {
-                assert!(msg.contains("something went wrong"));
-            }
-            other => panic!("Expected InternalError, got: {other}"),
-        }
+        assert!(matches!(
+            &bench_err,
+            BenchError::InternalError(msg) if msg.contains("something went wrong")
+        ));
     }
 
     #[tokio::test]
@@ -200,12 +198,10 @@ mod tests {
         let result = retry_with_backoff(|| Box::pin(async { Ok::<i32, BenchError>(99) }), 0).await;
 
         // With 0 attempts the loop body never runs, so we hit the fallback InternalError.
-        match result {
-            Err(BenchError::InternalError(msg)) => {
-                assert!(msg.contains("retry loop exited unexpectedly"));
-            }
-            other => panic!("Expected InternalError for 0 attempts, got: {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(BenchError::InternalError(msg)) if msg.contains("retry loop exited unexpectedly")
+        ));
     }
 
     #[tokio::test]
@@ -277,6 +273,24 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "RPC error: persistent");
         assert_eq!(attempt_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_retry_with_backoff_returns_final_error_variant() {
+        let result = retry_with_backoff(
+            || {
+                Box::pin(async {
+                    Err::<i32, _>(BenchError::SubmissionError("nonce gap".to_string()))
+                })
+            },
+            2,
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(BenchError::SubmissionError(msg)) if msg == "nonce gap"
+        ));
     }
 
     #[test]

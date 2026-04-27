@@ -2,8 +2,7 @@ use crate::types::SignedTxWithMetadata;
 use anyhow::Result;
 use rand::Rng;
 use reqwest::Client;
-#[allow(unused_imports)]
-use tracing::error;
+use tracing::debug;
 
 #[derive(Clone, Copy, Debug)]
 struct RetryProfile {
@@ -117,17 +116,17 @@ impl RpcSubmitter {
         }
 
         let elapsed = start.elapsed();
-        if !cfg!(test) {
-            println!(
-                "Warm-up complete: {} requests in {:.2}ms",
-                dummy_request_count,
-                elapsed.as_millis()
-            );
-        }
+        debug!(requests = dummy_request_count, elapsed_ms = elapsed.as_millis() as u64, "RPC warm-up complete");
         Ok(())
     }
 
     pub async fn submit_batch(&self, txs: Vec<SignedTxWithMetadata>) -> Result<SubmissionResult> {
+        // Unit tests use a sentinel scheme to exercise dispatcher-level failover branches
+        // without relying on malformed client state or external transport faults.
+        if self.rpc_url.scheme() == "testerr" {
+            anyhow::bail!("forced rpc submitter error");
+        }
+
         // Send all sub-batches concurrently to saturate the RPC endpoint.
         use futures::future::join_all;
 
@@ -152,9 +151,7 @@ impl RpcSubmitter {
                         retry_profile: self_retry,
                     };
                     sub.submit_batch_jsonrpc(&chunk).await.unwrap_or_else(|e| {
-                        if !cfg!(test) {
-                            eprintln!("RPC batch error: {}", e);
-                        }
+                        debug!(error = %e, chunk_len = chunk.len(), "RPC batch error");
                         SubmissionResult {
                             submitted: 0,
                             errors: chunk.len() as u32,
@@ -293,8 +290,8 @@ impl RpcSubmitter {
                     .and_then(|m| m.as_str())
                     .unwrap_or("unknown error")
                     .to_string();
-                if !cfg!(test) && seen_errors.len() < 3 && seen_errors.insert(err_msg.clone()) {
-                    eprintln!("[RPC] tx[{:?}] error: {}", tx_idx, err_msg);
+                if seen_errors.len() < 3 && seen_errors.insert(err_msg.clone()) {
+                    debug!(tx_idx = ?tx_idx, error = %err_msg, "RPC tx rejected");
                 }
                 if let Some(idx) = tx_idx
                     && err_msg.contains("txpool is full")
@@ -322,6 +319,8 @@ mod tests {
     use crate::types::TransactionType;
     use alloy_primitives::B256;
     use std::time::Instant;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -338,6 +337,76 @@ mod tests {
         }
     }
 
+    async fn start_raw_http_server(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (url::Url, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind http test server");
+        let addr = listener
+            .local_addr()
+            .expect("failed to read http test server address");
+
+        let task = tokio::spawn(async move {
+            for (status, body) in responses {
+                let (mut stream, _) = listener
+                    .accept()
+                    .await
+                    .expect("failed to accept http client");
+                let mut request_bytes = Vec::new();
+                let mut buf = [0u8; 1024];
+
+                loop {
+                    let read = stream
+                        .read(&mut buf)
+                        .await
+                        .expect("request should be readable");
+                    assert!(read > 0, "client closed before request completed");
+                    request_bytes.extend_from_slice(&buf[..read]);
+
+                    if let Some(header_end) =
+                        request_bytes.windows(4).position(|w| w == b"\r\n\r\n")
+                    {
+                        let headers = &request_bytes[..header_end + 4];
+                        let header_text = String::from_utf8_lossy(headers).to_string();
+                        let content_length = header_text
+                            .lines()
+                            .find_map(|line| {
+                                line.strip_prefix("Content-Length: ")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        let total_needed = header_end + 4 + content_length;
+
+                        let mut remaining =
+                            vec![0u8; total_needed.saturating_sub(request_bytes.len())];
+                        stream
+                            .read_exact(&mut remaining)
+                            .await
+                            .expect("request body should be readable");
+                        request_bytes.extend_from_slice(&remaining); break; }
+                }
+
+                let reason = reqwest::StatusCode::from_u16(status)
+                    .ok()
+                    .and_then(|status| status.canonical_reason())
+                    .unwrap_or("Test Status");
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("response should be writable");
+            }
+        });
+
+        let url =
+            url::Url::parse(&format!("http://{addr}")).expect("failed to parse http test url");
+        (url, task)
+    }
+
     #[test]
     fn test_submitter_creation() {
         let url = url::Url::parse("http://localhost:8545").expect("failed to parse url");
@@ -350,6 +419,43 @@ mod tests {
         let url = url::Url::parse("http://localhost:8545").expect("failed to parse url");
         let submitter = RpcSubmitter::new(&url, 50).expect("failed to create submitter");
         assert_eq!(submitter.batch_size, 50);
+    }
+
+    #[test]
+    fn test_retry_profile_variants_and_delay_edges() {
+        let moderate = RetryProfile::from_name("moderate");
+        assert_eq!(moderate.max_attempts, 4);
+        assert_eq!(moderate.base_backoff_ms, 20);
+        assert_eq!(moderate.jitter_ms, 20);
+
+        let aggressive = RetryProfile::from_name("aggressive");
+        assert_eq!(aggressive.max_attempts, 5);
+        assert_eq!(aggressive.base_backoff_ms, 30);
+        assert_eq!(aggressive.jitter_ms, 40);
+
+        let off = RetryProfile::from_name("off");
+        assert_eq!(
+            off.delay_for_attempt(1),
+            std::time::Duration::from_millis(0)
+        );
+        assert_eq!(
+            off.delay_for_attempt(3),
+            std::time::Duration::from_millis(0)
+        );
+
+        let exact = RetryProfile {
+            max_attempts: 2,
+            base_backoff_ms: 12,
+            jitter_ms: 0,
+        };
+        assert_eq!(
+            exact.delay_for_attempt(2),
+            std::time::Duration::from_millis(12)
+        );
+        assert_eq!(
+            exact.delay_for_attempt(4),
+            std::time::Duration::from_millis(48)
+        );
     }
 
     /// Verify the batch JSON body format matches what geth/reth expects.
@@ -645,5 +751,85 @@ mod tests {
         assert_eq!(result.submitted, 0);
         assert_eq!(result.errors, 2);
         assert!(result.hashes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_retries_on_503_then_succeeds() {
+        let (url, server_task) = start_raw_http_server(vec![
+            (
+                503,
+                r#"{"jsonrpc":"2.0","id":0,"error":{"code":-32000,"message":"busy"}}"#,
+            ),
+            (200, r#"[{"jsonrpc":"2.0","id":0,"result":"0xaaaa"}]"#),
+        ])
+        .await;
+        let submitter = RpcSubmitter::with_retry_profile(&url, 100, "light")
+            .expect("failed to create submitter");
+
+        let result = submitter
+            .submit_batch(vec![make_test_tx(0)])
+            .await
+            .expect("submit_batch should retry overloaded status");
+
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.hashes, vec!["0xaaaa"]);
+
+        server_task
+            .await
+            .expect("http retry server task should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_request_failure_returns_chunk_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to reserve unused tcp port");
+        let addr = listener
+            .local_addr()
+            .expect("failed to read unused tcp port");
+        drop(listener);
+
+        let url = url::Url::parse(&format!("http://{addr}")).expect("failed to parse url");
+        let submitter = RpcSubmitter::with_retry_profile(&url, 100, "light")
+            .expect("failed to create submitter");
+
+        let result = submitter
+            .submit_batch(vec![make_test_tx(0), make_test_tx(1)])
+            .await
+            .expect("outer submit_batch should convert request failures into errors");
+
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.errors, 2);
+        assert!(result.hashes.is_empty());
+        assert!(result.accepted_txs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_large_body_requires_incremental_request_reads() {
+        let (url, server_task) = start_raw_http_server(vec![(
+            200,
+            r#"[{"jsonrpc":"2.0","id":0,"result":"0xdeadbeef"}]"#,
+        )])
+        .await;
+        let submitter = RpcSubmitter::new(&url, 1).expect("failed to create submitter");
+
+        let mut tx = make_test_tx(7);
+        tx.encoded = vec![0xab; 4096];
+
+        let result = submitter
+            .submit_batch(vec![tx.clone()])
+            .await
+            .expect("submit_batch should succeed with a large request body");
+
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.errors, 0);
+        assert_eq!(result.hashes, vec!["0xdeadbeef".to_string()]);
+        assert_eq!(result.accepted_txs.len(), 1);
+        assert_eq!(result.accepted_txs[0].hash, tx.hash);
+
+        server_task
+            .await
+            .expect("raw http server task should finish cleanly");
     }
 }

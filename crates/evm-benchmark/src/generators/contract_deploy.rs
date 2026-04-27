@@ -8,6 +8,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use std::str::FromStr;
+use std::time::Duration;
 
 /// Addresses of deployed benchmark contracts.
 #[derive(Clone, Debug)]
@@ -37,6 +38,31 @@ async fn deploy_one(
     gas_price: u128,
     nonce: u64,
     bytecode: &[u8],
+) -> Result<(Address, u64)> {
+    deploy_one_with_polling(
+        client,
+        rpc_url,
+        deployer,
+        chain_id,
+        gas_price,
+        nonce,
+        bytecode,
+        120,
+        Duration::from_millis(500),
+    )
+    .await
+}
+
+async fn deploy_one_with_polling(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    deployer: &PrivateKeySigner,
+    chain_id: u64,
+    gas_price: u128,
+    nonce: u64,
+    bytecode: &[u8],
+    max_receipt_polls: usize,
+    poll_interval: Duration,
 ) -> Result<(Address, u64)> {
     use alloy_consensus::{SignableTransaction, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
@@ -72,8 +98,8 @@ async fn deploy_one(
     }
 
     // Wait for receipt
-    for _ in 0..120 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    for _ in 0..max_receipt_polls {
+        tokio::time::sleep(poll_interval).await;
         let receipt_payload = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "eth_getTransactionReceipt",
@@ -95,6 +121,20 @@ async fn deploy_one(
     )
 }
 
+fn pair_bytecode_with_args(pair_bytecode: &[u8], token_a: Address, token_b: Address) -> Vec<u8> {
+    let mut bytecode_with_args = pair_bytecode.to_vec();
+
+    let mut token_a_word = [0u8; 32];
+    token_a_word[12..].copy_from_slice(token_a.as_slice());
+    bytecode_with_args.extend_from_slice(&token_a_word);
+
+    let mut token_b_word = [0u8; 32];
+    token_b_word[12..].copy_from_slice(token_b.as_slice());
+    bytecode_with_args.extend_from_slice(&token_b_word);
+
+    bytecode_with_args
+}
+
 /// Deploy benchmark contracts for EVM testing.
 ///
 /// Deploys `token_count` ERC-20 tokens, `pair_count` AMM pairs (each referencing
@@ -109,6 +149,10 @@ pub async fn deploy_contracts(
     nft_count: u32,
     quiet: bool,
 ) -> Result<EvmContracts> {
+    if pair_count > 0 && token_count == 0 {
+        anyhow::bail!("pair deployment requires at least one token")
+    }
+
     let client = reqwest::Client::builder()
         .pool_max_idle_per_host(10)
         .build()?;
@@ -161,15 +205,7 @@ pub async fn deploy_contracts(
     for i in 0..pair_count {
         let t0 = tokens[i as usize % tokens.len()];
         let t1 = tokens[(i as usize + 1) % tokens.len()];
-
-        // ABI-encode constructor args: (address, address)
-        let mut bytecode_with_args = pair_bc_raw.clone();
-        let mut t0_word = [0u8; 32];
-        t0_word[12..].copy_from_slice(t0.as_slice());
-        bytecode_with_args.extend_from_slice(&t0_word);
-        let mut t1_word = [0u8; 32];
-        t1_word[12..].copy_from_slice(t1.as_slice());
-        bytecode_with_args.extend_from_slice(&t1_word);
+        let bytecode_with_args = pair_bytecode_with_args(&pair_bc_raw, t0, t1);
 
         let (addr, next_nonce) = deploy_one(
             &client,
@@ -221,6 +257,17 @@ pub async fn deploy_contracts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_key() -> &'static str {
+        "0x0123456789012345678901234567890123456789012345678901234567890123"
+    }
+
+    fn test_signer() -> PrivateKeySigner {
+        PrivateKeySigner::from_str(test_key()).unwrap()
+    }
 
     #[test]
     fn test_evm_contracts_struct() {
@@ -257,5 +304,318 @@ mod tests {
         assert_eq!(cloned.tokens, contracts.tokens);
         assert_eq!(cloned.pairs, contracts.pairs);
         assert_eq!(cloned.nfts, contracts.nfts);
+    }
+
+    #[test]
+    fn test_pair_bytecode_with_args_appends_two_abi_words() {
+        let bytecode = vec![0xde, 0xad];
+        let token_a = Address::with_last_byte(0xaa);
+        let token_b = Address::with_last_byte(0xbb);
+        let mut expected_a = [0u8; 32];
+        expected_a[31] = 0xaa;
+        let mut expected_b = [0u8; 32];
+        expected_b[31] = 0xbb;
+
+        let encoded = pair_bytecode_with_args(&bytecode, token_a, token_b);
+
+        assert_eq!(encoded.len(), bytecode.len() + 64);
+        assert_eq!(&encoded[..2], &[0xde, 0xad]);
+        assert_eq!(&encoded[2..34], expected_a.as_slice());
+        assert_eq!(&encoded[34..66], expected_b.as_slice());
+    }
+
+    #[tokio::test]
+    async fn test_deploy_one_with_polling_returns_contract_address() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x1234",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "contractAddress": "0x00000000000000000000000000000000000000aa"
+                },
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let (address, next_nonce) = deploy_one_with_polling(
+            &client,
+            &server.uri(),
+            &test_signer(),
+            1,
+            1_000_000_000,
+            7,
+            &[0xde, 0xad],
+            1,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(address, Address::with_last_byte(0xaa));
+        assert_eq!(next_nonce, 8);
+    }
+
+    #[tokio::test]
+    async fn test_deploy_one_with_polling_surfaces_rpc_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32000, "message": "boom" },
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = deploy_one_with_polling(
+            &client,
+            &server.uri(),
+            &test_signer(),
+            1,
+            1_000_000_000,
+            0,
+            &[0xde, 0xad],
+            1,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("Contract deploy tx failed"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_one_with_polling_times_out_without_receipt() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x1234",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": null,
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = deploy_one_with_polling(
+            &client,
+            &server.uri(),
+            &test_signer(),
+            1,
+            1_000_000_000,
+            0,
+            &[0xde, 0xad],
+            2,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("Contract deploy receipt not found"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_one_with_polling_rejects_invalid_receipt_address() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x1234",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "contractAddress": "not-an-address"
+                },
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = deploy_one_with_polling(
+            &client,
+            &server.uri(),
+            &test_signer(),
+            1,
+            1_000_000_000,
+            0,
+            &[0xde, 0xad],
+            1,
+            Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string().contains("invalid"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_contracts_rejects_pairs_without_tokens() {
+        let err = deploy_contracts("http://localhost:8545", test_key(), 1, 0, 1, 0, true)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("pair deployment requires at least one token"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_contracts_rejects_invalid_deployer_key() {
+        let err = deploy_contracts("http://localhost:8545", "invalid-key", 1, 1, 0, 0, true)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("Failed to parse deployer key"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_contracts_errors_when_nonce_is_missing() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "eth_gasPrice"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x1",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let err = deploy_contracts(&server.uri(), test_key(), 1, 1, 0, 0, true)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("Failed to get deployer nonce"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deploy_contracts_deploys_token_pair_and_nft() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({"method": "eth_gasPrice"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x1",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_getTransactionCount"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x0",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_sendRawTransaction"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": "0x1234",
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                json!({"method": "eth_getTransactionReceipt"}),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "result": {
+                    "contractAddress": "0x00000000000000000000000000000000000000aa"
+                },
+                "id": 1
+            })))
+            .mount(&server)
+            .await;
+
+        let contracts = deploy_contracts(&server.uri(), test_key(), 1, 1, 1, 1, false)
+            .await
+            .unwrap();
+
+        assert_eq!(contracts.tokens, vec![Address::with_last_byte(0xaa)]);
+        assert_eq!(contracts.pairs, vec![Address::with_last_byte(0xaa)]);
+        assert_eq!(contracts.nfts, vec![Address::with_last_byte(0xaa)]);
     }
 }

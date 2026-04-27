@@ -463,6 +463,8 @@ pub fn compute_server_metrics(before: &MetricsMap, after: &MetricsMap) -> Option
 mod tests {
     use super::*;
     use crate::types::HistogramDelta;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_metrics_exporter_creation() {
@@ -680,6 +682,33 @@ mod tests {
         let map = parse_prometheus_text(text).expect("parse should succeed");
         assert_eq!(map.len(), 1);
         assert_eq!(map.get("valid_metric"), Some(&7.0));
+    }
+
+    #[test]
+    fn test_parse_prometheus_skips_lines_without_values() {
+        let text = "missing_value \nmissing_separator\nvalid_metric 11\n";
+        let map = parse_prometheus_text(text).expect("parse should succeed");
+        assert_eq!(map.get("valid_metric"), Some(&11.0));
+        assert!(!map.contains_key("missing_value"));
+        assert!(!map.contains_key("missing_separator"));
+    }
+
+    #[tokio::test]
+    async fn test_scrape_prometheus_fetches_metrics() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("# TYPE demo gauge\ndemo_metric{role=\"api\"} 7.5\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = Url::parse(&server.uri()).expect("invalid mock server url");
+        let metrics = scrape_prometheus(&url)
+            .await
+            .expect("scrape should succeed");
+        assert_eq!(metrics.get("demo_metric"), Some(&7.5));
     }
 
     #[test]

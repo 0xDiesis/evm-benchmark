@@ -329,6 +329,80 @@ pub fn restore_txs(cached: &TxCacheData) -> Result<Vec<SignedTxWithMetadata>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests serialize environment mutation via `env_lock`.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => {
+                    // SAFETY: tests serialize environment mutation via `env_lock`.
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize environment mutation via `env_lock`.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            ".{prefix}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ))
+    }
+
+    fn sample_cached_tx() -> CachedTx {
+        CachedTx {
+            hash: "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+            raw: "0xdead".to_string(),
+            nonce: 0,
+            gas_limit: 21_000,
+            tx_type: "SimpleTransfer".to_string(),
+        }
+    }
+
+    fn sample_cache_data(fingerprint: &str) -> TxCacheData {
+        TxCacheData {
+            version: 1,
+            fingerprint: fingerprint.to_string(),
+            chain_id: 1,
+            mode: "burst".to_string(),
+            sender_count: 1,
+            tx_count: 1,
+            gas_price: "1000000000".to_string(),
+            transactions: vec![sample_cached_tx()],
+        }
+    }
+
+    fn write_cache_file(dir: &std::path::Path, fingerprint: &str, data: &TxCacheData) {
+        let path = dir.join(format!("tx-cache-{fingerprint}.json"));
+        let json = serde_json::to_string_pretty(data).unwrap();
+        std::fs::write(path, json).unwrap();
+    }
 
     #[test]
     fn test_fingerprint_deterministic() {
@@ -458,17 +532,51 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_dir_uses_env_override() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-env-override");
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+        assert_eq!(cache_dir(), tmp);
+    }
+
+    #[test]
+    fn test_env_var_guard_restores_previous_cache_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let original = unique_temp_dir("tx-cache-original");
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::set_var("BENCH_TX_CACHE_DIR", &original) };
+        {
+            let override_dir = unique_temp_dir("tx-cache-override");
+            let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &override_dir);
+            assert_eq!(
+                std::env::var("BENCH_TX_CACHE_DIR").unwrap(),
+                override_dir.display().to_string()
+            );
+        }
+        assert_eq!(
+            std::env::var("BENCH_TX_CACHE_DIR").unwrap(),
+            original.display().to_string()
+        );
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::remove_var("BENCH_TX_CACHE_DIR") };
+    }
+
+    #[test]
     fn test_cache_path_includes_fingerprint() {
         let fp = "abcdef1234567890";
         let path = cache_path(fp);
         let filename = path.file_name().unwrap().to_str().unwrap();
-        assert!(
-            filename.contains(fp),
-            "path should contain fingerprint: {}",
-            path.display()
-        );
+        assert!(filename.contains(fp));
         assert!(filename.starts_with("tx-cache-"));
         assert!(filename.ends_with(".json"));
+    }
+
+    #[test]
+    fn test_try_load_from_nonexistent_returns_none() {
+        let tmp = unique_temp_dir("tx-cache-missing-explicit");
+        std::fs::create_dir_all(&tmp).unwrap();
+        assert!(try_load_from(&tmp, "no-such-cache", false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -523,6 +631,69 @@ mod tests {
         // version 2 is unsupported, should return None
         assert!(result.is_none());
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_from_read_error_not_quiet() {
+        let tmp = unique_temp_dir("tx-cache-read-error-explicit");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fp = "readerror";
+        let path = tmp.join(format!("tx-cache-{fp}.json"));
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(try_load_from(&tmp, fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_from_invalid_json_not_quiet() {
+        let tmp = unique_temp_dir("tx-cache-bad-json-explicit");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fp = "badjson";
+        let path = tmp.join(format!("tx-cache-{fp}.json"));
+        std::fs::write(&path, "{ definitely not json").unwrap();
+
+        assert!(try_load_from(&tmp, fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_from_wrong_version_not_quiet() {
+        let tmp = unique_temp_dir("tx-cache-wrong-version-explicit");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fp = "wrongversion";
+        let mut cache_data = sample_cache_data(fp);
+        cache_data.version = 2;
+        write_cache_file(&tmp, fp, &cache_data);
+
+        assert!(try_load_from(&tmp, fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_from_fingerprint_mismatch_not_quiet() {
+        let tmp = unique_temp_dir("tx-cache-mismatch-explicit");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lookup_fp = "lookup";
+        let cache_data = sample_cache_data("other");
+        write_cache_file(&tmp, lookup_fp, &cache_data);
+
+        assert!(try_load_from(&tmp, lookup_fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_from_empty_transactions_not_quiet() {
+        let tmp = unique_temp_dir("tx-cache-empty-explicit");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let fp = "empty";
+        let mut cache_data = sample_cache_data(fp);
+        cache_data.tx_count = 0;
+        cache_data.transactions.clear();
+        write_cache_file(&tmp, fp, &cache_data);
+
+        assert!(try_load_from(&tmp, fp, false).is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -830,6 +1001,35 @@ mod tests {
     }
 
     #[test]
+    fn test_try_load_invalid_json_public_api() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-badjson");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+
+        let fp = "publicbadjson12";
+        let path = tmp.join(format!("tx-cache-{fp}.json"));
+        std::fs::write(&path, "{{ definitely not json").unwrap();
+
+        assert!(try_load(fp, true).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_public_invalid_json_not_quiet() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-badjson-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+        let fp = "badjsonverbose";
+        let path = tmp.join(format!("tx-cache-{fp}.json"));
+        std::fs::write(&path, "{ invalid json").unwrap();
+
+        assert!(try_load(fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
     fn test_try_load_valid_cache_not_quiet() {
         let unique = format!("{}-{:?}", std::process::id(), std::thread::current().id());
         let tmp = std::env::temp_dir().join(format!(".tx-cache-test-notquiet-{unique}"));
@@ -864,6 +1064,190 @@ mod tests {
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().transactions.len(), 1);
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_directory_read_error_public_api() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-readerr");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+
+        let fp = "publicreaderror";
+        let path = tmp.join(format!("tx-cache-{fp}.json"));
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(try_load(fp, true).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_directory_read_error_public_api_not_quiet() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-readerr-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+
+        let fp = "publicreaderrorverbose";
+        let path = tmp.join(format!("tx-cache-{fp}.json"));
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(try_load(fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_public_wrong_version_not_quiet() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-version-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+        let fp = "publicversion";
+        let mut cache_data = sample_cache_data(fp);
+        cache_data.version = 9;
+        write_cache_file(&tmp, fp, &cache_data);
+
+        assert!(try_load(fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_public_fingerprint_mismatch_not_quiet() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-mismatch-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+        let lookup_fp = "publiclookup";
+        let cache_data = sample_cache_data("stale");
+        write_cache_file(&tmp, lookup_fp, &cache_data);
+
+        assert!(try_load(lookup_fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_public_empty_transactions_not_quiet() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-empty-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+        let fp = "publicempty";
+        let mut cache_data = sample_cache_data(fp);
+        cache_data.tx_count = 0;
+        cache_data.transactions.clear();
+        write_cache_file(&tmp, fp, &cache_data);
+
+        assert!(try_load(fp, false).is_none());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_try_load_public_success_not_quiet() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-public-success-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+        let fp = "publicsuccess";
+        let cache_data = sample_cache_data(fp);
+        write_cache_file(&tmp, fp, &cache_data);
+
+        let loaded = try_load(fp, false).expect("cache should load");
+        assert_eq!(loaded.fingerprint, fp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_save_and_try_load_public_roundtrip() {
+        use alloy_primitives::{Address, B256};
+        use std::time::Instant;
+
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-save-load-public");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+
+        let fp = "publicroundtrip1";
+        let txs = vec![
+            SignedTxWithMetadata {
+                hash: B256::with_last_byte(0x11),
+                encoded: vec![0xde, 0xad, 0xbe, 0xef],
+                nonce: 3,
+                gas_limit: 21_000,
+                sender: Address::with_last_byte(0x44),
+                submit_time: Instant::now(),
+                method: crate::types::TransactionType::SimpleTransfer,
+            },
+            SignedTxWithMetadata {
+                hash: B256::with_last_byte(0x22),
+                encoded: vec![0xca, 0xfe],
+                nonce: 4,
+                gas_limit: 65_000,
+                sender: Address::with_last_byte(0x55),
+                submit_time: Instant::now(),
+                method: crate::types::TransactionType::ERC20Transfer,
+            },
+        ];
+
+        let path = save(fp, 19803, "burst", 2, 2_000_000_000, &txs, true).unwrap();
+        assert_eq!(path, tmp.join(format!("tx-cache-{fp}.json")));
+
+        let loaded = try_load(fp, true).expect("cache should load");
+        assert_eq!(loaded.chain_id, 19803);
+        assert_eq!(loaded.sender_count, 2);
+        assert_eq!(loaded.tx_count, 2);
+        assert_eq!(loaded.transactions[1].tx_type, "ERC20Transfer");
+
+        let restored = restore_txs(&loaded).unwrap();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].encoded, txs[0].encoded);
+        assert_eq!(restored[1].nonce, txs[1].nonce);
+        assert_eq!(
+            restored[1].method,
+            crate::types::TransactionType::ERC20Transfer
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_save_errors_when_cache_dir_points_to_file() {
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-save-error");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let cache_root = tmp.join("cache-root-file");
+        std::fs::write(&cache_root, "not a directory").unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &cache_root);
+
+        let txs: Vec<SignedTxWithMetadata> = Vec::new();
+        let result = save("saveerrortest12", 1, "burst", 0, 1_000_000_000, &txs, true);
+        assert!(result.is_err(), "save should fail when cache dir is a file");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_save_verbose_mode() {
+        use alloy_primitives::{Address, B256};
+        use std::time::Instant;
+
+        let _guard = env_lock().lock().unwrap();
+        let tmp = unique_temp_dir("tx-cache-save-verbose");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let _env = EnvVarGuard::set("BENCH_TX_CACHE_DIR", &tmp);
+
+        let txs = vec![SignedTxWithMetadata {
+            hash: B256::with_last_byte(0x11),
+            encoded: vec![0xaa, 0xbb],
+            nonce: 1,
+            gas_limit: 21_000,
+            sender: Address::default(),
+            submit_time: Instant::now(),
+            method: crate::types::TransactionType::SimpleTransfer,
+        }];
+
+        let path = save("saveverbose", 1, "burst", 1, 1_000_000_000, &txs, false).unwrap();
+        assert!(path.exists());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -916,5 +1300,31 @@ mod tests {
         assert!(result.is_err(), "invalid hex should cause an error");
         let err_msg = result.err().unwrap().to_string();
         assert!(err_msg.contains("Invalid cached tx hex"), "got: {err_msg}");
+    }
+
+    #[test]
+    fn test_restore_txs_accepts_raw_without_0x_prefix() {
+        let cached = TxCacheData {
+            version: 1,
+            fingerprint: "test".to_string(),
+            chain_id: 1,
+            mode: "burst".to_string(),
+            sender_count: 1,
+            tx_count: 1,
+            gas_price: "1000000000".to_string(),
+            transactions: vec![CachedTx {
+                hash: "0x0000000000000000000000000000000000000000000000000000000000000042"
+                    .to_string(),
+                raw: "abcd".to_string(),
+                nonce: 9,
+                gas_limit: 99_999,
+                tx_type: "SimpleTransfer".to_string(),
+            }],
+        };
+
+        let restored = restore_txs(&cached).unwrap();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].encoded, vec![0xab, 0xcd]);
+        assert_eq!(restored[0].nonce, 9);
     }
 }

@@ -148,6 +148,29 @@ pub(crate) async fn poll_pending_receipts(
         .await;
 }
 
+fn confirmed_tps(confirmed: u32, confirm_ms: Duration) -> f32 {
+    if !confirm_ms.is_zero() {
+        confirmed as f32 / confirm_ms.as_secs_f32()
+    } else {
+        0.0
+    }
+}
+
+fn log_analysis_result(quiet: bool, analysis_ascii: Result<String>) {
+    match analysis_ascii {
+        Ok(ascii) => {
+            if !quiet {
+                println!("\n{}", ascii);
+            }
+        }
+        Err(e) => {
+            if !quiet {
+                eprintln!("Warning: Analytics pipeline failed: {}", e);
+            }
+        }
+    }
+}
+
 /// Returns `(BurstResult, effective_gas_price_wei)`.
 pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     let dispatcher = Arc::new(Submitter::with_retry_profile(
@@ -480,11 +503,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         submit_ms: submit_time.as_millis() as u64,
         confirm_ms: confirm_ms.as_millis() as u64,
         submitted_tps: total_signed as f32 / submit_time.as_secs_f32(),
-        confirmed_tps: if !confirm_ms.is_zero() {
-            confirmed as f32 / confirm_ms.as_secs_f32()
-        } else {
-            0.0
-        },
+        confirmed_tps: confirmed_tps(confirmed, confirm_ms),
         latency: stats,
         server_metrics: None,
         per_method: None,
@@ -496,18 +515,11 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     };
 
     // Run analytics pipeline on benchmark results
-    match crate::analytics::run_analysis("burst-benchmark", "burst", &result, None, None).await {
-        Ok(analytics_report) => {
-            if !config.quiet {
-                println!("\n{}", analytics_report.reports.ascii);
-            }
-        }
-        Err(e) => {
-            if !config.quiet {
-                eprintln!("Warning: Analytics pipeline failed: {}", e);
-            }
-        }
-    }
+    let analysis_ascii =
+        crate::analytics::run_analysis("burst-benchmark", "burst", &result, None, None)
+            .await
+            .map(|analytics_report| analytics_report.reports.ascii);
+    log_analysis_result(config.quiet, analysis_ascii);
 
     Ok((result, gas_price))
 }
@@ -515,11 +527,57 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, SubmissionMethod};
     use crate::submission::LatencyTracker;
+    use crate::types::ExecutionMode;
+    use crate::types::TestMode;
     use crate::types::TransactionType;
     use alloy_primitives::B256;
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use std::net::TcpListener;
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{body_partial_json, method};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn burst_test_config(rpc_url: &str) -> Config {
+        let rpc = url::Url::parse(rpc_url).unwrap();
+        Config {
+            rpc_urls: vec![rpc.clone()],
+            rpc,
+            ws: url::Url::parse("ws://127.0.0.1:19998").unwrap(),
+            metrics: None,
+            validator_urls: vec![],
+            test_mode: TestMode::Transfer,
+            execution_mode: ExecutionMode::Burst,
+            tx_count: 3,
+            sender_count: 0,
+            wave_count: 0,
+            wave_delay_ms: 0,
+            duration_secs: 0,
+            target_tps: 0,
+            worker_count: 99,
+            batch_size: 10,
+            submission_method: SubmissionMethod::Http,
+            retry_profile: "off".to_string(),
+            finality_confirmations: 0,
+            output: std::path::PathBuf::from("burst-test.json"),
+            quiet: true,
+            chain_id: 1,
+            bench_name: "burst-test".to_string(),
+            fund: false,
+            sender_keys: vec![format!("0x{:064x}", 1), format!("0x{:064x}", 2)],
+            evm_tokens: vec![],
+            evm_pairs: vec![],
+            evm_nfts: vec![],
+        }
+    }
+
+    fn rpc_method(request: &Request) -> Option<String> {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+        body.get("method")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+    }
 
     /// Helper: build a JSON-RPC receipt response with a non-null result object.
     fn receipt_response(tx_hash: &str) -> serde_json::Value {
@@ -548,6 +606,135 @@ mod tests {
             "id": 1,
             "result": null
         })
+    }
+
+    fn receipt_response_with_block(tx_hash: &str, block_number: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "transactionHash": tx_hash,
+                "blockNumber": block_number,
+                "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000abc",
+                "transactionIndex": "0x0",
+                "gasUsed": "0x5208",
+                "cumulativeGasUsed": "0x5208",
+                "status": "0x1",
+                "from": "0x0000000000000000000000000000000000000000",
+                "to": "0x0000000000000000000000000000000000000042",
+                "logs": []
+            }
+        })
+    }
+
+    fn balance_response(balance_hex: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": balance_hex
+        })
+    }
+
+    fn unexpected_test_rpc_method(method: &str) -> ! {
+        panic!("unexpected rpc method: {method}");
+    }
+
+    fn assert_expected_rpc_method(method: &str, expected: &[&str]) {
+        assert!(
+            expected.contains(&method),
+            "unexpected rpc method: {method}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_account_funded_noop_when_balance_is_sufficient() {
+        let mock_server = MockServer::start().await;
+        let account = Address::with_last_byte(0x11);
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance",
+                "params": [format!("{:?}", account), "latest"],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(balance_response("0xde0b6b3a7640000")),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        ensure_account_funded(&client, &mock_server.uri(), account, true)
+            .await
+            .expect("sufficient balance should be a no-op");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_account_funded_low_balance_returns_ok() {
+        let mock_server = MockServer::start().await;
+        let account = Address::with_last_byte(0x22);
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance",
+                "params": [format!("{:?}", account), "latest"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(balance_response("0x1")))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        ensure_account_funded(&client, &mock_server.uri(), account, true)
+            .await
+            .expect("low balance should warn but not fail");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_account_funded_low_balance_logs_when_not_quiet() {
+        let mock_server = MockServer::start().await;
+        let account = Address::with_last_byte(0x23);
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance",
+                "params": [format!("{:?}", account), "latest"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(balance_response("0x2")))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        ensure_account_funded(&client, &mock_server.uri(), account, false)
+            .await
+            .expect("low balance should still return ok when noisy");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_account_funded_errors_on_missing_balance_result() {
+        let mock_server = MockServer::start().await;
+        let account = Address::with_last_byte(0x33);
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance",
+                "params": [format!("{:?}", account), "latest"],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32000, "message": "missing result"}
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let err = ensure_account_funded(&client, &mock_server.uri(), account, true)
+            .await
+            .expect_err("missing result should fail");
+        assert!(err.to_string().contains("Failed to get balance from RPC"));
     }
 
     #[tokio::test]
@@ -715,6 +902,680 @@ mod tests {
         assert_eq!(tracker.pending_count(), 0);
     }
 
+    #[tokio::test]
+    async fn test_poll_pending_receipts_finality_confirms_only_finalized_receipts() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_blockNumber",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x5"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getTransactionReceipt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(receipt_response_with_block(
+                    "0x0000000000000000000000000000000000000000000000000000000000000001",
+                    "0x4",
+                )),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(1);
+        tracker.record_submit(
+            hash,
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1).await;
+
+        assert_eq!(tracker.confirmed_count(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_poll_pending_receipts_finality_leaves_recent_receipts_pending() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_blockNumber",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x5"
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getTransactionReceipt",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(receipt_response_with_block(
+                    "0x0000000000000000000000000000000000000000000000000000000000000002",
+                    "0x5",
+                )),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(2);
+        tracker.record_submit(
+            hash,
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1).await;
+
+        assert_eq!(tracker.confirmed_count(), 0);
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_pending_receipts_finality_ignores_invalid_blocknumber_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let method = rpc_method(request).expect("rpc method");
+                let response = if method == "eth_blockNumber" {
+                    ResponseTemplate::new(200).set_body_string("not-json")
+                } else {
+                    ResponseTemplate::new(200).set_body_json(receipt_response_with_block(
+                        "0x0000000000000000000000000000000000000000000000000000000000000001",
+                        "0x1",
+                    ))
+                };
+                response
+            })
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let tracker = LatencyTracker::new();
+        tracker.record_submit(
+            B256::with_last_byte(1),
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1).await;
+
+        assert_eq!(tracker.confirmed_count(), 0);
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_pending_receipts_finality_ignores_blocknumber_transport_errors() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+
+        let client = reqwest::Client::new();
+        let tracker = LatencyTracker::new();
+        tracker.record_submit(
+            B256::with_last_byte(2),
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        poll_pending_receipts(&client, &format!("http://{}", addr), &tracker, 1).await;
+
+        assert_eq!(tracker.confirmed_count(), 0);
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_errors_when_submitter_creation_fails() {
+        let rpc = url::Url::parse("http://127.0.0.1:8545").unwrap();
+        let mut config = burst_test_config(rpc.as_str());
+        config.rpc_urls = vec![];
+
+        let err = run_burst(&config)
+            .await
+            .expect_err("missing rpc_urls should fail submitter creation");
+        assert!(err.to_string().contains("At least one"));
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_transfer_mode_end_to_end_tracks_waves() {
+        let mock_server = MockServer::start().await;
+        let submit_count = StdArc::new(AtomicUsize::new(0));
+        let submit_count_for_mock = submit_count.clone();
+
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                if let Some(items) = body.as_array() {
+                    let call_idx = submit_count_for_mock.fetch_add(1, Ordering::SeqCst);
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xaccepted{:02x}", call_idx * 16 + idx),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                        "eth_getTransactionReceipt",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x7"
+                    })
+                } else if method == "eth_gasPrice" {
+                    balance_response("0x3b9aca00")
+                } else if method == "eth_getBalance" {
+                    balance_response("0xde0b6b3a7640000")
+                } else if method == "eth_getTransactionCount" {
+                    balance_response("0x0")
+                } else {
+                    let hash = body["params"][0].as_str().unwrap_or_default().to_string();
+                    receipt_response(&hash)
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.tx_count = 3;
+        config.wave_delay_ms = 1;
+
+        let (result, gas_price) = run_burst(&config).await.expect("burst run succeeds");
+
+        assert_eq!(gas_price, 2_000_000_000);
+        assert_eq!(result.submitted, 3);
+        assert_eq!(result.confirmed, 3);
+        assert_eq!(result.pending, 0);
+        let per_wave = result.per_wave.expect("per-wave stats should be recorded");
+        assert_eq!(per_wave.len(), 2);
+        assert_eq!(per_wave[0].wave, 0);
+        assert_eq!(per_wave[0].count, 2);
+        assert_eq!(per_wave[1].wave, 1);
+        assert_eq!(per_wave[1].count, 1);
+        assert_eq!(submit_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_breaks_worker_loop_when_txs_run_out() {
+        let mock_server = MockServer::start().await;
+        let submit_count = StdArc::new(AtomicUsize::new(0));
+        let submit_count_for_mock = submit_count.clone();
+
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                if let Some(items) = body.as_array() {
+                    submit_count_for_mock.fetch_add(1, Ordering::SeqCst);
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xsingle{idx:02x}"),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                        "eth_getTransactionReceipt",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x2"
+                    })
+                } else if method == "eth_gasPrice" {
+                    balance_response("0x3b9aca00")
+                } else if method == "eth_getBalance" {
+                    balance_response("0xde0b6b3a7640000")
+                } else if method == "eth_getTransactionCount" {
+                    balance_response("0x0")
+                } else {
+                    let hash = body["params"][0].as_str().unwrap_or_default().to_string();
+                    receipt_response(&hash)
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.tx_count = 1;
+        config.quiet = false;
+
+        let (result, _gas_price) = run_burst(&config).await.expect("burst run succeeds");
+
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.confirmed, 1);
+        assert_eq!(submit_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_quiet_false_hits_submission_result_branches_and_receipt_retry() {
+        let mock_server = MockServer::start().await;
+        let batch_count = StdArc::new(AtomicUsize::new(0));
+        let receipt_count = StdArc::new(AtomicUsize::new(0));
+        let batch_count_for_mock = batch_count.clone();
+        let receipt_count_for_mock = receipt_count.clone();
+
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+
+                if let Some(_items) = body.as_array() {
+                    let call_idx = batch_count_for_mock.fetch_add(1, Ordering::SeqCst);
+                    return if call_idx == 0 {
+                        ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                            {"jsonrpc": "2.0", "id": 0, "result": "0xaccepted00"},
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "error": {"code": -32000, "message": "txpool full"}
+                            }
+                        ]))
+                    } else {
+                        ResponseTemplate::new(200)
+                            .set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": 1}))
+                    };
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                        "eth_getTransactionReceipt",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x3"
+                    }))
+                } else if method == "eth_gasPrice" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x1"))
+                } else if method == "eth_getBalance" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x1"))
+                } else if method == "eth_getTransactionCount" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x0"))
+                } else {
+                    let call_idx = receipt_count_for_mock.fetch_add(1, Ordering::SeqCst);
+                    if call_idx == 0 {
+                        ResponseTemplate::new(200).set_body_json(null_receipt_response())
+                    } else {
+                        let hash = body["params"][0].as_str().unwrap_or_default().to_string();
+                        ResponseTemplate::new(200).set_body_json(receipt_response(&hash))
+                    }
+                };
+                response
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.quiet = false;
+        config.tx_count = 3;
+        config.wave_delay_ms = 1;
+
+        let (result, gas_price) = run_burst(&config).await.expect("burst run succeeds");
+
+        assert_eq!(gas_price, 1_000_000_000);
+        assert_eq!(result.submitted, 3);
+        assert_eq!(result.confirmed, 1);
+        assert_eq!(result.pending, 0);
+        assert_eq!(batch_count.load(Ordering::SeqCst), 2);
+        assert_eq!(receipt_count.load(Ordering::SeqCst), 2);
+        let per_wave = result
+            .per_wave
+            .expect("accepted tx should record wave stats");
+        assert_eq!(per_wave.len(), 1);
+        assert_eq!(per_wave[0].count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_submission_errors_leave_tracker_empty() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                if body.is_array() {
+                    return ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": 1}));
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &["eth_gasPrice", "eth_getBalance", "eth_getTransactionCount"],
+                );
+                let response = if method == "eth_gasPrice" {
+                    balance_response("0x3b9aca00")
+                } else if method == "eth_getBalance" {
+                    balance_response("0xde0b6b3a7640000")
+                } else {
+                    balance_response("0x0")
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.tx_count = 2;
+
+        let (result, _gas_price) = run_burst(&config).await.expect("burst run returns result");
+
+        assert_eq!(result.submitted, 2);
+        assert_eq!(result.confirmed, 0);
+        assert_eq!(result.pending, 0);
+        assert!(result.per_wave.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_submission_transport_errors_exercise_sender_error_branch() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &["eth_gasPrice", "eth_getBalance", "eth_getTransactionCount"],
+                );
+                let response = if method == "eth_gasPrice" {
+                    balance_response("0x3b9aca00")
+                } else if method == "eth_getBalance" {
+                    balance_response("0xde0b6b3a7640000")
+                } else {
+                    balance_response("0x0")
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.rpc_urls = vec![url::Url::parse("testerr://force").unwrap()];
+        config.quiet = false;
+        config.tx_count = 2;
+
+        let (result, gas_price) = run_burst(&config)
+            .await
+            .expect("transport submission failures should not abort burst mode");
+
+        assert_eq!(gas_price, 2_000_000_000);
+        assert_eq!(result.submitted, 2);
+        assert_eq!(result.confirmed, 0);
+        assert_eq!(result.pending, 0);
+        assert!(result.per_wave.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_quiet_false_caps_tx_count_before_missing_evm_contracts() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x2"
+                    }))
+                } else if method == "eth_gasPrice" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x3b9aca00"))
+                } else if method == "eth_getBalance" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0xde0b6b3a7640000"))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x0"))
+                };
+                response
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.rpc_urls = vec![
+            url::Url::parse(&mock_server.uri()).unwrap(),
+            url::Url::parse(&mock_server.uri()).unwrap(),
+        ];
+        config.rpc = config.rpc_urls[0].clone();
+        config.quiet = false;
+        config.test_mode = TestMode::Evm;
+        config.tx_count = 4_001;
+        config.sender_keys = vec![format!("0x{:064x}", 1)];
+
+        let err = run_burst(&config)
+            .await
+            .expect_err("missing contracts should still fail after tx cap");
+        assert!(
+            err.to_string()
+                .contains("EVM mode requires deployed contracts")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_evm_mode_without_contracts_errors() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x2"
+                    })
+                } else if method == "eth_gasPrice" {
+                    balance_response("0x3b9aca00")
+                } else if method == "eth_getBalance" {
+                    balance_response("0xde0b6b3a7640000")
+                } else {
+                    balance_response("0x0")
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.test_mode = TestMode::Evm;
+        config.tx_count = 1;
+
+        let err = run_burst(&config)
+            .await
+            .expect_err("missing deployed EVM contracts should fail");
+        assert!(
+            err.to_string()
+                .contains("EVM mode requires deployed contracts")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_evm_mode_with_contracts_uses_generator_and_signs_batches() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+
+                if let Some(items) = body.as_array() {
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xevm{idx:02x}"),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                        "eth_getTransactionReceipt",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x6"
+                    }))
+                } else if method == "eth_gasPrice" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x3b9aca00"))
+                } else if method == "eth_getBalance" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0xde0b6b3a7640000"))
+                } else if method == "eth_getTransactionCount" {
+                    ResponseTemplate::new(200).set_body_json(balance_response("0x0"))
+                } else {
+                    let hash = body["params"][0].as_str().unwrap_or_default().to_string();
+                    ResponseTemplate::new(200).set_body_json(receipt_response(&hash))
+                };
+                response
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.test_mode = TestMode::Evm;
+        config.tx_count = 2;
+        config.sender_keys = vec![format!("0x{:064x}", 1)];
+        config.evm_tokens = vec![Address::with_last_byte(0x10)];
+        config.evm_pairs = vec![Address::with_last_byte(0x20)];
+        config.evm_nfts = vec![Address::with_last_byte(0x30)];
+
+        let (result, gas_price) = run_burst(&config)
+            .await
+            .expect("evm mode should sign and submit generated descriptors");
+
+        assert_eq!(gas_price, 2_000_000_000);
+        assert_eq!(result.submitted, 2);
+        assert_eq!(result.confirmed, 2);
+        assert_eq!(result.pending, 0);
+    }
+
+    #[test]
+    fn test_confirmed_tps_returns_zero_for_zero_duration() {
+        assert_eq!(confirmed_tps(100, Duration::ZERO), 0.0);
+    }
+
+    #[test]
+    fn test_log_analysis_result_handles_ok_and_err_paths() {
+        let ok_result: Result<String> = Ok("ascii report".to_string());
+        log_analysis_result(false, ok_result);
+
+        let err_result: Result<String> = Err(anyhow::anyhow!("boom"));
+        log_analysis_result(false, err_result);
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected rpc method")]
+    fn test_unexpected_test_rpc_method_panics() {
+        unexpected_test_rpc_method("eth_chainId");
+    }
+
     // ── BurstResult computation tests ──────────────────────────────────
 
     /// Verify submitted_tps calculation: total_signed / submit_time.
@@ -738,13 +1599,7 @@ mod tests {
     /// When confirm time is zero, confirmed_tps should be 0.
     #[test]
     fn test_burst_result_zero_confirm_time() {
-        let confirm_ms = std::time::Duration::from_secs(0);
-        let confirmed_tps = if !confirm_ms.is_zero() {
-            100_f32 / confirm_ms.as_secs_f32()
-        } else {
-            0.0
-        };
-        assert_eq!(confirmed_tps, 0.0);
+        assert_eq!(confirmed_tps(100, Duration::ZERO), 0.0);
     }
 
     /// Pool capacity capping: tx_count is capped to num_keys * POOL_SLOTS_PER_ACCOUNT.
@@ -754,22 +1609,10 @@ mod tests {
         let num_keys = 4;
         let max_pool_capacity = num_keys * POOL_SLOTS_PER_ACCOUNT;
 
-        // tx_count exceeds capacity → should be capped
-        let tx_count_input = 20_000usize;
-        let tx_count = if tx_count_input > max_pool_capacity {
-            max_pool_capacity
-        } else {
-            tx_count_input
-        };
+        let tx_count = 20_000usize.min(max_pool_capacity);
         assert_eq!(tx_count, 16_000);
 
-        // tx_count within capacity → no capping
-        let tx_count_input2 = 10_000usize;
-        let tx_count2 = if tx_count_input2 > max_pool_capacity {
-            max_pool_capacity
-        } else {
-            tx_count_input2
-        };
+        let tx_count2 = 10_000usize.min(max_pool_capacity);
         assert_eq!(tx_count2, 10_000);
     }
 
@@ -850,16 +1693,10 @@ mod tests {
     #[test]
     fn test_multi_key_parsing() {
         let bench_key_env = "0xaaa,0xbbb,0xccc".to_string();
-        let sender_keys: Vec<String> = if bench_key_env.is_empty() {
-            vec![]
-        } else if bench_key_env.contains(',') {
-            bench_key_env
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        } else {
-            vec![bench_key_env]
-        };
+        let sender_keys: Vec<String> = bench_key_env
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .collect();
         assert_eq!(sender_keys.len(), 3);
         assert_eq!(sender_keys[0], "0xaaa");
         assert_eq!(sender_keys[2], "0xccc");
@@ -869,16 +1706,7 @@ mod tests {
     #[test]
     fn test_single_key_env() {
         let bench_key_env = "0xdeadbeef".to_string();
-        let sender_keys: Vec<String> = if bench_key_env.is_empty() {
-            vec![]
-        } else if bench_key_env.contains(',') {
-            bench_key_env
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect()
-        } else {
-            vec![bench_key_env]
-        };
+        let sender_keys = vec![bench_key_env];
         assert_eq!(sender_keys.len(), 1);
         assert_eq!(sender_keys[0], "0xdeadbeef");
     }
@@ -898,14 +1726,8 @@ mod tests {
             let key_idx = w % num_keys;
             let slot_in_key = w / num_keys;
             let nonce_start = base_nonces[key_idx] + (slot_in_key * txs_per_worker) as u64;
-
-            match w {
-                0 => assert_eq!(nonce_start, 10),  // key 0, slot 0
-                1 => assert_eq!(nonce_start, 20),  // key 1, slot 0
-                2 => assert_eq!(nonce_start, 110), // key 0, slot 1
-                3 => assert_eq!(nonce_start, 120), // key 1, slot 1
-                _ => unreachable!(),
-            }
+            let expected = [10u64, 20u64, 110u64, 120u64][w];
+            assert_eq!(nonce_start, expected);
         }
     }
 }

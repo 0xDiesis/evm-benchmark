@@ -361,14 +361,11 @@ mod tests {
         let bottlenecks = vec![make_bottleneck("StateRootComputation", 0.8)];
         let recs = generate_recommendations(&bottlenecks);
 
-        if recs.len() > 1 {
-            for i in 0..recs.len() - 1 {
-                assert!(
-                    recs[i].roi_score >= recs[i + 1].roi_score,
-                    "Recommendations not sorted by ROI"
-                );
-            }
-        }
+        assert!(
+            recs.windows(2)
+                .all(|pair| pair[0].roi_score >= pair[1].roi_score),
+            "Recommendations not sorted by ROI"
+        );
     }
 
     #[test]
@@ -476,13 +473,6 @@ mod tests {
         let recs = generate_recommendations(&bottlenecks);
         assert_eq!(recs.len(), 3);
         // Sorted by ROI descending — highest ROI first
-        for i in 0..recs.len() - 1 {
-            assert!(
-                recs[i].roi_score >= recs[i + 1].roi_score,
-                "ROI not sorted: {} >= {}",
-                recs[i].roi_score,
-                recs[i + 1].roi_score
-            );
-        }
+        assert!(recs.windows(2).all(|pair| pair[0].roi_score >= pair[1].roi_score));
     }
 }

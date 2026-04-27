@@ -150,7 +150,29 @@ mod tests {
             },
             bottlenecks: vec![],
             regression_analysis: None,
-            recommendations: vec![],
+            recommendations: vec![
+                Recommendation {
+                    priority: "High".to_string(),
+                    title: "Use Local RPC Endpoint".to_string(),
+                    description: "Reduce RPC latency by colocating the endpoint.".to_string(),
+                    estimated_tps_improvement_pct: 15.0,
+                    effort_level: "Low".to_string(),
+                    roi_score: 15.0,
+                    implementation_hints: vec![
+                        "Deploy RPC on localhost".to_string(),
+                        "Enable connection reuse".to_string(),
+                    ],
+                },
+                Recommendation {
+                    priority: "Medium".to_string(),
+                    title: "Trim validator polling".to_string(),
+                    description: "Avoid unnecessary polling work.".to_string(),
+                    estimated_tps_improvement_pct: 4.0,
+                    effort_level: "Low".to_string(),
+                    roi_score: 4.0,
+                    implementation_hints: vec![],
+                },
+            ],
             reports: ReportPackage {
                 json: String::new(),
                 html: String::new(),
@@ -162,5 +184,8 @@ mod tests {
         let md = generate_markdown_report(&report);
         assert!(md.contains("# Benchmark Analytics Report"));
         assert!(md.contains("| TPS Submitted |"));
+        assert!(md.contains("## Recommendations"));
+        assert!(md.contains("**Implementation Hints:**"));
+        assert!(md.contains("- Deploy RPC on localhost"));
     }
 }

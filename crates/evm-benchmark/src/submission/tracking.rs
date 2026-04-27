@@ -543,4 +543,36 @@ mod tests {
         assert!(stats.min > 0, "Latency should be non-zero");
         assert!(stats.max >= stats.min);
     }
+
+    #[test]
+    fn test_per_method_statistics_uses_gas_used_average() {
+        let tracker = LatencyTracker::new();
+
+        for (idx, gas_used) in [(1u8, 40_000u64), (2u8, 80_000u64)] {
+            let hash = B256::with_last_byte(idx);
+            tracker.record_submit(
+                hash,
+                idx as u64,
+                alloy_primitives::Address::default(),
+                90_000,
+                TransactionType::ERC20Mint,
+            );
+            tracker.pending.get_mut(&hash).unwrap().gas_used = Some(gas_used);
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        for idx in [1u8, 2u8] {
+            tracker.on_block_inclusion(B256::with_last_byte(idx), Instant::now());
+        }
+
+        let stats = tracker.per_method_statistics();
+        let mint_stats = stats.get("ERC20Mint").expect("missing ERC20Mint");
+        assert_eq!(mint_stats.confirmed, 2);
+        assert_eq!(mint_stats.avg_gas, 60_000);
+    }
+
+    #[test]
+    fn test_percentile_empty_slice_returns_zero() {
+        assert_eq!(percentile(&[], 0.95), 0);
+    }
 }

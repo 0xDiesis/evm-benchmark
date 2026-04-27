@@ -37,21 +37,14 @@ fn parse_prometheus_text(text: &str) -> Result<MetricsMap> {
         // Prometheus format: metric_name [labels] value [timestamp]
         // We want the numeric value which is always second-to-last or last token
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            continue;
-        }
 
         // Determine which part is the value:
         // - If 2 parts: [metric_name, value]
         // - If 3+ parts: [metric_name, value, timestamp] or [metric_name{labels}, value, timestamp]
-        let value_str = if parts.len() == 2 {
-            // No timestamp case
-            parts[1]
-        } else if parts.len() >= 3 {
-            // Has timestamp (or labels) - value is second-to-last
-            parts[parts.len() - 2]
-        } else {
-            continue;
+        let value_str = match parts.as_slice() {
+            [_, value] => *value,
+            [.., value, _timestamp] => *value,
+            _ => continue,
         };
 
         if let Ok(value) = value_str.parse::<f64>() {
@@ -106,6 +99,8 @@ pub fn calculate_metric_pct_change(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_parse_prometheus_text_with_timestamp() {
@@ -411,5 +406,22 @@ reth_diesis_pipeline_execution_ms 250.5
         let text = "   singletoken   \n";
         let metrics = parse_prometheus_text(text).unwrap();
         assert!(metrics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scrape_prometheus_fetches_and_parses_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("# TYPE demo gauge\ndemo_metric 12.5\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let url = Url::parse(&server.uri()).expect("invalid mock server url");
+        let metrics = scrape_prometheus(&url)
+            .await
+            .expect("scrape should succeed");
+        assert_eq!(metrics.get("demo_metric"), Some(&12.5));
     }
 }

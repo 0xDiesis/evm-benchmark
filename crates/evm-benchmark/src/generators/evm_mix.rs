@@ -620,6 +620,58 @@ mod tests {
     }
 
     #[test]
+    fn test_next_descriptor_can_select_erc20_transfer() {
+        let contracts = EvmContracts {
+            tokens: vec![Address::with_last_byte(1)],
+            pairs: vec![Address::with_last_byte(2)],
+            nfts: vec![Address::with_last_byte(3)],
+        };
+        let config = EvmMixConfig {
+            erc20_mint_pct: 0.0,
+            erc20_transfer_pct: 100.0,
+            erc20_approve_pct: 0.0,
+            swap_pct: 0.0,
+            nft_mint_pct: 0.0,
+            eth_transfer_pct: 0.0,
+            ..EvmMixConfig::default()
+        };
+        let mut generator =
+            EvmMixGenerator::new(contracts, config, vec![Address::with_last_byte(0xAA)], 1)
+                .expect("generator init");
+
+        let descriptor = generator.next_descriptor();
+        assert_eq!(descriptor.method, TransactionType::ERC20Transfer);
+        assert_eq!(descriptor.gas_limit, GAS_ERC20_TRANSFER);
+        assert_eq!(&descriptor.input[..4], &SEL_ERC20_TRANSFER);
+    }
+
+    #[test]
+    fn test_next_descriptor_can_select_swap() {
+        let contracts = EvmContracts {
+            tokens: vec![Address::with_last_byte(1)],
+            pairs: vec![Address::with_last_byte(2)],
+            nfts: vec![Address::with_last_byte(3)],
+        };
+        let config = EvmMixConfig {
+            erc20_mint_pct: 0.0,
+            erc20_transfer_pct: 0.0,
+            erc20_approve_pct: 0.0,
+            swap_pct: 100.0,
+            nft_mint_pct: 0.0,
+            eth_transfer_pct: 0.0,
+            ..EvmMixConfig::default()
+        };
+        let mut generator =
+            EvmMixGenerator::new(contracts, config, vec![Address::with_last_byte(0xAA)], 1)
+                .expect("generator init");
+
+        let descriptor = generator.next_descriptor();
+        assert_eq!(descriptor.method, TransactionType::Swap);
+        assert_eq!(descriptor.gas_limit, GAS_SWAP);
+        assert_eq!(&descriptor.input[..4], &SEL_SWAP);
+    }
+
+    #[test]
     fn test_sign_batch_produces_valid_signed_txs() {
         let contracts = EvmContracts {
             tokens: vec![Address::with_last_byte(1)],

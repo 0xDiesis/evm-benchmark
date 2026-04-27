@@ -88,11 +88,7 @@ impl RpcDispatcher {
         let mut endpoints = Vec::new();
 
         for url in urls {
-            submitters.push(RpcSubmitter::with_retry_profile(
-                &url,
-                batch_size,
-                retry_profile,
-            )?);
+            submitters.push(RpcSubmitter::with_retry_profile(&url, batch_size, retry_profile)?);
             endpoints.push(EndpointHealth::new(url));
         }
 
@@ -143,9 +139,7 @@ impl RpcDispatcher {
                 let endpoints = self.endpoints.lock().unwrap();
                 if !endpoints[idx].is_healthy() {
                     attempts += 1;
-                    if attempts >= max_attempts {
-                        anyhow::bail!("All RPC endpoints are degraded or unavailable");
-                    }
+                    if attempts >= max_attempts { anyhow::bail!("All RPC endpoints are degraded or unavailable"); }
                     continue;
                 }
             }
@@ -188,9 +182,7 @@ impl RpcDispatcher {
                     }
 
                     attempts += 1;
-                    if attempts >= max_attempts {
-                        anyhow::bail!("All RPC endpoints failed. Last error: {}", e);
-                    }
+                    if attempts >= max_attempts { anyhow::bail!("All RPC endpoints failed. Last error: {}", e); }
                 }
             }
         }
@@ -229,6 +221,11 @@ impl RpcDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TransactionType;
+    use alloy_primitives::B256;
+    use std::time::Instant;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn create_test_urls(count: usize) -> Vec<Url> {
         (0..count)
@@ -237,6 +234,18 @@ mod tests {
                     .expect("Failed to parse test URL")
             })
             .collect()
+    }
+
+    fn make_test_tx(nonce: u64) -> SignedTxWithMetadata {
+        SignedTxWithMetadata {
+            hash: B256::with_last_byte(nonce as u8),
+            encoded: vec![0x02, nonce as u8],
+            nonce,
+            gas_limit: 21_000,
+            sender: alloy_primitives::Address::default(),
+            submit_time: Instant::now(),
+            method: TransactionType::SimpleTransfer,
+        }
     }
 
     #[test]
@@ -260,6 +269,15 @@ mod tests {
         let result = RpcDispatcher::new(vec![], 100);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("At least one"));
+    }
+
+    #[test]
+    fn test_dispatcher_creation_with_explicit_retry_profile() {
+        let urls = create_test_urls(2);
+        let dispatcher = RpcDispatcher::with_retry_profile(urls, 100, "off")
+            .expect("Failed to create dispatcher");
+
+        assert_eq!(dispatcher.endpoint_count(), 2);
     }
 
     #[test]
@@ -350,6 +368,105 @@ mod tests {
 
         // Should have 1 endpoint
         assert_eq!(dispatcher.endpoint_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_rejects_missing_endpoints() {
+        let dispatcher = RpcDispatcher {
+            endpoints: Arc::new(Mutex::new(Vec::new())),
+            submitters: Vec::new(),
+            current_index: Arc::new(Mutex::new(0)),
+            batch_size: 1,
+        };
+
+        let err = dispatcher
+            .submit_batch(vec![make_test_tx(0)])
+            .await
+            .err()
+            .expect("missing endpoints should fail");
+        assert!(err.to_string().contains("No RPC endpoints available"));
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_rejects_when_all_endpoints_unhealthy() {
+        let url = Url::parse("http://localhost:8545").expect("Failed to parse URL");
+        let dispatcher = RpcDispatcher {
+            endpoints: Arc::new(Mutex::new(vec![EndpointHealth {
+                url: url.clone(),
+                consecutive_failures: 3,
+                last_failure_time: Some(Instant::now()),
+                is_degraded: true,
+            }])),
+            submitters: vec![RpcSubmitter::new(&url, 100).expect("submitter should build")],
+            current_index: Arc::new(Mutex::new(0)),
+            batch_size: 100,
+        };
+
+        let err = dispatcher
+            .submit_batch(vec![make_test_tx(0)])
+            .await
+            .err()
+            .expect("all unhealthy endpoints should fail");
+        assert!(
+            err.to_string()
+                .contains("No healthy RPC endpoints available")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_skips_degraded_endpoint_and_uses_next_healthy() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"jsonrpc": "2.0", "id": 0, "result": "0xaaaa"}
+            ])))
+            .mount(&mock_server)
+            .await;
+
+        let unhealthy_url = Url::parse("http://127.0.0.1:9").expect("Failed to parse URL");
+        let healthy_url = Url::parse(&mock_server.uri()).expect("Failed to parse mock URL");
+        let dispatcher = RpcDispatcher {
+            endpoints: Arc::new(Mutex::new(vec![
+                EndpointHealth {
+                    url: unhealthy_url.clone(),
+                    consecutive_failures: 3,
+                    last_failure_time: Some(Instant::now()),
+                    is_degraded: true,
+                },
+                EndpointHealth::new(healthy_url.clone()),
+            ])),
+            submitters: vec![
+                RpcSubmitter::new(&unhealthy_url, 100).expect("submitter should build"),
+                RpcSubmitter::new(&healthy_url, 100).expect("submitter should build"),
+            ],
+            current_index: Arc::new(Mutex::new(0)),
+            batch_size: 100,
+        };
+
+        let result = dispatcher
+            .submit_batch(vec![make_test_tx(0)])
+            .await
+            .expect("dispatcher should skip degraded endpoint");
+
+        assert_eq!(result.submitted, 1);
+        assert_eq!(*dispatcher.current_index.lock().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_batch_returns_last_error_after_failures() {
+        let url = Url::parse("testerr://forced").expect("Failed to parse URL");
+        let dispatcher = RpcDispatcher::new_single(url.clone(), 100).expect("Failed to create");
+
+        let err = dispatcher
+            .submit_batch(vec![make_test_tx(0)])
+            .await
+            .err()
+            .expect("single failing endpoint should bubble final error");
+        assert!(err.to_string().contains("All RPC endpoints failed"));
+
+        let status = dispatcher.get_endpoint_status();
+        assert_eq!(status[0].0, url.to_string());
+        assert_eq!(status[0].2, 1);
     }
 
     #[test]

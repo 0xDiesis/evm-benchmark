@@ -12,6 +12,58 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
+fn actual_tps(confirmed: u32, total_duration: Duration) -> f32 {
+    if total_duration.as_secs_f32() > 0.0 {
+        confirmed as f32 / total_duration.as_secs_f32()
+    } else {
+        0.0
+    }
+}
+
+fn timeline_tps(confirmed: u32, elapsed_secs: f64) -> f64 {
+    if elapsed_secs > 0.0 {
+        confirmed as f64 / elapsed_secs
+    } else {
+        0.0
+    }
+}
+
+fn worker_interval_ms(tps_per_worker: f64) -> u64 {
+    if tps_per_worker > 0.0 {
+        (1000.0 / tps_per_worker) as u64
+    } else {
+        1000
+    }
+    .max(1)
+}
+
+fn log_analysis_result(quiet: bool, analysis_ascii: Result<String>) {
+    match analysis_ascii {
+        Ok(ascii) => {
+            if !quiet {
+                println!("\n{}", ascii);
+            }
+        }
+        Err(e) => {
+            if !quiet {
+                eprintln!("Warning: Analytics pipeline failed: {}", e);
+            }
+        }
+    }
+}
+
+async fn run_block_tracker_task(
+    ws_url: url::Url,
+    rpc_url: url::Url,
+    tracker: Arc<LatencyTracker>,
+    finality_confirmations: u32,
+    tracker_run_duration: Duration,
+) {
+    let block_tracker =
+        BlockTracker::with_finality(ws_url, rpc_url, tracker, finality_confirmations);
+    let _ = block_tracker.run(tracker_run_duration).await;
+}
+
 /// Run sustained mode benchmark at target TPS for specified duration.
 ///
 /// Returns `(SustainedResult, effective_gas_price_wei)`.
@@ -134,11 +186,13 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let ws_url = config.ws.clone();
     let rpc_url = config.rpc.clone();
     let finality_confirmations = config.finality_confirmations;
-    let tracker_handle = tokio::spawn(async move {
-        let block_tracker =
-            BlockTracker::with_finality(ws_url, rpc_url, tracker_clone, finality_confirmations);
-        let _ = block_tracker.run(tracker_run_duration).await;
-    });
+    let tracker_handle = tokio::spawn(run_block_tracker_task(
+        ws_url,
+        rpc_url,
+        tracker_clone,
+        finality_confirmations,
+        tracker_run_duration,
+    ));
 
     // Spawn worker tasks
     let mut handles = vec![];
@@ -207,9 +261,8 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
             config.finality_confirmations,
         )
         .await;
-        if tracker.pending_count() > 0 {
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        let pending_sleep_ms = u64::from(tracker.pending_count() > 0) * 25;
+        tokio::time::sleep(Duration::from_millis(pending_sleep_ms)).await;
     }
 
     // Now abort the block tracker
@@ -222,11 +275,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let errors = error_count.load(Ordering::SeqCst);
     let stats = tracker.statistics();
 
-    let actual_tps = if total_duration.as_secs_f32() > 0.0 {
-        confirmed as f32 / total_duration.as_secs_f32()
-    } else {
-        0.0
-    };
+    let actual_tps = actual_tps(confirmed, total_duration);
 
     metrics.set_pending_transactions(pending as i64);
     metrics.set_current_tps(actual_tps as f64);
@@ -247,7 +296,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
 
     // Run analytics pipeline on benchmark results
     let burst_equiv = result.to_burst_result();
-    match crate::analytics::run_analysis(
+    let analysis_ascii = crate::analytics::run_analysis(
         "sustained-benchmark",
         "sustained",
         &burst_equiv,
@@ -255,18 +304,8 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         None,
     )
     .await
-    {
-        Ok(analytics_report) => {
-            if !config.quiet {
-                println!("\n{}", analytics_report.reports.ascii);
-            }
-        }
-        Err(e) => {
-            if !config.quiet {
-                eprintln!("Warning: Analytics pipeline failed: {}", e);
-            }
-        }
-    }
+    .map(|analytics_report| analytics_report.reports.ascii);
+    log_analysis_result(config.quiet, analysis_ascii);
 
     Ok((result, gas_price))
 }
@@ -290,12 +329,7 @@ async fn run_worker(
 ) {
     let pool_len = pre_signed.len() as u32;
 
-    let interval_ms = if tps_per_worker > 0.0 {
-        (1000.0 / tps_per_worker) as u64
-    } else {
-        1000
-    }
-    .max(1);
+    let interval_ms = worker_interval_ms(tps_per_worker);
 
     let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -319,9 +353,15 @@ async fn run_worker(
         );
 
         match dispatcher.submit_single(signed_tx).await {
-            Ok(_) => {
-                metrics.inc_transactions_submitted(1);
-                sent_count.fetch_add(1, Ordering::SeqCst);
+            Ok(result) => {
+                if result.submitted > 0 {
+                    metrics.inc_transactions_submitted(result.submitted as u64);
+                    sent_count.fetch_add(result.submitted, Ordering::SeqCst);
+                }
+                if result.errors > 0 {
+                    metrics.inc_transactions_failed(result.errors as u64);
+                    error_count.fetch_add(result.errors, Ordering::SeqCst);
+                }
             }
             Err(_) => {
                 metrics.inc_transactions_failed(1);
@@ -349,11 +389,7 @@ async fn update_timeline(
         let confirmed = tracker.confirmed_count();
         let pending = tracker.pending_count();
         let stats = tracker.statistics();
-        let tps = if start.elapsed().as_secs_f64() > 0.0 {
-            confirmed as f64 / start.elapsed().as_secs_f64()
-        } else {
-            0.0
-        };
+        let tps = timeline_tps(confirmed, start.elapsed().as_secs_f64());
 
         metrics.set_pending_transactions(pending as i64);
         metrics.set_current_tps(tps);
@@ -373,6 +409,213 @@ async fn update_timeline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{Config, SubmissionMethod};
+    use crate::types::{ExecutionMode, TestMode};
+    use crate::types::{SignedTxWithMetadata, TransactionType};
+    use alloy_primitives::B256;
+    use prometheus::Registry;
+    use std::sync::atomic::Ordering;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn sample_signed_tx(nonce: u64) -> SignedTxWithMetadata {
+        SignedTxWithMetadata {
+            hash: B256::with_last_byte(nonce as u8),
+            encoded: vec![nonce as u8, 0xaa],
+            nonce,
+            gas_limit: 21_000,
+            sender: Address::with_last_byte(0x44),
+            submit_time: Instant::now(),
+            method: TransactionType::SimpleTransfer,
+        }
+    }
+
+    fn test_metrics() -> Arc<MetricsExporter> {
+        Arc::new(MetricsExporter::with_registry(Registry::new()).unwrap())
+    }
+
+    fn make_submitter(rpc_url: &str) -> Arc<Submitter> {
+        Arc::new(
+            Submitter::with_retry_profile(
+                vec![url::Url::parse(rpc_url).unwrap()],
+                &url::Url::parse("ws://127.0.0.1:19998").unwrap(),
+                10,
+                SubmissionMethod::Http,
+                "off",
+            )
+            .unwrap(),
+        )
+    }
+
+    fn null_receipt_response() -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": null
+        })
+    }
+
+    fn unexpected_test_rpc_method(method: &str) -> ! {
+        panic!("unexpected rpc method: {method}");
+    }
+
+    fn sustained_success_rpc_response(
+        method: &str,
+        body: &serde_json::Value,
+    ) -> serde_json::Value {
+        match method {
+            "eth_blockNumber" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x8"
+            }),
+            "eth_gasPrice" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x3b9aca00"
+            }),
+            "eth_getTransactionCount" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x0"
+            }),
+            "eth_getBlockReceipts" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": []
+            }),
+            "eth_getTransactionReceipt" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "transactionHash": body["params"][0].as_str().unwrap_or_default(),
+                    "blockNumber": "0x1",
+                    "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000abc",
+                    "transactionIndex": "0x0",
+                    "gasUsed": "0x5208",
+                    "cumulativeGasUsed": "0x5208",
+                    "status": "0x1",
+                    "from": "0x0000000000000000000000000000000000000000",
+                    "to": "0x0000000000000000000000000000000000000042",
+                    "logs": []
+                }
+            }),
+            other => unexpected_test_rpc_method(other),
+        }
+    }
+
+    fn sustained_retrying_receipt_rpc_response(
+        method: &str,
+        body: &serde_json::Value,
+        receipt_call_idx: u32,
+    ) -> serde_json::Value {
+        match method {
+            "eth_blockNumber" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x8"
+            }),
+            "eth_gasPrice" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x3b9aca00"
+            }),
+            "eth_getTransactionCount" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x0"
+            }),
+            "eth_getBlockReceipts" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": []
+            }),
+            "eth_getTransactionReceipt" => {
+                if receipt_call_idx == 0 {
+                    null_receipt_response()
+                } else {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "transactionHash": body["params"][0].as_str().unwrap_or_default(),
+                            "blockNumber": "0x1",
+                            "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000abc",
+                            "transactionIndex": "0x0",
+                            "gasUsed": "0x5208",
+                            "cumulativeGasUsed": "0x5208",
+                            "status": "0x1",
+                            "from": "0x0000000000000000000000000000000000000000",
+                            "to": "0x0000000000000000000000000000000000000042",
+                            "logs": []
+                        }
+                    })
+                }
+            }
+            other => unexpected_test_rpc_method(other),
+        }
+    }
+
+    fn sustained_missing_nonce_rpc_response(method: &str) -> serde_json::Value {
+        match method {
+            "eth_blockNumber" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x4"
+            }),
+            "eth_gasPrice" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x3b9aca00"
+            }),
+            "eth_getTransactionCount" => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32000, "message": "missing nonce"}
+            }),
+            other => unexpected_test_rpc_method(other),
+        }
+    }
+
+    fn sustained_test_config(rpc_url: &str) -> Config {
+        let rpc = url::Url::parse(rpc_url).unwrap();
+        Config {
+            rpc_urls: vec![rpc.clone()],
+            rpc,
+            ws: url::Url::parse("ws://127.0.0.1:19998").unwrap(),
+            metrics: None,
+            validator_urls: vec![],
+            test_mode: TestMode::Transfer,
+            execution_mode: ExecutionMode::Sustained,
+            tx_count: 0,
+            sender_count: 1,
+            wave_count: 0,
+            wave_delay_ms: 0,
+            duration_secs: 1,
+            target_tps: 2,
+            worker_count: 1,
+            batch_size: 10,
+            submission_method: SubmissionMethod::Http,
+            retry_profile: "off".to_string(),
+            finality_confirmations: 0,
+            output: std::path::PathBuf::from("sustained-test.json"),
+            quiet: true,
+            chain_id: 1,
+            bench_name: "sustained-test".to_string(),
+            fund: false,
+            sender_keys: vec![],
+            evm_tokens: vec![],
+            evm_pairs: vec![],
+            evm_nfts: vec![],
+        }
+    }
+
+    fn rpc_method(request: &Request) -> Option<String> {
+        let body: serde_json::Value = serde_json::from_slice(&request.body).ok()?;
+        body.get("method")
+            .and_then(|v| v.as_str())
+            .map(ToOwned::to_owned)
+    }
 
     #[test]
     fn test_tps_distribution() {
@@ -507,41 +750,17 @@ mod tests {
 
     #[test]
     fn test_interval_for_very_low_tps() {
-        // At 0.5 TPS per worker, interval should be 2000ms
-        let tps_per_worker = 0.5f64;
-        let interval_ms = if tps_per_worker > 0.0 {
-            (1000.0 / tps_per_worker) as u64
-        } else {
-            1000
-        }
-        .max(1);
-        assert_eq!(interval_ms, 2000);
+        assert_eq!(worker_interval_ms(0.5), 2000);
     }
 
     #[test]
     fn test_interval_for_zero_tps() {
-        // When tps_per_worker is 0, should default to 1000ms
-        let tps_per_worker = 0.0f64;
-        let interval_ms = if tps_per_worker > 0.0 {
-            (1000.0 / tps_per_worker) as u64
-        } else {
-            1000
-        }
-        .max(1);
-        assert_eq!(interval_ms, 1000);
+        assert_eq!(worker_interval_ms(0.0), 1000);
     }
 
     #[test]
     fn test_interval_for_negative_tps() {
-        // Negative TPS should also default to 1000ms (not > 0)
-        let tps_per_worker = -1.0f64;
-        let interval_ms = if tps_per_worker > 0.0 {
-            (1000.0 / tps_per_worker) as u64
-        } else {
-            1000
-        }
-        .max(1);
-        assert_eq!(interval_ms, 1000);
+        assert_eq!(worker_interval_ms(-1.0), 1000);
     }
 
     // ── Pre-signing pool sizing ──────────────────────────────────────────
@@ -589,14 +808,7 @@ mod tests {
     /// Worker interval for 1 TPS per worker is 1000ms.
     #[test]
     fn test_interval_for_1_tps() {
-        let tps_per_worker = 1.0f64;
-        let interval_ms = if tps_per_worker > 0.0 {
-            (1000.0 / tps_per_worker) as u64
-        } else {
-            1000
-        }
-        .max(1);
-        assert_eq!(interval_ms, 1000);
+        assert_eq!(worker_interval_ms(1.0), 1000);
     }
 
     /// Worker interval for 10 TPS is 100ms.
@@ -619,14 +831,7 @@ mod tests {
     /// Zero duration yields 0 TPS (guarded by > 0 check).
     #[test]
     fn test_actual_tps_zero_duration() {
-        let confirmed = 100u32;
-        let total_duration_secs = 0.0f32;
-        let actual_tps = if total_duration_secs > 0.0 {
-            confirmed as f32 / total_duration_secs
-        } else {
-            0.0
-        };
-        assert_eq!(actual_tps, 0.0);
+        assert_eq!(actual_tps(100, Duration::ZERO), 0.0);
     }
 
     // ── WindowEntry timeline ─────────────────────────────────────────────
@@ -653,14 +858,7 @@ mod tests {
     /// TPS from timeline: confirmed at second N / elapsed seconds.
     #[test]
     fn test_timeline_tps_from_entries() {
-        let confirmed = 500u32;
-        let elapsed_secs = 5.0f64;
-        let tps = if elapsed_secs > 0.0 {
-            confirmed as f64 / elapsed_secs
-        } else {
-            0.0
-        };
-        assert!((tps - 100.0).abs() < 0.01);
+        assert!((timeline_tps(500, 5.0) - 100.0).abs() < 0.01);
     }
 
     // ── SustainedResult construction ─────────────────────────────────────
@@ -737,13 +935,354 @@ mod tests {
         let worker_count = 100usize;
         let tps_per_worker = target_tps / worker_count as f64;
         assert!((tps_per_worker - 0.1).abs() < 0.001);
+        assert_eq!(worker_interval_ms(tps_per_worker), 10_000);
+    }
 
-        let interval_ms = if tps_per_worker > 0.0 {
-            (1000.0 / tps_per_worker) as u64
-        } else {
-            1000
-        }
-        .max(1);
-        assert_eq!(interval_ms, 10_000); // 10 seconds between sends per worker
+    #[tokio::test]
+    async fn test_run_block_tracker_task_returns_after_ws_failure() {
+        run_block_tracker_task(
+            url::Url::parse("ws://127.0.0.1:1").unwrap(),
+            url::Url::parse("http://127.0.0.1:1").unwrap(),
+            Arc::new(LatencyTracker::new()),
+            0,
+            Duration::from_millis(1),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_run_worker_submits_one_tx_and_stops_when_duration_expires() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"jsonrpc": "2.0", "id": 0, "result": "0xabc"}
+            ])))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let tracker = Arc::new(LatencyTracker::new());
+        let sent_count = Arc::new(AtomicU32::new(0));
+        let error_count = Arc::new(AtomicU32::new(0));
+
+        run_worker(
+            make_submitter(&mock_server.uri()),
+            tracker.clone(),
+            sent_count.clone(),
+            error_count.clone(),
+            test_metrics(),
+            Duration::from_secs(1),
+            0.0,
+            Instant::now() - Duration::from_millis(999),
+            Arc::new(vec![sample_signed_tx(0)]),
+            Arc::new(AtomicU32::new(0)),
+        )
+        .await;
+
+        assert_eq!(sent_count.load(Ordering::SeqCst), 1);
+        assert_eq!(error_count.load(Ordering::SeqCst), 0);
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_worker_records_submission_errors() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "jsonrpc": "2.0",
+                    "id": 0,
+                    "error": {"code": -32000, "message": "txpool full"}
+                }
+            ])))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let sent_count = Arc::new(AtomicU32::new(0));
+        let error_count = Arc::new(AtomicU32::new(0));
+
+        run_worker(
+            make_submitter(&mock_server.uri()),
+            Arc::new(LatencyTracker::new()),
+            sent_count.clone(),
+            error_count.clone(),
+            test_metrics(),
+            Duration::from_secs(1),
+            100.0,
+            Instant::now() - Duration::from_millis(999),
+            Arc::new(vec![sample_signed_tx(1)]),
+            Arc::new(AtomicU32::new(0)),
+        )
+        .await;
+
+        assert_eq!(sent_count.load(Ordering::SeqCst), 0);
+        assert_eq!(error_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_worker_records_transport_errors() {
+        let tracker = Arc::new(LatencyTracker::new());
+        let sent_count = Arc::new(AtomicU32::new(0));
+        let error_count = Arc::new(AtomicU32::new(0));
+
+        run_worker(
+            make_submitter("testerr://forced"),
+            tracker.clone(),
+            sent_count.clone(),
+            error_count.clone(),
+            test_metrics(),
+            Duration::from_secs(1),
+            100.0,
+            Instant::now() - Duration::from_millis(999),
+            Arc::new(vec![sample_signed_tx(9)]),
+            Arc::new(AtomicU32::new(0)),
+        )
+        .await;
+
+        assert_eq!(sent_count.load(Ordering::SeqCst), 0);
+        assert_eq!(error_count.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_worker_exits_cleanly_when_presigned_pool_is_empty() {
+        let tracker = Arc::new(LatencyTracker::new());
+        let sent_count = Arc::new(AtomicU32::new(0));
+        let error_count = Arc::new(AtomicU32::new(0));
+
+        run_worker(
+            make_submitter("http://127.0.0.1:19999"),
+            tracker.clone(),
+            sent_count.clone(),
+            error_count.clone(),
+            test_metrics(),
+            Duration::from_secs(1),
+            100.0,
+            Instant::now() - Duration::from_millis(999),
+            Arc::new(vec![]),
+            Arc::new(AtomicU32::new(0)),
+        )
+        .await;
+
+        assert_eq!(sent_count.load(Ordering::SeqCst), 0);
+        assert_eq!(error_count.load(Ordering::SeqCst), 0);
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_update_timeline_records_snapshot_from_tracker_state() {
+        let tracker = Arc::new(LatencyTracker::new());
+        let first = B256::with_last_byte(1);
+        let second = B256::with_last_byte(2);
+        tracker.record_submit(
+            first,
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+        tracker.record_submit(
+            second,
+            1,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+        tracker.on_block_inclusion(first, Instant::now());
+
+        let timeline = Arc::new(Mutex::new(Vec::new()));
+        update_timeline(
+            Instant::now(),
+            Duration::from_secs(1),
+            timeline.clone(),
+            tracker,
+            test_metrics(),
+        )
+        .await;
+
+        let timeline = timeline.lock().await.clone();
+        assert!(!timeline.is_empty());
+        assert_eq!(timeline[0].second, 0);
+        assert_eq!(timeline[0].sent, 2);
+        assert_eq!(timeline[0].confirmed, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_sustained_end_to_end_confirms_submitted_transactions() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc body");
+
+                if let Some(items) = body.as_array() {
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xsustained{idx:02x}"),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                let response = sustained_success_rpc_response(method.as_str(), &body);
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let config = sustained_test_config(&mock_server.uri());
+        let (result, gas_price) = run_sustained(&config)
+            .await
+            .expect("sustained run succeeds");
+
+        assert_eq!(gas_price, 2_000_000_000);
+        assert!(result.sent >= 1, "expected at least one submitted tx");
+        assert_eq!(result.confirmed, result.sent);
+        assert_eq!(result.pending, 0);
+        assert_eq!(result.errors, 0);
+        assert!(
+            !result.timeline.is_empty(),
+            "timeline should capture at least one snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_sustained_quiet_false_uses_multi_sender_distribution_and_receipt_retry() {
+        let mock_server = MockServer::start().await;
+        let receipt_count = Arc::new(AtomicU32::new(0));
+        let receipt_count_for_mock = receipt_count.clone();
+
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc body");
+
+                if let Some(items) = body.as_array() {
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xmulti{idx:02x}"),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                let response = sustained_retrying_receipt_rpc_response(
+                    method.as_str(),
+                    &body,
+                    receipt_count_for_mock.fetch_add(1, Ordering::SeqCst),
+                );
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = sustained_test_config(&mock_server.uri());
+        config.quiet = false;
+        config.sender_count = 3;
+        config.target_tps = 1;
+        config.duration_secs = 1;
+
+        let (result, gas_price) = run_sustained(&config)
+            .await
+            .expect("sustained run succeeds");
+
+        assert_eq!(gas_price, 2_000_000_000);
+        assert!(result.sent >= 1);
+        assert_eq!(result.confirmed, result.sent);
+        assert_eq!(result.pending, 0);
+        assert!(receipt_count.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn test_run_sustained_errors_when_submitter_creation_fails() {
+        let mut config = sustained_test_config("http://127.0.0.1:8545");
+        config.rpc_urls = vec![];
+
+        let err = run_sustained(&config)
+            .await
+            .expect_err("missing rpc_urls should fail submitter creation");
+        assert!(err.to_string().contains("At least one"));
+    }
+
+    #[tokio::test]
+    async fn test_run_sustained_errors_when_nonce_response_is_missing() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let method = rpc_method(request).expect("rpc method");
+                let response = sustained_missing_nonce_rpc_response(method.as_str());
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let config = sustained_test_config(&mock_server.uri());
+        let err = run_sustained(&config)
+            .await
+            .expect_err("missing nonce result should fail");
+        assert!(err.to_string().contains("Failed to get nonce for sender 0"));
+    }
+
+    #[test]
+    fn test_actual_tps_and_timeline_tps_zero_paths() {
+        assert_eq!(actual_tps(100, Duration::ZERO), 0.0);
+        assert_eq!(timeline_tps(100, 0.0), 0.0);
+    }
+
+    #[test]
+    fn test_log_analysis_result_handles_ok_and_err_paths() {
+        log_analysis_result(false, Ok("ascii report".to_string()));
+        log_analysis_result(false, Err(anyhow::anyhow!("boom")));
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected rpc method")]
+    fn test_unexpected_test_rpc_method_panics() {
+        unexpected_test_rpc_method("eth_chainId");
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected rpc method")]
+    fn test_sustained_success_rpc_response_panics_on_unexpected_method() {
+        sustained_success_rpc_response("eth_chainId", &serde_json::json!({}));
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected rpc method")]
+    fn test_sustained_retrying_receipt_rpc_response_panics_on_unexpected_method() {
+        sustained_retrying_receipt_rpc_response("eth_chainId", &serde_json::json!({}), 0);
+    }
+
+    #[test]
+    fn test_sustained_retrying_receipt_rpc_response_returns_null_first() {
+        let response = sustained_retrying_receipt_rpc_response(
+            "eth_getTransactionReceipt",
+            &serde_json::json!({"params": ["0xabc"]}),
+            0,
+        );
+        assert!(response.get("result").is_some_and(serde_json::Value::is_null));
+    }
+
+    #[test]
+    #[should_panic(expected = "unexpected rpc method")]
+    fn test_sustained_missing_nonce_rpc_response_panics_on_unexpected_method() {
+        sustained_missing_nonce_rpc_response("eth_chainId");
     }
 }

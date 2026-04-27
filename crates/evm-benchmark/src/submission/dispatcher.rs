@@ -80,6 +80,66 @@ impl Submitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TransactionType;
+    use alloy_primitives::B256;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
+    use tokio_tungstenite::{accept_async, tungstenite::protocol::Message};
+
+    fn make_test_tx(nonce: u64) -> SignedTxWithMetadata {
+        SignedTxWithMetadata {
+            hash: B256::with_last_byte(nonce as u8),
+            encoded: vec![0x02, nonce as u8],
+            nonce,
+            gas_limit: 21_000,
+            sender: alloy_primitives::Address::default(),
+            submit_time: Instant::now(),
+            method: TransactionType::SimpleTransfer,
+        }
+    }
+
+    async fn start_ws_rpc_server(
+        handler: Arc<dyn Fn(Value) -> Value + Send + Sync>,
+    ) -> (url::Url, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind ws test server");
+        let addr = listener
+            .local_addr()
+            .expect("failed to read ws test server address");
+
+        let task = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("failed to accept ws client");
+            let mut socket = accept_async(stream)
+                .await
+                .expect("failed to upgrade ws client");
+
+            while let Some(message) = socket.next().await {
+                let message = match message {
+                    Ok(message) => message,
+                    Err(_) => break,
+                };
+
+                let text = message
+                    .into_text()
+                    .expect("ws request should be sent as a text frame");
+                let request: Value = serde_json::from_str(&text.to_string())
+                    .expect("ws request should be valid json");
+                let response = handler(request);
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .expect("failed to send ws response");
+            }
+        });
+
+        let url = url::Url::parse(&format!("ws://{addr}")).expect("failed to parse ws test url");
+        (url, task)
+    }
 
     #[test]
     fn test_dispatcher_http_creation() {
@@ -156,13 +216,85 @@ mod tests {
         let submitter =
             Submitter::new(vec![rpc_url], &ws_url, 200, SubmissionMethod::Http).unwrap();
 
-        // Verify it created the Http variant, which wraps RpcDispatcher
-        match &submitter {
-            Submitter::Http(dispatcher) => {
-                assert_eq!(dispatcher.endpoint_count(), 1);
-            }
-            Submitter::WebSocket(_) => panic!("Expected Http variant"),
-        }
+        assert!(matches!(submitter, Submitter::Http(_)));
+        if let Submitter::Http(dispatcher) = &submitter { assert_eq!(dispatcher.endpoint_count(), 1); }
+    }
+
+    #[tokio::test]
+    async fn test_ws_warm_up_dispatches() {
+        let handler = Arc::new(|request: Value| {
+            let id = request.get("id").cloned().unwrap_or_else(|| json!(1));
+            assert_eq!(
+                request.get("method").and_then(|m| m.as_str()),
+                Some("eth_blockNumber")
+            );
+            json!({"jsonrpc": "2.0", "id": id, "result": "0x10"})
+        });
+        let (ws_url, server_task) = start_ws_rpc_server(handler).await;
+        let rpc_url = url::Url::parse("http://127.0.0.1:19999").unwrap();
+        let submitter =
+            Submitter::new(vec![rpc_url], &ws_url, 10, SubmissionMethod::WebSocket).unwrap();
+
+        let result = submitter.warm_up(2).await;
+        assert!(result.is_ok());
+
+        server_task
+            .await
+            .expect("ws server task should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_ws_submit_batch_dispatches() {
+        let handler = Arc::new(|request: Value| {
+            let id = request.get("id").cloned().unwrap_or_else(|| json!(1));
+            assert_eq!(
+                request.get("method").and_then(|m| m.as_str()),
+                Some("eth_sendRawTransaction")
+            );
+            json!({"jsonrpc": "2.0", "id": id, "result": format!("0x{:064x}", 1)})
+        });
+        let (ws_url, server_task) = start_ws_rpc_server(handler).await;
+        let rpc_url = url::Url::parse("http://127.0.0.1:19999").unwrap();
+        let submitter =
+            Submitter::new(vec![rpc_url], &ws_url, 10, SubmissionMethod::WebSocket).unwrap();
+
+        let result = submitter
+            .submit_batch(vec![make_test_tx(1)])
+            .await
+            .expect("ws submit_batch should delegate");
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.errors, 0);
+
+        server_task
+            .await
+            .expect("ws server task should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_ws_submit_single_dispatches() {
+        let handler = Arc::new(|request: Value| {
+            let id = request.get("id").cloned().unwrap_or_else(|| json!(1));
+            assert_eq!(
+                request.get("method").and_then(|m| m.as_str()),
+                Some("eth_sendRawTransaction")
+            );
+            json!({"jsonrpc": "2.0", "id": id, "result": format!("0x{:064x}", 7)})
+        });
+        let (ws_url, server_task) = start_ws_rpc_server(handler).await;
+        let rpc_url = url::Url::parse("http://127.0.0.1:19999").unwrap();
+        let submitter =
+            Submitter::new(vec![rpc_url], &ws_url, 10, SubmissionMethod::WebSocket).unwrap();
+
+        let result = submitter
+            .submit_single(make_test_tx(7))
+            .await
+            .expect("ws submit_single should delegate");
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.errors, 0);
+
+        server_task
+            .await
+            .expect("ws server task should finish cleanly");
     }
 
     #[tokio::test]

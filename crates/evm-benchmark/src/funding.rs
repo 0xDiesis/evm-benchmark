@@ -538,15 +538,13 @@ pub async fn fund_senders(
                     }
                     tokio::time::sleep(timeouts.poll_interval).await;
                 }
-                if !quiet {
-                    let remaining = check_balances(&client, rpc_url, sender_addresses).await?;
-                    if !remaining.is_empty() {
-                        eprintln!(
-                            "  Warning: {} accounts still unfunded after retry. \
-                             Benchmark may have partial failures.",
-                            remaining.len()
-                        );
-                    }
+                let remaining_count = check_balances(&client, rpc_url, sender_addresses).await?.len();
+                if !quiet && remaining_count > 0 {
+                    eprintln!(
+                        "  Warning: {} accounts still unfunded after retry. \
+                         Benchmark may have partial failures.",
+                        remaining_count
+                    );
                 }
             }
 
@@ -564,6 +562,234 @@ pub async fn fund_senders(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::{OsStr, OsString};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use wiremock::matchers::{body_partial_json, body_string_contains, method};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            // SAFETY: tests serialize environment mutation via `env_lock`.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => {
+                    // SAFETY: tests serialize environment mutation via `env_lock`.
+                    unsafe { std::env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: tests serialize environment mutation via `env_lock`.
+                    unsafe { std::env::remove_var(self.key) };
+                }
+            }
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn funding_timeout_guards(
+        chain_ready_secs: &str,
+        deploy_receipt_secs: &str,
+        funding_confirm_secs: &str,
+        retry_confirm_secs: &str,
+        poll_interval_ms: &str,
+    ) -> [EnvVarGuard; 5] {
+        [
+            EnvVarGuard::set("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS", chain_ready_secs),
+            EnvVarGuard::set("BENCH_FUND_DEPLOY_TIMEOUT_SECS", deploy_receipt_secs),
+            EnvVarGuard::set("BENCH_FUND_CONFIRM_TIMEOUT_SECS", funding_confirm_secs),
+            EnvVarGuard::set("BENCH_FUND_RETRY_TIMEOUT_SECS", retry_confirm_secs),
+            EnvVarGuard::set("BENCH_FUND_POLL_INTERVAL_MS", poll_interval_ms),
+        ]
+    }
+
+    #[derive(Clone, Copy)]
+    enum FundSendsFlow {
+        HappyPath,
+        BatchError,
+        ConfirmRevert,
+        ConfirmTimeout,
+        RetrySuccess,
+        RetryTimeoutWithRetryError,
+    }
+
+    #[derive(Default)]
+    struct RpcCallCounters {
+        balance: AtomicUsize,
+        block_number: AtomicUsize,
+        nonce: AtomicUsize,
+        send_raw: AtomicUsize,
+        receipt: AtomicUsize,
+    }
+
+    struct FundSendsResponder {
+        flow: FundSendsFlow,
+        counters: Arc<RpcCallCounters>,
+    }
+
+    impl FundSendsResponder {
+        fn new(flow: FundSendsFlow) -> Self {
+            Self {
+                flow,
+                counters: Arc::new(RpcCallCounters::default()),
+            }
+        }
+
+        fn json(result: serde_json::Value) -> ResponseTemplate {
+            ResponseTemplate::new(200).set_body_json(result)
+        }
+    }
+
+    impl Respond for FundSendsResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let payload: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("request body should be JSON");
+            let method = payload
+                .get("method")
+                .and_then(|value| value.as_str())
+                .expect("json-rpc method should be present");
+
+            match method {
+                "eth_getBalance" => {
+                    let call = self.counters.balance.fetch_add(1, Ordering::SeqCst);
+                    let result = match self.flow {
+                        FundSendsFlow::HappyPath
+                        | FundSendsFlow::BatchError
+                        | FundSendsFlow::ConfirmRevert
+                        | FundSendsFlow::ConfirmTimeout => {
+                            if call == 0 {
+                                "0x0"
+                            } else {
+                                "0x8ac7230489e80000"
+                            }
+                        }
+                        FundSendsFlow::RetrySuccess => {
+                            if call < 2 {
+                                "0x0"
+                            } else {
+                                "0x8ac7230489e80000"
+                            }
+                        }
+                        FundSendsFlow::RetryTimeoutWithRetryError => "0x0",
+                    };
+                    Self::json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": result,
+                    }))
+                }
+                "eth_gasPrice" => Self::json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": "0x3b9aca00",
+                })),
+                "eth_blockNumber" => {
+                    let call = self.counters.block_number.fetch_add(1, Ordering::SeqCst);
+                    let block = if call == 0 { "0x1" } else { "0x2" };
+                    Self::json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": block,
+                    }))
+                }
+                "eth_getTransactionCount" => {
+                    let call = self.counters.nonce.fetch_add(1, Ordering::SeqCst);
+                    let nonce = if call == 0 { "0x0" } else { "0x1" };
+                    Self::json(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": nonce,
+                    }))
+                }
+                "eth_sendRawTransaction" => {
+                    let call = self.counters.send_raw.fetch_add(1, Ordering::SeqCst);
+                    let response = match self.flow {
+                        FundSendsFlow::BatchError if call == 1 => serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "error": { "code": -32000, "message": "batch failed" },
+                        }),
+                        FundSendsFlow::RetryTimeoutWithRetryError if call == 2 => {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "error": { "code": -32000, "message": "retry failed" },
+                            })
+                        }
+                        _ => serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": format!("0x{:064x}", call + 1),
+                        }),
+                    };
+                    Self::json(response)
+                }
+                "eth_getTransactionReceipt" => {
+                    let call = self.counters.receipt.fetch_add(1, Ordering::SeqCst);
+                    let response = if call == 0 {
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "contractAddress": "0x00000000000000000000000000000000000000aa"
+                            },
+                        })
+                    } else {
+                        match self.flow {
+                            FundSendsFlow::ConfirmRevert => serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": { "status": "0x0" },
+                            }),
+                            FundSendsFlow::ConfirmTimeout => serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": null,
+                            }),
+                            _ => serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": { "status": "0x1" },
+                            }),
+                        }
+                    };
+                    Self::json(response)
+                }
+                other => Self::json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": -32601,
+                        "message": format!("unexpected json-rpc method: {other}"),
+                    }
+                })),
+            }
+        }
+    }
+
+    async fn mount_fund_senders_mock(flow: FundSendsFlow) -> MockServer {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(FundSendsResponder::new(flow))
+            .mount(&mock_server)
+            .await;
+        mock_server
+    }
 
     #[test]
     fn test_generate_sender_keys_deterministic() {
@@ -584,12 +810,7 @@ mod tests {
         let keys = generate_sender_keys(10);
         for (i, key) in keys.iter().enumerate() {
             let signer = PrivateKeySigner::from_str(key);
-            assert!(
-                signer.is_ok(),
-                "Key {} failed to parse: {:?}",
-                i,
-                signer.err()
-            );
+            assert!(signer.is_ok(), "key {i} should parse");
         }
     }
 
@@ -636,13 +857,39 @@ mod tests {
         assert!(keys.len() >= 5);
         for (i, key) in keys.iter().enumerate() {
             let result = PrivateKeySigner::from_str(key);
-            assert!(
-                result.is_ok(),
-                "Key {} is not a valid private key: {:?}",
-                i,
-                result.err()
+            assert!(result.is_ok(), "key {i} should be a valid private key");
+        }
+    }
+
+    #[test]
+    fn test_resolve_sender_keys_uses_env_and_filters_blanks() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::set_var("BENCH_KEY", " key-a , ,key-b ,, ") };
+        let keys = resolve_sender_keys(2);
+        assert_eq!(keys, vec!["key-a".to_string(), "key-b".to_string()]);
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::remove_var("BENCH_KEY") };
+    }
+
+    #[test]
+    fn test_env_var_guard_restores_previous_funding_timeout() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::set_var("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS", "9") };
+        {
+            let _env = EnvVarGuard::set("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS", "12");
+            assert_eq!(
+                std::env::var("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS").unwrap(),
+                "12"
             );
         }
+        assert_eq!(
+            std::env::var("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS").unwrap(),
+            "9"
+        );
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::remove_var("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS") };
     }
 
     #[test]
@@ -733,10 +980,49 @@ mod tests {
         assert_eq!(encoded_len, U256::from(MULTISEND_BATCH_SIZE));
     }
 
-    // ── Wiremock-based async tests for RPC-dependent functions ──────────
+    #[test]
+    fn test_parse_env_u64_and_timeouts_from_env() {
+        let _guard = env_lock().lock().unwrap();
+        let _chain_ready = EnvVarGuard::set("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS", "7");
+        let _deploy = EnvVarGuard::set("BENCH_FUND_DEPLOY_TIMEOUT_SECS", "0");
+        let _confirm = EnvVarGuard::set("BENCH_FUND_CONFIRM_TIMEOUT_SECS", "garbage");
+        let _retry = EnvVarGuard::set("BENCH_FUND_RETRY_TIMEOUT_SECS", "11");
+        let _poll = EnvVarGuard::set("BENCH_FUND_POLL_INTERVAL_MS", "250");
 
-    use wiremock::matchers::{body_partial_json, method};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+        assert_eq!(parse_env_u64("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS", 30), 7);
+        assert_eq!(parse_env_u64("BENCH_FUND_DEPLOY_TIMEOUT_SECS", 30), 30);
+        assert_eq!(parse_env_u64("BENCH_FUND_CONFIRM_TIMEOUT_SECS", 60), 60);
+
+        let timeouts = FundingTimeouts::from_env();
+        assert_eq!(timeouts.chain_ready, Duration::from_secs(7));
+        assert_eq!(timeouts.deploy_receipt, Duration::from_secs(30));
+        assert_eq!(timeouts.funding_confirm, Duration::from_secs(60));
+        assert_eq!(timeouts.retry_confirm, Duration::from_secs(11));
+        assert_eq!(timeouts.poll_interval, Duration::from_millis(250));
+    }
+
+    #[test]
+    fn test_parse_env_u64_missing_uses_default() {
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: tests serialize environment mutation via `env_lock`.
+        unsafe { std::env::remove_var("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS") };
+        assert_eq!(parse_env_u64("BENCH_FUND_CHAIN_READY_TIMEOUT_SECS", 42), 42);
+    }
+
+    #[test]
+    fn test_fund_sends_responder_unknown_method_returns_json_rpc_error() {
+        let responder = FundSendsResponder::new(FundSendsFlow::HappyPath);
+        let request = Request {
+            url: "http://localhost".parse().unwrap(),
+            method: "POST".parse().unwrap(),
+            headers: Default::default(),
+            body: br#"{"jsonrpc":"2.0","method":"eth_notReal","params":[],"id":1}"#.to_vec(),
+        };
+
+        let _response = responder.respond(&request);
+    }
+
+    // ── Wiremock-based async tests for RPC-dependent functions ──────────
 
     #[tokio::test]
     async fn test_fetch_gas_price_normal() {
@@ -831,6 +1117,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fetch_gas_price_invalid_hex_uses_default() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_gasPrice"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "result": "0xnothex"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let gas_price = fetch_gas_price(&client, &mock_server.uri())
+            .await
+            .expect("fetch_gas_price should fall back to default");
+        assert_eq!(gas_price, 2_000_000_000);
+    }
+
+    #[tokio::test]
     async fn test_get_nonce_success() {
         let mock_server = MockServer::start().await;
 
@@ -873,6 +1180,26 @@ mod tests {
             result.is_err(),
             "get_nonce should fail when result is missing"
         );
+    }
+
+    #[tokio::test]
+    async fn test_get_nonce_invalid_hex_errors() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getTransactionCount"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "result": "0xnothex"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let addr = Address::with_last_byte(0x01);
+        let result = get_nonce(&client, &mock_server.uri(), addr).await;
+        assert!(result.is_err(), "invalid nonce hex should fail");
     }
 
     #[tokio::test]
@@ -931,6 +1258,223 @@ mod tests {
         assert_eq!(to_fund[0].1, Address::with_last_byte(0x01));
         assert_eq!(to_fund[1].0, 1);
         assert_eq!(to_fund[1].1, Address::with_last_byte(0x02));
+    }
+
+    #[tokio::test]
+    async fn test_check_balances_missing_result_defaults_to_underfunded() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let to_fund = check_balances(&client, &mock_server.uri(), &addrs)
+            .await
+            .expect("missing result should default to zero");
+        assert_eq!(to_fund, vec![(0, Address::with_last_byte(0x01))]);
+    }
+
+    #[tokio::test]
+    async fn test_check_balances_can_distinguish_funded_and_underfunded_accounts() {
+        let mock_server = MockServer::start().await;
+        let funded = Address::with_last_byte(0x01);
+        let underfunded = Address::with_last_byte(0x02);
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance"
+            })))
+            .and(body_string_contains(format!("{funded:?}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "result": "0xde0b6b3a7640000"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getBalance"
+            })))
+            .and(body_string_contains(format!("{underfunded:?}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "result": "0x1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let addrs = vec![funded, underfunded];
+        let to_fund = check_balances(&client, &mock_server.uri(), &addrs)
+            .await
+            .expect("balance check should succeed");
+        assert_eq!(to_fund, vec![(1, underfunded)]);
+    }
+
+    #[tokio::test]
+    async fn test_deploy_multisend_send_raw_transaction_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_sendRawTransaction"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32000, "message": "replacement transaction underpriced" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let funder_key = generate_sender_keys(1).into_iter().next().unwrap();
+        let funder = PrivateKeySigner::from_str(&funder_key).unwrap();
+        let timeouts = FundingTimeouts {
+            chain_ready: Duration::from_millis(1),
+            deploy_receipt: Duration::from_millis(25),
+            funding_confirm: Duration::from_millis(25),
+            retry_confirm: Duration::from_millis(25),
+            poll_interval: Duration::from_millis(1),
+        };
+
+        let err = deploy_multisend(&client, &mock_server.uri(), &funder, 1, 0, 1, timeouts)
+            .await
+            .expect_err("RPC deploy error should bubble up");
+        assert!(err.to_string().contains("MultiSend deploy failed"));
+    }
+
+    #[tokio::test]
+    async fn test_deploy_multisend_times_out_without_receipt() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_sendRawTransaction"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x01"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getTransactionReceipt"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let funder_key = generate_sender_keys(1).into_iter().next().unwrap();
+        let funder = PrivateKeySigner::from_str(&funder_key).unwrap();
+        let timeouts = FundingTimeouts {
+            chain_ready: Duration::from_millis(1),
+            deploy_receipt: Duration::from_millis(25),
+            funding_confirm: Duration::from_millis(25),
+            retry_confirm: Duration::from_millis(25),
+            poll_interval: Duration::from_millis(1),
+        };
+
+        let err = deploy_multisend(&client, &mock_server.uri(), &funder, 1, 0, 1, timeouts)
+            .await
+            .expect_err("missing receipt should time out");
+        assert!(err.to_string().contains("receipt not found"));
+    }
+
+    #[tokio::test]
+    async fn test_fund_senders_full_happy_path() {
+        let _guard = env_lock().lock().unwrap();
+        let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
+        let mock_server = mount_fund_senders_mock(FundSendsFlow::HappyPath).await;
+
+        let funder_key = &generate_sender_keys(1)[0];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let result = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, false).await;
+        assert!(result.is_ok(), "expected full funding path to succeed");
+    }
+
+    #[tokio::test]
+    async fn test_fund_senders_batch_submission_error() {
+        let _guard = env_lock().lock().unwrap();
+        let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
+        let mock_server = mount_fund_senders_mock(FundSendsFlow::BatchError).await;
+
+        let funder_key = &generate_sender_keys(1)[0];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let err = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, true)
+            .await
+            .expect_err("batch RPC error should fail funding");
+        assert!(err.to_string().contains("MultiSend batch 1 failed"));
+    }
+
+    #[tokio::test]
+    async fn test_fund_senders_receipt_revert_error() {
+        let _guard = env_lock().lock().unwrap();
+        let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
+        let mock_server = mount_fund_senders_mock(FundSendsFlow::ConfirmRevert).await;
+
+        let funder_key = &generate_sender_keys(1)[0];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let err = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, true)
+            .await
+            .expect_err("reverted funding receipt should fail");
+        assert!(err.to_string().contains("reverted (status=0x0)"));
+    }
+
+    #[tokio::test]
+    async fn test_fund_senders_confirm_timeout_error() {
+        let _guard = env_lock().lock().unwrap();
+        let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
+        let mock_server = mount_fund_senders_mock(FundSendsFlow::ConfirmTimeout).await;
+
+        let funder_key = &generate_sender_keys(1)[0];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let err = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, true)
+            .await
+            .expect_err("missing funding receipts should time out");
+        assert!(err.to_string().contains("did not confirm within 1s"));
+    }
+
+    #[tokio::test]
+    async fn test_fund_senders_retry_path_succeeds() {
+        let _guard = env_lock().lock().unwrap();
+        let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
+        let mock_server = mount_fund_senders_mock(FundSendsFlow::RetrySuccess).await;
+
+        let funder_key = &generate_sender_keys(1)[0];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let result = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, false).await;
+        assert!(
+            result.is_ok(),
+            "retry flow should eventually fund the account"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fund_senders_retry_timeout_returns_ok_with_warning() {
+        let _guard = env_lock().lock().unwrap();
+        let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
+        let mock_server = mount_fund_senders_mock(FundSendsFlow::RetryTimeoutWithRetryError).await;
+
+        let funder_key = &generate_sender_keys(1)[0];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let result = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, false).await;
+        assert!(
+            result.is_ok(),
+            "function currently returns Ok even if retry funding leaves accounts unfunded"
+        );
     }
 
     #[tokio::test]

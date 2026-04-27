@@ -129,9 +129,16 @@ pub async fn write_report(
 mod tests {
     use super::*;
     use crate::config::{Config, SubmissionMethod};
-    use crate::types::{ExecutionMode, LatencyStats, TestMode};
+    use crate::types::{
+        CeilingResult, CeilingStep, ExecutionMode, LatencyStats, PerMethodStats, TestMode,
+    };
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::sync::{LazyLock, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use url::Url;
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     fn make_test_config() -> Config {
         Config {
@@ -190,13 +197,34 @@ mod tests {
         }
     }
 
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "evm-benchmark-{prefix}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn cleanup_report_artifacts(path: &Path) {
+        let replay = build_replay_pack_path(path);
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(replay);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
     #[tokio::test]
     async fn test_write_report_produces_valid_json() {
         let config = make_test_config();
         let result = make_test_result();
 
-        let dir = std::env::temp_dir();
-        let path = dir.join(format!("bench_test_{}.json", std::process::id()));
+        let dir = unique_temp_dir("report-basic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bench_test.json");
 
         write_report(&config, &result, &path, None, None)
             .await
@@ -215,11 +243,257 @@ mod tests {
         assert_eq!(parsed["results"]["confirmed"], 95);
         assert!(parsed["captured_at"].as_str().is_some());
 
-        // Cleanup
-        let _ = tokio::fs::remove_file(&path).await;
-        let replay = path.with_file_name(
-            "bench_test_".to_string() + &std::process::id().to_string() + ".replay.json",
+        cleanup_report_artifacts(&path);
+    }
+
+    #[test]
+    fn test_estimate_avg_gas_per_confirmed_uses_weighted_average() {
+        let mut result = make_test_result();
+        result.confirmed = 4;
+        result.per_method = Some(BTreeMap::from([
+            (
+                "mint".to_string(),
+                PerMethodStats {
+                    count: 2,
+                    confirmed: 2,
+                    reverted: 0,
+                    avg_gas: 50_000,
+                    latency_p50: 10,
+                    latency_p95: 20,
+                },
+            ),
+            (
+                "swap".to_string(),
+                PerMethodStats {
+                    count: 2,
+                    confirmed: 2,
+                    reverted: 0,
+                    avg_gas: 100_000,
+                    latency_p50: 10,
+                    latency_p95: 20,
+                },
+            ),
+        ]));
+
+        assert_eq!(estimate_avg_gas_per_confirmed(&result), 75_000);
+    }
+
+    #[test]
+    fn test_estimate_avg_gas_per_confirmed_falls_back_without_confirmed_samples() {
+        let mut result = make_test_result();
+        result.per_method = Some(BTreeMap::from([(
+            "mint".to_string(),
+            PerMethodStats {
+                count: 3,
+                confirmed: 0,
+                reverted: 3,
+                avg_gas: 80_000,
+                latency_p50: 10,
+                latency_p95: 20,
+            },
+        )]));
+
+        assert_eq!(estimate_avg_gas_per_confirmed(&result), 21_000);
+    }
+
+    #[test]
+    fn test_build_replay_pack_path_swaps_extension() {
+        let output = PathBuf::from("/tmp/bench.report.json");
+        assert_eq!(
+            build_replay_pack_path(&output),
+            PathBuf::from("/tmp/bench.report.replay.json")
         );
-        let _ = tokio::fs::remove_file(replay).await;
+    }
+
+    #[tokio::test]
+    async fn test_write_report_includes_ceiling_cost_efficiency_and_replay_manifest() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let mut config = make_test_config();
+        config.sender_keys = vec!["0xabc".to_string()];
+
+        let mut result = make_test_result();
+        result.confirmed = 4;
+        result.per_method = Some(BTreeMap::from([
+            (
+                "mint".to_string(),
+                PerMethodStats {
+                    count: 2,
+                    confirmed: 2,
+                    reverted: 0,
+                    avg_gas: 50_000,
+                    latency_p50: 10,
+                    latency_p95: 20,
+                },
+            ),
+            (
+                "swap".to_string(),
+                PerMethodStats {
+                    count: 2,
+                    confirmed: 2,
+                    reverted: 0,
+                    avg_gas: 100_000,
+                    latency_p50: 10,
+                    latency_p95: 20,
+                },
+            ),
+        ]));
+
+        let ceiling = CeilingResult {
+            steps: vec![CeilingStep {
+                target_tps: 100,
+                actual_tps: 95,
+                pending_ratio: 0.01,
+                error_rate: 0.0,
+                duration_ms: 1_000,
+                is_saturated: false,
+            }],
+            ceiling_tps: 95,
+            burst_peak_tps: 110,
+            confidence_score: 0.92,
+            confidence_band_low: 90,
+            confidence_band_high: 100,
+            adaptive_step_enabled: true,
+        };
+
+        unsafe {
+            std::env::set_var("BENCH_GAS_PRICE_WEI", "999999");
+            std::env::set_var("BENCH_PREFLIGHT_STRICT", "1");
+        }
+
+        let dir = unique_temp_dir("report-rich");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.json");
+
+        write_report(&config, &result, &path, Some(&ceiling), Some(3))
+            .await
+            .unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        let replay_contents = tokio::fs::read_to_string(build_replay_pack_path(&path))
+            .await
+            .unwrap();
+        let replay: serde_json::Value = serde_json::from_str(&replay_contents).unwrap();
+
+        assert_eq!(parsed["ceiling_analysis"]["sampled_steps"], 1);
+        assert_eq!(parsed["cost_efficiency"]["estimated_total_gas"], 300_000);
+        assert_eq!(
+            parsed["cost_efficiency"]["estimated_total_fee_wei"],
+            "900000"
+        );
+        assert_eq!(parsed["replay_pack"], "report.replay.json");
+        assert_eq!(replay["env"]["BENCH_KEY"], "<redacted>");
+        assert_eq!(replay["env"]["BENCH_PREFLIGHT_STRICT"], "1");
+        assert_eq!(replay["env"]["BENCH_RETRY_PROFILE"], "light");
+        assert_eq!(replay["env"]["BENCH_FINALITY_CONFIRMATIONS"], "0");
+
+        unsafe {
+            std::env::remove_var("BENCH_GAS_PRICE_WEI");
+            std::env::remove_var("BENCH_PREFLIGHT_STRICT");
+        }
+        cleanup_report_artifacts(&path);
+    }
+
+    #[tokio::test]
+    async fn test_write_report_uses_env_gas_price_when_argument_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("BENCH_GAS_PRICE_WEI", "5");
+            std::env::remove_var("BENCH_PREFLIGHT_STRICT");
+        }
+
+        let config = make_test_config();
+        let result = make_test_result();
+        let dir = unique_temp_dir("report-env-gas");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.json");
+
+        write_report(&config, &result, &path, None, None)
+            .await
+            .unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(parsed["cost_efficiency"]["estimated_total_gas"], 1_995_000);
+        assert_eq!(
+            parsed["cost_efficiency"]["estimated_total_fee_wei"],
+            "9975000"
+        );
+
+        unsafe {
+            std::env::remove_var("BENCH_GAS_PRICE_WEI");
+        }
+        cleanup_report_artifacts(&path);
+    }
+
+    #[tokio::test]
+    async fn test_write_report_skips_cost_efficiency_for_zero_gas_price() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("BENCH_GAS_PRICE_WEI", "0");
+            std::env::remove_var("BENCH_PREFLIGHT_STRICT");
+        }
+
+        let config = make_test_config();
+        let result = make_test_result();
+        let dir = unique_temp_dir("report-zero-gas");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.json");
+
+        write_report(&config, &result, &path, None, None)
+            .await
+            .unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert!(parsed["cost_efficiency"].is_null());
+
+        unsafe {
+            std::env::remove_var("BENCH_GAS_PRICE_WEI");
+        }
+        cleanup_report_artifacts(&path);
+    }
+
+    #[tokio::test]
+    async fn test_write_report_sets_confirmed_per_eth_to_zero_when_fee_is_zero() {
+        let config = make_test_config();
+        let mut result = make_test_result();
+        result.confirmed = 0;
+        let dir = unique_temp_dir("report-zero-fee");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("report.json");
+
+        write_report(&config, &result, &path, None, Some(1))
+            .await
+            .unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+
+        assert_eq!(parsed["cost_efficiency"]["estimated_total_fee_wei"], "0");
+        assert_eq!(parsed["cost_efficiency"]["confirmed_per_eth"], 0.0);
+
+        cleanup_report_artifacts(&path);
+    }
+
+    #[tokio::test]
+    async fn test_write_report_propagates_file_write_errors() {
+        let config = make_test_config();
+        let result = make_test_result();
+        let dir = unique_temp_dir("report-dir-output");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = write_report(&config, &result, &dir, None, None)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("Is a directory") || err.to_string().contains("os error 21"),
+            "unexpected error: {err:#}"
+        );
+        let _ = std::fs::remove_file(build_replay_pack_path(&dir));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

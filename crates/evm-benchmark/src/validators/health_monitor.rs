@@ -161,8 +161,11 @@ impl HealthMonitor {
 
         let task = tokio::spawn(async move {
             loop {
-                for entry in health_data.iter() {
-                    let url = entry.key().clone();
+                let urls: Vec<String> = health_data
+                    .iter()
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                for url in urls {
                     // Simulate health check - in real implementation would call RPC
                     Self::perform_health_check(&url, &health_data, &latency_samples).await;
                 }
@@ -193,13 +196,13 @@ impl HealthMonitor {
                 }
 
                 // Track latency sample
-                if let Some(mut samples) = latency_samples.get_mut(url) {
+                latency_samples.get_mut(url).map(|mut samples| {
                     samples.push(latency_ms);
                     // Keep only the last N samples
                     if samples.len() > 1000 {
                         samples.remove(0);
                     }
-                }
+                });
             }
             Err(e) => {
                 warn!(url, error = %e, "Health check failed");
@@ -313,6 +316,8 @@ impl HealthMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_string_contains, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_validator_health_initialization() {
@@ -492,7 +497,8 @@ mod tests {
         let monitor = HealthMonitor::new(vec!["http://localhost:8545".to_string()], 10).unwrap();
 
         let url = "http://localhost:8545";
-        if let Some(mut samples) = monitor.latency_samples.get_mut(url) {
+        {
+            let mut samples = monitor.latency_samples.get_mut(url).unwrap();
             for i in 1..=100 {
                 samples.push(i);
             }
@@ -606,6 +612,157 @@ mod tests {
 
         // Abort the background task so it doesn't leak
         monitor.task_handle.unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn test_health_monitor_start_runs_background_checks() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"eth_blockNumber\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x2b"})),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let mut monitor = HealthMonitor::new(vec![mock_server.uri()], 1).unwrap();
+        monitor.poll_interval = Duration::from_millis(5);
+        monitor.start().unwrap();
+
+        let mut observed_success = false;
+        for _ in 0..40 {
+            let health = monitor.get_health_status().pop().unwrap();
+            if health.successful_checks > 0 && health.is_connected {
+                observed_success = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        monitor.task_handle.take().unwrap().abort();
+        assert!(observed_success);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_block_number_success_and_errors() {
+        let success_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"eth_blockNumber\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x2a"})),
+            )
+            .mount(&success_server)
+            .await;
+
+        let (block, latency_ms) = HealthMonitor::fetch_block_number(&success_server.uri())
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(block, 42);
+        assert!(latency_ms <= 5_000);
+
+        let missing_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jsonrpc":"2.0","id":1})),
+            )
+            .mount(&missing_server)
+            .await;
+        assert!(
+            HealthMonitor::fetch_block_number(&missing_server.uri())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("No result")
+        );
+
+        let invalid_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0xzz"})),
+            )
+            .mount(&invalid_server)
+            .await;
+        assert!(
+            HealthMonitor::fetch_block_number(&invalid_server.uri())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid block number")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_perform_health_check_updates_success_and_failure_paths() {
+        let success_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"eth_blockNumber\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x10"})),
+            )
+            .mount(&success_server)
+            .await;
+
+        let url = success_server.uri();
+        let monitor = HealthMonitor::new(vec![url.clone()], 1).unwrap();
+        HealthMonitor::perform_health_check(&url, &monitor.health_data, &monitor.latency_samples)
+            .await;
+
+        let health = monitor.get_validator_health(&url).unwrap();
+        assert_eq!(health.block_height, Some(16));
+        assert!(health.is_connected);
+        assert_eq!(health.successful_checks, 1);
+        assert!(
+            monitor
+                .latency_samples
+                .get(&url)
+                .map(|samples| !samples.is_empty())
+                .unwrap_or(false)
+        );
+
+        let failure_url = "http://127.0.0.1:9".to_string();
+        let failure_monitor = HealthMonitor::new(vec![failure_url.clone()], 1).unwrap();
+        HealthMonitor::perform_health_check(
+            &failure_url,
+            &failure_monitor.health_data,
+            &failure_monitor.latency_samples,
+        )
+        .await;
+
+        let failed = failure_monitor.get_validator_health(&failure_url).unwrap();
+        assert_eq!(failed.failed_checks, 1);
+        assert!(!failed.is_connected);
+    }
+
+    #[tokio::test]
+    async fn test_perform_health_check_trims_latency_samples_over_limit() {
+        let success_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_string_contains("\"method\":\"eth_blockNumber\""))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":"0x11"})),
+            )
+            .mount(&success_server)
+            .await;
+
+        let url = success_server.uri();
+        let monitor = HealthMonitor::new(vec![url.clone()], 1).unwrap();
+        {
+            let mut samples = monitor.latency_samples.get_mut(&url).unwrap();
+            samples.extend(1..=1000);
+        }
+
+        HealthMonitor::perform_health_check(&url, &monitor.health_data, &monitor.latency_samples)
+            .await;
+
+        let samples = monitor.latency_samples.get(&url).unwrap();
+        assert_eq!(samples.len(), 1000);
+        assert_eq!(samples[0], 2);
     }
 
     #[test]

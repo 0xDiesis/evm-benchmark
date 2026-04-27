@@ -459,12 +459,11 @@ mod tests {
         );
 
         let bottlenecks = detect_bottlenecks(&snapshot);
-        if bottlenecks.len() > 1 {
-            // Verify sorted by severity descending
-            for i in 0..bottlenecks.len() - 1 {
-                assert!(bottlenecks[i].severity >= bottlenecks[i + 1].severity);
-            }
-        }
+        assert!(
+            bottlenecks
+                .windows(2)
+                .all(|pair| pair[0].severity >= pair[1].severity)
+        );
     }
 
     #[test]

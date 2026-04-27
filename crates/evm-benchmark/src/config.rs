@@ -217,8 +217,9 @@ impl Args {
         let rpc_urls: Result<Vec<Url>, _> = self
             .rpc_endpoints
             .split(',')
-            .map(|url| {
-                let trimmed = url.trim();
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(|trimmed| {
                 Url::parse(trimmed)
                     .map_err(|e| anyhow::anyhow!("Invalid RPC URL '{}': {}", trimmed, e))
             })
@@ -369,6 +370,28 @@ mod tests {
         assert_eq!(config.rpc_urls[1].host_str(), Some("b"));
         // Primary RPC should be the first endpoint
         assert_eq!(config.rpc.host_str(), Some("a"));
+    }
+
+    #[test]
+    fn test_args_into_config_ignores_blank_endpoints() {
+        let args = make_args(" http://a:8545 , , http://b:8545 , ", "http");
+        let config = args.into_config().expect("into_config failed");
+        assert_eq!(config.rpc_urls.len(), 2);
+        assert_eq!(config.rpc_urls[0].host_str(), Some("a"));
+        assert_eq!(config.rpc_urls[1].host_str(), Some("b"));
+    }
+
+    #[test]
+    fn test_args_into_config_requires_at_least_one_endpoint() {
+        let args = make_args(" ,  , ", "http");
+        let result = args.into_config();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("At least one RPC endpoint URL is required")
+        );
     }
 
     #[test]
