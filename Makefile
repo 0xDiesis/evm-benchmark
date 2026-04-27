@@ -1,4 +1,4 @@
-.PHONY: build test clippy fmt check help \
+.PHONY: build test clippy fmt check quality quality-fix help \
        bench bench-all compare compare-all \
        sweep sweep-all sweep-list \
        results results-latest results-compare results-summary \
@@ -49,6 +49,14 @@ check: ## Run fmt check, clippy, and tests
 	$(CARGO) fmt --all --check
 	$(MAKE) clippy
 	$(MAKE) test
+
+quality: ## Run static quality checks
+	$(CARGO) fmt --all --check
+	$(MAKE) clippy
+
+quality-fix: ## Apply automatic quality fixes where available
+	$(CARGO) fmt --all
+	$(CARGO) clippy --fix --manifest-path $(HARNESS_MANIFEST) --allow-dirty --allow-staged -- -D warnings
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Benchmark contract bytecode

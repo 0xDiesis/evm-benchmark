@@ -1,0 +1,191 @@
+name: Coverage
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  # Enable once the repository is public or the GitHub plan supports Pages publish.
+  ENABLE_PAGES_PUBLISH: "false"
+
+jobs:
+  doublcov:
+    name: Doublcov
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Setup Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install Doublcov
+        uses: doublesharp/doublcov@v0
+        with:
+          version: latest
+          install-only: "true"
+
+      - name: Restore Rust Doublcov history
+        uses: actions/cache/restore@v4
+        with:
+          path: .doublcov/history.json
+          key: doublcov-rust-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            doublcov-rust-history-${{ github.ref_name }}-
+            doublcov-rust-history-
+
+      - name: Generate Rust LCOV
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --all-targets --lcov --output-path coverage/lcov.info
+
+      - name: Build Rust Doublcov report
+        run: doublcov build --lcov coverage/lcov.info --sources . --out coverage/report --mode static --no-open
+
+      - name: Save Rust Doublcov history
+        if: always() && hashFiles('.doublcov/history.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .doublcov/history.json
+          key: doublcov-rust-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Restore contracts Doublcov history
+        uses: actions/cache/restore@v4
+        with:
+          path: contracts/.doublcov/history.json
+          key: doublcov-contracts-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            doublcov-contracts-history-${{ github.ref_name }}-
+            doublcov-contracts-history-
+
+      - name: Generate contracts LCOV
+        working-directory: contracts
+        run: |
+          mkdir -p coverage
+          forge coverage \
+            --report lcov \
+            --report-file coverage/lcov.info \
+            --exclude-tests
+
+      - name: Build contracts Doublcov report
+        working-directory: contracts
+        run: doublcov build --lcov coverage/lcov.info --sources . --out coverage/report --mode static --no-open
+
+      - name: Save contracts Doublcov history
+        if: always() && hashFiles('contracts/.doublcov/history.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: contracts/.doublcov/history.json
+          key: doublcov-contracts-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload Doublcov report
+        if: always() && hashFiles('coverage/report/index.html', 'contracts/coverage/report/index.html') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: doublcov-report
+          path: |
+            coverage/report
+            contracts/coverage/report
+          if-no-files-found: error
+
+      - name: Upload coverage data
+        if: always() && hashFiles('coverage/lcov.info', 'contracts/coverage/lcov.info') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: doublcov-data
+          path: |
+            coverage/lcov.info
+            .doublcov/history.json
+            contracts/coverage/lcov.info
+            contracts/.doublcov/history.json
+          if-no-files-found: warn
+          include-hidden-files: true
+
+      - name: Prepare Pages artifact
+        if: env.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('coverage/report/index.html', 'contracts/coverage/report/index.html') != ''
+        run: |
+          mkdir -p pages/coverage/rust pages/coverage/contracts
+          cp -R coverage/report/. pages/coverage/rust/
+          cp -R contracts/coverage/report/. pages/coverage/contracts/
+          cat > pages/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8">
+          <title>evm-benchmark coverage</title>
+          <h1>evm-benchmark coverage reports</h1>
+          <ul>
+            <li><a href="coverage/rust/">Rust harness coverage</a></li>
+            <li><a href="coverage/contracts/">Benchmark contracts coverage</a></li>
+          </ul>
+          HTML
+
+      - name: Upload Pages artifact
+        if: env.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('pages/coverage/rust/index.html', 'pages/coverage/contracts/index.html') != ''
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages
+
+      - name: Write summary
+        if: always() && hashFiles('coverage/report/index.html', 'contracts/coverage/report/index.html') != ''
+        run: |
+          {
+            echo "## Doublcov coverage"
+            echo
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              echo "Download the \`doublcov-report\` artifact to inspect the Rust and contracts reports locally."
+            elif [ "${{ env.ENABLE_PAGES_PUBLISH }}" = "true" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+              echo "This run also publishes the Rust and contracts reports to GitHub Pages."
+            fi
+            echo
+            echo "History is restored from and saved to the \`doublcov-*-history-*\` Actions cache keys."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  pages:
+    name: Publish coverage page
+    needs: doublcov
+    if: env.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}coverage/
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+      - name: Write Pages summary
+        run: |
+          {
+            echo "## Published coverage"
+            echo
+            echo "${{ steps.deployment.outputs.page_url }}coverage/"
+          } >> "$GITHUB_STEP_SUMMARY"

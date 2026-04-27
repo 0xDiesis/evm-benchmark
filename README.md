@@ -1,6 +1,11 @@
 # EVM Benchmark
 
+[![Coverage](https://github.com/0xDiesis/evm-benchmark/actions/workflows/coverage.yml/badge.svg)](https://github.com/0xDiesis/evm-benchmark/actions/workflows/coverage.yml)
+[![Coverage Report](https://img.shields.io/badge/coverage-pages-blue)](https://0xdiesis.github.io/evm-benchmark/coverage/)
+
 Benchmarking and chain-comparison toolkit for EVM-compatible networks, centered on the Rust `evm-benchmark` load generator and a set of reproducible local chain targets.
+
+Published coverage report for the Rust harness and benchmark contracts: [coverage report](https://0xdiesis.github.io/evm-benchmark/coverage/).
 
 This repository is chain-agnostic: benchmark orchestration, reporting, and harness behavior are shared across all supported targets.
 
