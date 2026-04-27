@@ -49,5 +49,16 @@ jobs:
       - uses: foundry-rs/foundry-toolchain@v1
         with:
           version: stable
+      - name: Cache Foundry build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            contracts/cache
+            contracts/out
+          key: foundry-build-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('contracts/foundry.toml', 'contracts/src/**/*.sol', 'contracts/test/**/*.sol', 'contracts/lib/**/*.sol') }}
+          restore-keys: |
+            foundry-build-${{ runner.os }}-${{ github.ref_name }}-
+            foundry-build-${{ runner.os }}-main-
+            foundry-build-${{ runner.os }}-
       - name: Verify committed bytecode matches contracts/ source
         run: make bytecode-check
