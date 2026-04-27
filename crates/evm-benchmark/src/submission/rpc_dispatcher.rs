@@ -88,7 +88,11 @@ impl RpcDispatcher {
         let mut endpoints = Vec::new();
 
         for url in urls {
-            submitters.push(RpcSubmitter::with_retry_profile(&url, batch_size, retry_profile)?);
+            submitters.push(RpcSubmitter::with_retry_profile(
+                &url,
+                batch_size,
+                retry_profile,
+            )?);
             endpoints.push(EndpointHealth::new(url));
         }
 
@@ -139,7 +143,9 @@ impl RpcDispatcher {
                 let endpoints = self.endpoints.lock().unwrap();
                 if !endpoints[idx].is_healthy() {
                     attempts += 1;
-                    if attempts >= max_attempts { anyhow::bail!("All RPC endpoints are degraded or unavailable"); }
+                    if attempts >= max_attempts {
+                        anyhow::bail!("All RPC endpoints are degraded or unavailable");
+                    }
                     continue;
                 }
             }
@@ -182,7 +188,9 @@ impl RpcDispatcher {
                     }
 
                     attempts += 1;
-                    if attempts >= max_attempts { anyhow::bail!("All RPC endpoints failed. Last error: {}", e); }
+                    if attempts >= max_attempts {
+                        anyhow::bail!("All RPC endpoints failed. Last error: {}", e);
+                    }
                 }
             }
         }

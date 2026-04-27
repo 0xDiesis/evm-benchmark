@@ -217,7 +217,9 @@ mod tests {
             Submitter::new(vec![rpc_url], &ws_url, 200, SubmissionMethod::Http).unwrap();
 
         assert!(matches!(submitter, Submitter::Http(_)));
-        if let Submitter::Http(dispatcher) = &submitter { assert_eq!(dispatcher.endpoint_count(), 1); }
+        if let Submitter::Http(dispatcher) = &submitter {
+            assert_eq!(dispatcher.endpoint_count(), 1);
+        }
     }
 
     #[tokio::test]

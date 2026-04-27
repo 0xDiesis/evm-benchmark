@@ -538,7 +538,9 @@ pub async fn fund_senders(
                     }
                     tokio::time::sleep(timeouts.poll_interval).await;
                 }
-                let remaining_count = check_balances(&client, rpc_url, sender_addresses).await?.len();
+                let remaining_count = check_balances(&client, rpc_url, sender_addresses)
+                    .await?
+                    .len();
                 if !quiet && remaining_count > 0 {
                     eprintln!(
                         "  Warning: {} accounts still unfunded after retry. \

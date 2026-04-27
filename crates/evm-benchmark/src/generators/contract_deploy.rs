@@ -29,6 +29,21 @@ const TOKEN_BYTECODE: &str = include_str!("../../bytecode/BenchmarkToken.hex");
 const PAIR_BYTECODE: &str = include_str!("../../bytecode/BenchmarkPair.hex");
 const NFT_BYTECODE: &str = include_str!("../../bytecode/BenchmarkNFT.hex");
 
+#[derive(Clone, Copy, Debug)]
+struct ReceiptPolling {
+    max_receipt_polls: usize,
+    poll_interval: Duration,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeployRequest<'a> {
+    deployer: &'a PrivateKeySigner,
+    chain_id: u64,
+    gas_price: u128,
+    nonce: u64,
+    bytecode: &'a [u8],
+}
+
 /// Deploy a single contract and return its address.
 async fn deploy_one(
     client: &reqwest::Client,
@@ -42,13 +57,17 @@ async fn deploy_one(
     deploy_one_with_polling(
         client,
         rpc_url,
-        deployer,
-        chain_id,
-        gas_price,
-        nonce,
-        bytecode,
-        120,
-        Duration::from_millis(500),
+        DeployRequest {
+            deployer,
+            chain_id,
+            gas_price,
+            nonce,
+            bytecode,
+        },
+        ReceiptPolling {
+            max_receipt_polls: 120,
+            poll_interval: Duration::from_millis(500),
+        },
     )
     .await
 }
@@ -56,13 +75,8 @@ async fn deploy_one(
 async fn deploy_one_with_polling(
     client: &reqwest::Client,
     rpc_url: &str,
-    deployer: &PrivateKeySigner,
-    chain_id: u64,
-    gas_price: u128,
-    nonce: u64,
-    bytecode: &[u8],
-    max_receipt_polls: usize,
-    poll_interval: Duration,
+    deploy_request: DeployRequest<'_>,
+    receipt_polling: ReceiptPolling,
 ) -> Result<(Address, u64)> {
     use alloy_consensus::{SignableTransaction, TxLegacy};
     use alloy_eips::eip2718::Encodable2718;
@@ -70,16 +84,16 @@ async fn deploy_one_with_polling(
     use alloy_primitives::TxKind;
 
     let mut tx = TxLegacy {
-        chain_id: Some(chain_id),
-        nonce,
-        gas_price,
+        chain_id: Some(deploy_request.chain_id),
+        nonce: deploy_request.nonce,
+        gas_price: deploy_request.gas_price,
         gas_limit: 3_000_000, // generous for contract creation
         to: TxKind::Create,
         value: U256::ZERO,
-        input: Bytes::from(bytecode.to_vec()),
+        input: Bytes::from(deploy_request.bytecode.to_vec()),
     };
 
-    let sig = deployer.sign_transaction_sync(&mut tx)?;
+    let sig = deploy_request.deployer.sign_transaction_sync(&mut tx)?;
     let signed = tx.into_signed(sig);
     let envelope = alloy_consensus::TxEnvelope::from(signed);
     let encoded = Encodable2718::encoded_2718(&envelope);
@@ -98,8 +112,8 @@ async fn deploy_one_with_polling(
     }
 
     // Wait for receipt
-    for _ in 0..max_receipt_polls {
-        tokio::time::sleep(poll_interval).await;
+    for _ in 0..receipt_polling.max_receipt_polls {
+        tokio::time::sleep(receipt_polling.poll_interval).await;
         let receipt_payload = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "eth_getTransactionReceipt",
@@ -112,7 +126,7 @@ async fn deploy_one_with_polling(
             && let Some(addr_str) = receipt.get("contractAddress").and_then(|a| a.as_str())
         {
             let addr = Address::from_str(addr_str)?;
-            return Ok((addr, nonce + 1));
+            return Ok((addr, deploy_request.nonce + 1));
         }
     }
     anyhow::bail!(
@@ -356,13 +370,17 @@ mod tests {
         let (address, next_nonce) = deploy_one_with_polling(
             &client,
             &server.uri(),
-            &test_signer(),
-            1,
-            1_000_000_000,
-            7,
-            &[0xde, 0xad],
-            1,
-            Duration::ZERO,
+            DeployRequest {
+                deployer: &test_signer(),
+                chain_id: 1,
+                gas_price: 1_000_000_000,
+                nonce: 7,
+                bytecode: &[0xde, 0xad],
+            },
+            ReceiptPolling {
+                max_receipt_polls: 1,
+                poll_interval: Duration::ZERO,
+            },
         )
         .await
         .unwrap();
@@ -390,13 +408,17 @@ mod tests {
         let err = deploy_one_with_polling(
             &client,
             &server.uri(),
-            &test_signer(),
-            1,
-            1_000_000_000,
-            0,
-            &[0xde, 0xad],
-            1,
-            Duration::ZERO,
+            DeployRequest {
+                deployer: &test_signer(),
+                chain_id: 1,
+                gas_price: 1_000_000_000,
+                nonce: 0,
+                bytecode: &[0xde, 0xad],
+            },
+            ReceiptPolling {
+                max_receipt_polls: 1,
+                poll_interval: Duration::ZERO,
+            },
         )
         .await
         .unwrap_err();
@@ -437,13 +459,17 @@ mod tests {
         let err = deploy_one_with_polling(
             &client,
             &server.uri(),
-            &test_signer(),
-            1,
-            1_000_000_000,
-            0,
-            &[0xde, 0xad],
-            2,
-            Duration::ZERO,
+            DeployRequest {
+                deployer: &test_signer(),
+                chain_id: 1,
+                gas_price: 1_000_000_000,
+                nonce: 0,
+                bytecode: &[0xde, 0xad],
+            },
+            ReceiptPolling {
+                max_receipt_polls: 2,
+                poll_interval: Duration::ZERO,
+            },
         )
         .await
         .unwrap_err();
@@ -487,13 +513,17 @@ mod tests {
         let err = deploy_one_with_polling(
             &client,
             &server.uri(),
-            &test_signer(),
-            1,
-            1_000_000_000,
-            0,
-            &[0xde, 0xad],
-            1,
-            Duration::ZERO,
+            DeployRequest {
+                deployer: &test_signer(),
+                chain_id: 1,
+                gas_price: 1_000_000_000,
+                nonce: 0,
+                bytecode: &[0xde, 0xad],
+            },
+            ReceiptPolling {
+                max_receipt_polls: 1,
+                poll_interval: Duration::ZERO,
+            },
         )
         .await
         .unwrap_err();

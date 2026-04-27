@@ -196,13 +196,13 @@ impl HealthMonitor {
                 }
 
                 // Track latency sample
-                latency_samples.get_mut(url).map(|mut samples| {
+                if let Some(mut samples) = latency_samples.get_mut(url) {
                     samples.push(latency_ms);
                     // Keep only the last N samples
                     if samples.len() > 1000 {
                         samples.remove(0);
                     }
-                });
+                }
             }
             Err(e) => {
                 warn!(url, error = %e, "Health check failed");

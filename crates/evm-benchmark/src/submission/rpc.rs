@@ -116,7 +116,11 @@ impl RpcSubmitter {
         }
 
         let elapsed = start.elapsed();
-        debug!(requests = dummy_request_count, elapsed_ms = elapsed.as_millis() as u64, "RPC warm-up complete");
+        debug!(
+            requests = dummy_request_count,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "RPC warm-up complete"
+        );
         Ok(())
     }
 
@@ -384,7 +388,9 @@ mod tests {
                             .read_exact(&mut remaining)
                             .await
                             .expect("request body should be readable");
-                        request_bytes.extend_from_slice(&remaining); break; }
+                        request_bytes.extend_from_slice(&remaining);
+                        break;
+                    }
                 }
 
                 let reason = reqwest::StatusCode::from_u16(status)

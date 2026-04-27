@@ -473,6 +473,9 @@ mod tests {
         let recs = generate_recommendations(&bottlenecks);
         assert_eq!(recs.len(), 3);
         // Sorted by ROI descending — highest ROI first
-        assert!(recs.windows(2).all(|pair| pair[0].roi_score >= pair[1].roi_score));
+        assert!(
+            recs.windows(2)
+                .all(|pair| pair[0].roi_score >= pair[1].roi_score)
+        );
     }
 }

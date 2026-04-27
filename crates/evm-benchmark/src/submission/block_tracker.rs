@@ -179,7 +179,9 @@ impl BlockTracker {
                 }
                 Err(_) => {
                     // Timeout — check if deadline passed
-                    if Instant::now() >= deadline { break; }
+                    if Instant::now() >= deadline {
+                        break;
+                    }
                     // Chain might be slow, keep waiting
                 }
             }

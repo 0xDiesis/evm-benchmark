@@ -497,7 +497,13 @@ fn next_ramp_decision(
 
 fn build_step_submitter(config: &Config) -> Result<Arc<Submitter>> {
     let rpc_urls = selected_rpc_urls(config);
-    let submitter = Submitter::with_retry_profile(rpc_urls, &config.ws, config.batch_size, config.submission_method, &config.retry_profile)?;
+    let submitter = Submitter::with_retry_profile(
+        rpc_urls,
+        &config.ws,
+        config.batch_size,
+        config.submission_method,
+        &config.retry_profile,
+    )?;
     Ok(Arc::new(submitter))
 }
 
@@ -513,7 +519,8 @@ fn spawn_step_block_tracker(
     tokio::spawn(async move {
         let _ = BlockTracker::with_finality(ws_url, rpc_url, tracker, finality_confirmations)
             .run(duration + max_confirm_wait)
-            .await; })
+            .await;
+    })
 }
 
 async fn apply_ramp_decision(
@@ -531,7 +538,9 @@ async fn apply_ramp_decision(
         }
         RampDecision::MaxRampDuration { ceiling_tps: next } => {
             *ceiling_tps = next;
-            if should_print_status(config.quiet) { println!("Max ramp duration reached (180s)"); }
+            if should_print_status(config.quiet) {
+                println!("Max ramp duration reached (180s)");
+            }
             Ok(true)
         }
         RampDecision::Continue {
@@ -886,7 +895,9 @@ async fn run_ceiling_with(
             &mut target_tps,
         )
         .await?
-        { break; }
+        {
+            break;
+        }
     }
 
     // Phase 2: Measure peak instantaneous TPS with a burst

@@ -459,10 +459,7 @@ mod tests {
         panic!("unexpected rpc method: {method}");
     }
 
-    fn sustained_success_rpc_response(
-        method: &str,
-        body: &serde_json::Value,
-    ) -> serde_json::Value {
+    fn sustained_success_rpc_response(method: &str, body: &serde_json::Value) -> serde_json::Value {
         match method {
             "eth_blockNumber" => serde_json::json!({
                 "jsonrpc": "2.0",
@@ -1277,7 +1274,11 @@ mod tests {
             &serde_json::json!({"params": ["0xabc"]}),
             0,
         );
-        assert!(response.get("result").is_some_and(serde_json::Value::is_null));
+        assert!(
+            response
+                .get("result")
+                .is_some_and(serde_json::Value::is_null)
+        );
     }
 
     #[test]

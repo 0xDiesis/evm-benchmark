@@ -183,7 +183,12 @@ impl WsSubmitter {
                         if attempt < retry.max_attempts && is_transient_submission_error(&error_str)
                         {
                             let backoff = retry.delay_for_attempt(attempt);
-                            warn!(tx_idx = idx, attempt, backoff_ms = backoff.as_millis() as u64, "Transient submission error, retrying...");
+                            warn!(
+                                tx_idx = idx,
+                                attempt,
+                                backoff_ms = backoff.as_millis() as u64,
+                                "Transient submission error, retrying..."
+                            );
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
