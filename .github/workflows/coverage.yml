@@ -45,12 +45,6 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Install Doublcov
-        uses: doublesharp/doublcov@v0
-        with:
-          version: latest
-          install-only: "true"
-
       - name: Restore Rust Doublcov history
         uses: actions/cache/restore@v4
         with:
@@ -66,7 +60,11 @@ jobs:
           cargo llvm-cov --all-targets --lcov --output-path coverage/lcov.info
 
       - name: Build Rust Doublcov report
-        run: doublcov build --lcov coverage/lcov.info --sources . --out coverage/report --mode static --no-open
+        uses: doublesharp/doublcov@v0
+        with:
+          version: latest
+          command: build
+          args: --lcov coverage/lcov.info --sources . --out coverage/report --history .doublcov/history.json --mode static
 
       - name: Save Rust Doublcov history
         if: always() && hashFiles('.doublcov/history.json') != ''
@@ -94,8 +92,11 @@ jobs:
             --exclude-tests
 
       - name: Build contracts Doublcov report
-        working-directory: contracts
-        run: doublcov build --lcov coverage/lcov.info --sources . --out coverage/report --mode static --no-open
+        uses: doublesharp/doublcov@v0
+        with:
+          version: latest
+          command: build
+          args: --lcov contracts/coverage/lcov.info --sources contracts --out contracts/coverage/report --history contracts/.doublcov/history.json --mode static
 
       - name: Save contracts Doublcov history
         if: always() && hashFiles('contracts/.doublcov/history.json') != ''
