@@ -19,8 +19,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
-  # Enable once the repository is public or the GitHub plan supports Pages publish.
-  ENABLE_PAGES_PUBLISH: "false"
+  # Set repository variable ENABLE_PAGES_PUBLISH=true to publish to Pages.
 
 jobs:
   doublcov:
@@ -129,7 +128,7 @@ jobs:
           include-hidden-files: true
 
       - name: Prepare Pages artifact
-        if: env.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('coverage/report/index.html', 'contracts/coverage/report/index.html') != ''
+        if: vars.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('coverage/report/index.html', 'contracts/coverage/report/index.html') != ''
         run: |
           mkdir -p pages/coverage/rust pages/coverage/contracts
           cp -R coverage/report/. pages/coverage/rust/
@@ -146,7 +145,7 @@ jobs:
           HTML
 
       - name: Upload Pages artifact
-        if: env.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('pages/coverage/rust/index.html', 'pages/coverage/contracts/index.html') != ''
+        if: vars.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('pages/coverage/rust/index.html', 'pages/coverage/contracts/index.html') != ''
         uses: actions/upload-pages-artifact@v3
         with:
           path: pages
@@ -159,7 +158,7 @@ jobs:
             echo
             if [ "${{ github.event_name }}" = "pull_request" ]; then
               echo "Download the \`doublcov-report\` artifact to inspect the Rust and contracts reports locally."
-            elif [ "${{ env.ENABLE_PAGES_PUBLISH }}" = "true" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            elif [ "${{ vars.ENABLE_PAGES_PUBLISH }}" = "true" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
               echo "This run also publishes the Rust and contracts reports to GitHub Pages."
             fi
             echo
@@ -169,7 +168,7 @@ jobs:
   pages:
     name: Publish coverage page
     needs: doublcov
-    if: env.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: vars.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
