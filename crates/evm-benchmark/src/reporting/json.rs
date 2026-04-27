@@ -16,8 +16,8 @@ fn estimate_avg_gas_per_confirmed(result: &BurstResult) -> u64 {
                 total_gas.saturating_add((stats.avg_gas as u128) * (stats.confirmed as u128));
             total_confirmed = total_confirmed.saturating_add(stats.confirmed as u128);
         }
-        if total_confirmed > 0 {
-            return (total_gas / total_confirmed) as u64;
+        if let Some(avg) = total_gas.checked_div(total_confirmed) {
+            return avg as u64;
         }
     }
     21_000

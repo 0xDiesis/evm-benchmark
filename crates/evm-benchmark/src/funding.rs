@@ -848,7 +848,6 @@ mod tests {
                     .split(',')
                     .filter(|s| !s.trim().is_empty())
                     .count()
-                    .max(0)
         );
     }
 

@@ -677,10 +677,7 @@ mod tests {
             }
         });
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(
-                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string(),
-            ),
+            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
             vec![
                 Message::Ping(vec![1, 2, 3]),
                 Message::Text(new_head.to_string()),
@@ -744,10 +741,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_with_ready_delegates_and_signals_ready() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(
-                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string(),
-            ),
+            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
             Vec::new(),
             Duration::from_millis(125),
         )
@@ -804,10 +798,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_ws_raw_errors_when_stream_ends_after_close_frame() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(
-                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string(),
-            ),
+            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
             vec![Message::Close(None)],
             Duration::from_millis(25),
         )
@@ -917,10 +908,7 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
     #[tokio::test]
     async fn test_run_ws_raw_ignores_invalid_new_head_messages() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(
-                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string(),
-            ),
+            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
             vec![Message::Text(
                 json!({
                     "jsonrpc": "2.0",
@@ -952,10 +940,7 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
     #[tokio::test]
     async fn test_run_ws_raw_times_out_cleanly_at_deadline() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(
-                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
-                    .to_string(),
-            ),
+            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
             Vec::new(),
             Duration::from_millis(150),
         )
