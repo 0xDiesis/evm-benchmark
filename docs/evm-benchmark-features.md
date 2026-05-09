@@ -321,8 +321,13 @@ Submitted: 5000, Confirmed: 4987, Max retries needed: 2
     "submission_method": "http"
   },
   "results": {
+    "attempted": 5000,
     "submitted": 5000,
+    "accepted": 5000,
+    "failed": 0,
     "confirmed": 4987,
+    "valid": false,
+    "invalid_reason": "confirmed 4987 of 5000 accepted transactions",
     "retry_stats": {
       "total_retry_attempts": 47,
       "max_retries_per_tx": 2,
@@ -331,6 +336,10 @@ Submitted: 5000, Confirmed: 4987, Max retries needed: 2
   }
 }
 ```
+
+`submitted` is kept for backward compatibility and means accepted by RPC/txpool.
+For tuning, compare only runs with `valid: true`; invalid runs identify client,
+RPC, txpool, or confirmation backlog pressure.
 
 ---
 
@@ -601,4 +610,3 @@ Downloaded targets are placed in `./bench-targets/` relative to the binary or wo
 ## Planned Enhancements
 
 Current assumption: benchmark workflows target warmed steady-state conditions rather than cold-start profiling.
-

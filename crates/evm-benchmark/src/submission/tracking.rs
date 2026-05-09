@@ -74,6 +74,18 @@ impl LatencyTracker {
         self.record_submit_with_wave(hash, nonce, sender, gas_limit, method, None);
     }
 
+    pub fn record_submit_at(
+        &self,
+        hash: B256,
+        nonce: u64,
+        sender: alloy_primitives::Address,
+        gas_limit: u64,
+        method: TransactionType,
+        submit_time: Instant,
+    ) {
+        self.record_submit_with_wave_at(hash, nonce, sender, gas_limit, method, None, submit_time);
+    }
+
     /// Record a transaction submission with a wave index for per-wave tracking.
     pub fn record_submit_with_wave(
         &self,
@@ -84,13 +96,35 @@ impl LatencyTracker {
         method: TransactionType,
         wave: Option<u32>,
     ) {
+        self.record_submit_with_wave_at(
+            hash,
+            nonce,
+            sender,
+            gas_limit,
+            method,
+            wave,
+            Instant::now(),
+        );
+    }
+
+    /// Record a transaction submission with an externally captured submit time.
+    pub fn record_submit_with_wave_at(
+        &self,
+        hash: B256,
+        nonce: u64,
+        sender: alloy_primitives::Address,
+        gas_limit: u64,
+        method: TransactionType,
+        wave: Option<u32>,
+        submit_time: Instant,
+    ) {
         let record = TxRecord {
             hash,
             nonce,
             sender,
             gas_limit,
             gas_used: None,
-            submit_time: Instant::now(),
+            submit_time,
             block_time: None,
             method,
             revert_status: None,

@@ -174,9 +174,15 @@ mod tests {
 
     fn make_test_result() -> BurstResult {
         BurstResult {
+            attempted: 100,
             submitted: 100,
+            accepted: 100,
+            failed: 0,
             confirmed: 95,
             pending: 5,
+            valid: false,
+            invalid_reason: Some("5 accepted transactions still pending".into()),
+            submission_errors: vec![],
             sign_ms: 10,
             submit_ms: 500,
             confirm_ms: 1000,

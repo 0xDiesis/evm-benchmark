@@ -4,7 +4,10 @@ use crate::generators::evm_mix::{EvmMixConfig, EvmMixGenerator};
 use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
 use crate::submission::{LatencyTracker, Submitter};
-use crate::types::{BurstResult, TestMode};
+use crate::types::{
+    BurstResult, SubmissionErrorSummary, TestMode, benchmark_validity,
+    merge_submission_error_summaries,
+};
 use alloy_primitives::{Address, U256};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
@@ -171,6 +174,14 @@ fn log_analysis_result(quiet: bool, analysis_ascii: Result<String>) {
     }
 }
 
+#[derive(Default)]
+struct SubmitAccounting {
+    attempted: u32,
+    accepted: u32,
+    failed: u32,
+    error_summaries: Vec<SubmissionErrorSummary>,
+}
+
 /// Returns `(BurstResult, effective_gas_price_wei)`.
 pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     let dispatcher = Arc::new(Submitter::with_retry_profile(
@@ -209,15 +220,18 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     const POOL_SLOTS_PER_ACCOUNT: usize = 4000;
 
     let num_keys = sender_keys.len();
-    let max_pool_capacity = num_keys * POOL_SLOTS_PER_ACCOUNT;
+    let requested_worker_count = (config.worker_count as usize).max(1);
+    let worker_count = requested_worker_count.min(config.tx_count.max(1) as usize);
+    let active_key_count = num_keys.min(worker_count);
+    let max_pool_capacity = active_key_count * POOL_SLOTS_PER_ACCOUNT;
 
     // Cap tx_count to the pool's total capacity across all accounts
     let tx_count = if config.tx_count as usize > max_pool_capacity {
         if !config.quiet {
             eprintln!(
-                "[burst] tx_count {} exceeds pool capacity ({} accounts × {} slots = {}). Capping to {}.",
+                "[burst] tx_count {} exceeds active pool capacity ({} active accounts × {} slots = {}). Capping to {}.",
                 config.tx_count,
-                num_keys,
+                active_key_count,
                 POOL_SLOTS_PER_ACCOUNT,
                 max_pool_capacity,
                 max_pool_capacity
@@ -227,10 +241,6 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     } else {
         config.tx_count as usize
     };
-
-    // Workers = one per key, distributing txs evenly across all funded accounts
-    let worker_count = num_keys;
-    let _ = config.worker_count; // ignored — worker count is driven by key count
 
     let client = reqwest::Client::builder()
         .pool_max_idle_per_host(200)
@@ -396,9 +406,12 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
 
     if !config.quiet {
         println!(
-            "Signed {} txs across {} senders in {:.2}s",
+            "Signed {} txs across {} worker{} using {} active sender{} in {:.2}s",
             total_signed,
             all_signed_txs.len(),
+            if all_signed_txs.len() == 1 { "" } else { "s" },
+            active_key_count,
+            if active_key_count == 1 { "" } else { "s" },
             _sign_time.as_secs_f32()
         );
     }
@@ -422,35 +435,58 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         let quiet = config.quiet;
 
         let handle = tokio::spawn(async move {
+            let attempted = sender_txs.len() as u32;
+            let batch_submit_start = Instant::now();
             match dispatcher.submit_batch(sender_txs.clone()).await {
                 Ok(result) => {
+                    let accepted = result.accepted_txs.len() as u32;
+                    let failed = attempted.saturating_sub(accepted);
                     // Record only txs the RPC actually accepted, with wave index
                     for tx in &result.accepted_txs {
-                        tracker.record_submit_with_wave(
+                        tracker.record_submit_with_wave_at(
                             tx.hash,
                             tx.nonce,
                             tx.sender,
                             tx.gas_limit,
                             tx.method,
                             Some(wave_idx as u32),
+                            batch_submit_start,
                         );
                     }
-                    metrics.inc_transactions_submitted(result.submitted as u64);
+                    metrics.inc_transactions_submitted(accepted as u64);
+                    if failed > 0 {
+                        metrics.inc_transactions_failed(failed as u64);
+                    }
                     if !quiet {
-                        if result.errors > 0 {
+                        if failed > 0 {
                             println!(
-                                "Sender {}: submitted {} txs, {} errors",
-                                wave_idx, result.submitted, result.errors
+                                "Worker {}: accepted {} of {} txs, {} failed",
+                                wave_idx, accepted, attempted, failed
                             );
                         } else {
-                            println!("Sender {}: submitted {} txs", wave_idx, result.submitted);
+                            println!("Worker {}: accepted {} txs", wave_idx, accepted);
                         }
+                    }
+                    SubmitAccounting {
+                        attempted,
+                        accepted,
+                        failed,
+                        error_summaries: result.error_summaries,
                     }
                 }
                 Err(e) => {
                     metrics.inc_transactions_failed(sender_txs.len() as u64);
                     if !quiet {
-                        eprintln!("Sender {} submission error: {}", wave_idx, e);
+                        eprintln!("Worker {} submission error: {}", wave_idx, e);
+                    }
+                    SubmitAccounting {
+                        attempted,
+                        accepted: 0,
+                        failed: attempted,
+                        error_summaries: vec![SubmissionErrorSummary::new(
+                            e.to_string(),
+                            attempted,
+                        )],
                     }
                 }
             }
@@ -459,9 +495,22 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     }
 
     // Wait for all submission workers to complete
+    let mut accounting = SubmitAccounting::default();
     for handle in submit_handles {
-        let _ = handle.await;
+        if let Ok(worker_accounting) = handle.await {
+            accounting.attempted = accounting
+                .attempted
+                .saturating_add(worker_accounting.attempted);
+            accounting.accepted = accounting
+                .accepted
+                .saturating_add(worker_accounting.accepted);
+            accounting.failed = accounting.failed.saturating_add(worker_accounting.failed);
+            accounting
+                .error_summaries
+                .extend(worker_accounting.error_summaries);
+        }
     }
+    accounting.error_summaries = merge_submission_error_summaries(accounting.error_summaries);
 
     let submit_time = submit_start.elapsed();
 
@@ -487,22 +536,40 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     let confirm_ms = confirm_start.elapsed();
     let stats = tracker.statistics();
     let confirmed = tracker.confirmed_count();
+    let pending = tracker.pending_count();
+    let (valid, invalid_reason) = benchmark_validity(
+        accounting.attempted,
+        accounting.accepted,
+        accounting.failed,
+        confirmed,
+        pending,
+    );
 
     // confirmed_tps: chain throughput = txs confirmed / time spent waiting for confirmations.
     // This measures how fast the chain processes transactions, excluding submission overhead.
-    metrics.set_pending_transactions(tracker.pending_count() as i64);
+    metrics.set_pending_transactions(pending as i64);
     if !confirm_ms.is_zero() {
         metrics.set_current_tps(confirmed as f64 / confirm_ms.as_secs_f64());
     }
 
     let result = BurstResult {
-        submitted: total_signed as u32,
+        attempted: accounting.attempted,
+        submitted: accounting.accepted,
+        accepted: accounting.accepted,
+        failed: accounting.failed,
         confirmed,
-        pending: tracker.pending_count(),
+        pending,
+        valid,
+        invalid_reason,
+        submission_errors: accounting.error_summaries,
         sign_ms: _sign_time.as_millis() as u64,
         submit_ms: submit_time.as_millis() as u64,
         confirm_ms: confirm_ms.as_millis() as u64,
-        submitted_tps: total_signed as f32 / submit_time.as_secs_f32(),
+        submitted_tps: if !submit_time.is_zero() {
+            accounting.accepted as f32 / submit_time.as_secs_f32()
+        } else {
+            0.0
+        },
         confirmed_tps: confirmed_tps(confirmed, confirm_ms),
         latency: stats,
         server_metrics: None,
@@ -555,7 +622,7 @@ mod tests {
             wave_delay_ms: 0,
             duration_secs: 0,
             target_tps: 0,
-            worker_count: 99,
+            worker_count: 2,
             batch_size: 10,
             submission_method: SubmissionMethod::Http,
             retry_profile: "off".to_string(),
@@ -1132,9 +1199,13 @@ mod tests {
         let (result, gas_price) = run_burst(&config).await.expect("burst run succeeds");
 
         assert_eq!(gas_price, 2_000_000_000);
+        assert_eq!(result.attempted, 3);
         assert_eq!(result.submitted, 3);
+        assert_eq!(result.accepted, 3);
+        assert_eq!(result.failed, 0);
         assert_eq!(result.confirmed, 3);
         assert_eq!(result.pending, 0);
+        assert!(result.valid);
         let per_wave = result.per_wave.expect("per-wave stats should be recorded");
         assert_eq!(per_wave.len(), 2);
         assert_eq!(per_wave[0].wave, 0);
@@ -1285,9 +1356,20 @@ mod tests {
         let (result, gas_price) = run_burst(&config).await.expect("burst run succeeds");
 
         assert_eq!(gas_price, 1_000_000_000);
-        assert_eq!(result.submitted, 3);
+        assert_eq!(result.attempted, 3);
+        assert_eq!(result.submitted, 1);
+        assert_eq!(result.accepted, 1);
+        assert_eq!(result.failed, 2);
         assert_eq!(result.confirmed, 1);
         assert_eq!(result.pending, 0);
+        assert!(!result.valid);
+        assert!(
+            result
+                .invalid_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("accepted 1 of 3 attempted")
+        );
         assert_eq!(batch_count.load(Ordering::SeqCst), 2);
         assert_eq!(receipt_count.load(Ordering::SeqCst), 2);
         let per_wave = result
@@ -1332,9 +1414,12 @@ mod tests {
 
         let (result, _gas_price) = run_burst(&config).await.expect("burst run returns result");
 
-        assert_eq!(result.submitted, 2);
+        assert_eq!(result.attempted, 2);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.failed, 2);
         assert_eq!(result.confirmed, 0);
         assert_eq!(result.pending, 0);
+        assert!(!result.valid);
         assert!(result.per_wave.is_none());
     }
 
@@ -1371,9 +1456,12 @@ mod tests {
             .expect("transport submission failures should not abort burst mode");
 
         assert_eq!(gas_price, 2_000_000_000);
-        assert_eq!(result.submitted, 2);
+        assert_eq!(result.attempted, 2);
+        assert_eq!(result.submitted, 0);
+        assert_eq!(result.failed, 2);
         assert_eq!(result.confirmed, 0);
         assert_eq!(result.pending, 0);
+        assert!(!result.valid);
         assert!(result.per_wave.is_none());
     }
 
@@ -1545,9 +1633,12 @@ mod tests {
             .expect("evm mode should sign and submit generated descriptors");
 
         assert_eq!(gas_price, 2_000_000_000);
+        assert_eq!(result.attempted, 2);
         assert_eq!(result.submitted, 2);
+        assert_eq!(result.failed, 0);
         assert_eq!(result.confirmed, 2);
         assert_eq!(result.pending, 0);
+        assert!(result.valid);
     }
 
     #[test]

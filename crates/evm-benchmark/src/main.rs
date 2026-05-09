@@ -181,9 +181,15 @@ fn ceiling_summary_lines(ceiling: &types::CeilingResult) -> Vec<String> {
 
 fn burst_result_from_ceiling(ceiling: &types::CeilingResult) -> types::BurstResult {
     types::BurstResult {
+        attempted: ceiling.ceiling_tps,
         submitted: ceiling.ceiling_tps,
+        accepted: ceiling.ceiling_tps,
+        failed: 0,
         confirmed: ceiling.burst_peak_tps,
         pending: 0,
+        valid: true,
+        invalid_reason: None,
+        submission_errors: vec![],
         sign_ms: 0,
         submit_ms: 0,
         confirm_ms: 0,
@@ -569,9 +575,15 @@ mod tests {
 
     fn sample_burst_result() -> types::BurstResult {
         types::BurstResult {
+            attempted: 10,
             submitted: 10,
+            accepted: 10,
+            failed: 0,
             confirmed: 9,
             pending: 1,
+            valid: false,
+            invalid_reason: Some("1 accepted transactions still pending".into()),
+            submission_errors: vec![],
             sign_ms: 1,
             submit_ms: 2,
             confirm_ms: 3,
@@ -587,10 +599,15 @@ mod tests {
 
     fn sample_sustained_result() -> types::SustainedResult {
         types::SustainedResult {
+            attempted: 20,
             sent: 20,
+            accepted: 20,
             confirmed: 18,
             pending: 2,
             errors: 0,
+            valid: false,
+            invalid_reason: Some("2 accepted transactions still pending".into()),
+            submission_errors: vec![],
             duration_ms: 1_000,
             actual_tps: 18.0,
             latency: sample_latency(),

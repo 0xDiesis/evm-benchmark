@@ -169,11 +169,18 @@ for value in config["values"]:
         with open(report_path) as f:
             report = json.load(f)
         r = report["results"]
-        submitted = r.get("submitted", 0)
+        submitted = r.get("accepted", r.get("submitted", 0))
+        attempted = r.get("attempted", submitted)
+        failed = r.get("failed", max(0, attempted - submitted))
         confirmed = r.get("confirmed", 0)
         rate = (confirmed / submitted * 100) if submitted > 0 else 0
+        valid = r.get("valid", failed == 0 and r.get("pending", 0) == 0 and confirmed == submitted)
         results.append({
             "value": value,
+            "valid": valid,
+            "attempted": attempted,
+            "accepted": submitted,
+            "failed": failed,
             "tps": round(r.get("confirmed_tps", 0), 1),
             "p50": r.get("latency", {}).get("p50", 0),
             "p95": r.get("latency", {}).get("p95", 0),
@@ -183,8 +190,9 @@ for value in config["values"]:
     except Exception as e:
         print(f"  WARN: could not parse {report_path}: {e}", file=sys.stderr)
 
-# Sort by TPS descending
-results.sort(key=lambda x: x["tps"], reverse=True)
+# Prefer valid no-error runs, then sort by TPS descending. Invalid runs remain
+# visible but cannot become the "best" setting.
+results.sort(key=lambda x: (x["valid"], x["tps"]), reverse=True)
 
 # Write summary.json
 with open(os.path.join(sweep_dir, "summary.json"), "w") as f:
@@ -198,31 +206,32 @@ md_lines = [
     f"**Parameter:** `{param}`  ",
     f"**Mode:** {config['mode']}  |  **TXS:** {config['txs']}  |  **TPS target:** {config['tps']}",
     "",
-    "| Value | Confirmed TPS | p50 (ms) | p95 (ms) | p99 (ms) | Confirmed % |",
-    "|-------|--------------|----------|----------|----------|-------------|",
+    "| Value | Valid | Attempted | Accepted | Failed | Confirmed TPS | p50 (ms) | p95 (ms) | p99 (ms) | Confirmed % |",
+    "|-------|-------|----------:|---------:|-------:|--------------:|---------:|---------:|---------:|------------:|",
 ]
 for r in results:
     md_lines.append(
-        f"| {r['value']} | {r['tps']} | {r['p50']} | {r['p95']} | {r['p99']} | {r['confirmed_rate']}% |"
+        f"| {r['value']} | {r['valid']} | {r['attempted']} | {r['accepted']} | {r['failed']} | {r['tps']} | {r['p50']} | {r['p95']} | {r['p99']} | {r['confirmed_rate']}% |"
     )
 with open(os.path.join(sweep_dir, "summary.md"), "w") as f:
     f.write("\n".join(md_lines) + "\n")
 
 # Create best symlink
-if results:
-    best_value = results[0]["value"]
+valid_results = [r for r in results if r["valid"]]
+if valid_results:
+    best_value = valid_results[0]["value"]
     best_link = os.path.join(sweep_dir, "best")
     if os.path.islink(best_link):
         os.unlink(best_link)
     os.symlink(best_value, best_link)
-    print(f"  Best: {param}={best_value} ({results[0]['tps']} TPS)")
+    print(f"  Best valid: {param}={best_value} ({valid_results[0]['tps']} TPS)")
 
 # Print table
 print()
-print(f"  {'Value':<14} {'TPS':>10} {'p50':>8} {'p95':>8} {'p99':>8} {'Confirmed':>10}")
-print(f"  {'-'*14} {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*10}")
+print(f"  {'Value':<14} {'Valid':>7} {'TPS':>10} {'p50':>8} {'p95':>8} {'p99':>8} {'Confirmed':>10}")
+print(f"  {'-'*14} {'-'*7} {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*10}")
 for r in results:
-    print(f"  {r['value']:<14} {r['tps']:>10} {r['p50']:>8} {r['p95']:>8} {r['p99']:>8} {r['confirmed_rate']:>9}%")
+    print(f"  {r['value']:<14} {str(r['valid']):>7} {r['tps']:>10} {r['p50']:>8} {r['p95']:>8} {r['p99']:>8} {r['confirmed_rate']:>9}%")
 PYEOF
 
 # ── Update latest symlink ───────────────────────────────────────────────

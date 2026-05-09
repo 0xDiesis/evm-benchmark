@@ -2,7 +2,10 @@ use crate::config::Config;
 use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
 use crate::submission::{BlockTracker, LatencyTracker, Submitter};
-use crate::types::{SustainedResult, WindowEntry};
+use crate::types::{
+    SubmissionErrorSummary, SustainedResult, WindowEntry, benchmark_validity,
+    merge_submission_error_summaries,
+};
 use alloy_primitives::{Address, U256};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
@@ -175,8 +178,10 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let tps_per_worker = target_tps as f64 / worker_count as f64;
 
     let timeline = Arc::new(Mutex::new(Vec::<WindowEntry>::new()));
+    let attempted_count = Arc::new(AtomicU32::new(0));
     let sent_count = Arc::new(AtomicU32::new(0));
     let error_count = Arc::new(AtomicU32::new(0));
+    let submission_errors = Arc::new(Mutex::new(Vec::<SubmissionErrorSummary>::new()));
 
     // Spawn block tracker. Kept alive through the post-run confirmation wait —
     // do NOT abort it until after the wait loop.
@@ -199,8 +204,10 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     for _worker_id in 0..worker_count {
         let dispatcher = dispatcher.clone();
         let tracker = tracker.clone();
+        let attempted_count = attempted_count.clone();
         let sent_count = sent_count.clone();
         let error_count = error_count.clone();
+        let submission_errors = submission_errors.clone();
         let metrics = metrics.clone();
         let pre_signed = pre_signed.clone();
         let pool_idx = pool_idx.clone();
@@ -210,8 +217,10 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
             run_worker(
                 dispatcher,
                 tracker,
+                attempted_count,
                 sent_count,
                 error_count,
+                submission_errors,
                 metrics,
                 duration,
                 tps_per_worker,
@@ -269,11 +278,17 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     tracker_handle.abort();
 
     let total_duration = start.elapsed();
+    let attempted = attempted_count.load(Ordering::SeqCst);
     let sent = sent_count.load(Ordering::SeqCst);
     let confirmed = tracker.confirmed_count();
     let pending = tracker.pending_count();
     let errors = error_count.load(Ordering::SeqCst);
     let stats = tracker.statistics();
+    let submission_errors = {
+        let summaries = submission_errors.lock().await.clone();
+        merge_submission_error_summaries(summaries)
+    };
+    let (valid, invalid_reason) = benchmark_validity(attempted, sent, errors, confirmed, pending);
 
     let actual_tps = actual_tps(confirmed, total_duration);
 
@@ -284,10 +299,15 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let timeline_vec = timeline.lock().await.clone();
 
     let result = SustainedResult {
+        attempted,
         sent,
+        accepted: sent,
         confirmed,
         pending,
         errors,
+        valid,
+        invalid_reason,
+        submission_errors,
         duration_ms: total_duration.as_millis() as u64,
         actual_tps,
         latency: stats,
@@ -318,8 +338,10 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
 async fn run_worker(
     dispatcher: Arc<Submitter>,
     tracker: Arc<LatencyTracker>,
+    attempted_count: Arc<AtomicU32>,
     sent_count: Arc<AtomicU32>,
     error_count: Arc<AtomicU32>,
+    submission_errors: Arc<Mutex<Vec<SubmissionErrorSummary>>>,
     metrics: Arc<MetricsExporter>,
     duration: Duration,
     tps_per_worker: f64,
@@ -343,29 +365,42 @@ async fn run_worker(
         }
 
         let signed_tx = pre_signed[idx as usize].clone();
-
-        tracker.record_submit(
-            signed_tx.hash,
-            signed_tx.nonce,
-            signed_tx.sender,
-            signed_tx.gas_limit,
-            signed_tx.method,
-        );
+        attempted_count.fetch_add(1, Ordering::SeqCst);
+        let submit_time = Instant::now();
 
         match dispatcher.submit_single(signed_tx).await {
             Ok(result) => {
-                if result.submitted > 0 {
-                    metrics.inc_transactions_submitted(result.submitted as u64);
-                    sent_count.fetch_add(result.submitted, Ordering::SeqCst);
+                let accepted = result.accepted_txs.len() as u32;
+                if accepted > 0 {
+                    for tx in &result.accepted_txs {
+                        tracker.record_submit_at(
+                            tx.hash,
+                            tx.nonce,
+                            tx.sender,
+                            tx.gas_limit,
+                            tx.method,
+                            submit_time,
+                        );
+                    }
+                    metrics.inc_transactions_submitted(accepted as u64);
+                    sent_count.fetch_add(accepted, Ordering::SeqCst);
                 }
                 if result.errors > 0 {
                     metrics.inc_transactions_failed(result.errors as u64);
                     error_count.fetch_add(result.errors, Ordering::SeqCst);
+                    submission_errors
+                        .lock()
+                        .await
+                        .extend(result.error_summaries);
                 }
             }
-            Err(_) => {
+            Err(e) => {
                 metrics.inc_transactions_failed(1);
                 error_count.fetch_add(1, Ordering::SeqCst);
+                submission_errors
+                    .lock()
+                    .await
+                    .push(SubmissionErrorSummary::new(e.to_string(), 1));
             }
         }
     }
@@ -707,10 +742,15 @@ mod tests {
         use crate::types::{LatencyStats, SustainedResult};
 
         let sustained = SustainedResult {
+            attempted: 510,
             sent: 500,
+            accepted: 500,
             confirmed: 480,
             pending: 10,
             errors: 10,
+            valid: false,
+            invalid_reason: Some("10 transaction submissions failed".into()),
+            submission_errors: vec![SubmissionErrorSummary::new("rpc rejected tx", 10)],
             duration_ms: 5000,
             actual_tps: 96.0,
             latency: LatencyStats {
@@ -741,8 +781,8 @@ mod tests {
         // Latency stats preserved
         assert_eq!(burst.latency.p50, 25);
         assert_eq!(burst.latency.p99, 75);
-        // Note: errors field from SustainedResult doesn't exist on BurstResult;
-        // errors are inferred from submitted - confirmed - pending in analytics.
+        assert_eq!(burst.failed, 10);
+        assert!(!burst.valid);
     }
 
     #[test]
@@ -864,10 +904,15 @@ mod tests {
     #[test]
     fn test_sustained_result_error_tracking() {
         let result = SustainedResult {
-            sent: 1000,
+            attempted: 1000,
+            sent: 950,
+            accepted: 950,
             confirmed: 900,
             pending: 50,
             errors: 50,
+            valid: false,
+            invalid_reason: Some("50 transaction submissions failed".into()),
+            submission_errors: vec![SubmissionErrorSummary::new("txpool is full", 50)],
             duration_ms: 10_000,
             actual_tps: 90.0,
             latency: crate::types::LatencyStats {
@@ -880,21 +925,24 @@ mod tests {
             },
             timeline: vec![],
         };
-        // sent = confirmed + pending + errors
-        assert_eq!(
-            result.sent,
-            result.confirmed + result.pending + result.errors
-        );
+        // sent tracks accepted submissions; attempted includes accepted + errors.
+        assert_eq!(result.sent, result.confirmed + result.pending);
+        assert_eq!(result.attempted, result.sent + result.errors);
     }
 
     /// to_burst_result preserves latency stats.
     #[test]
     fn test_to_burst_result_latency_preservation() {
         let result = SustainedResult {
+            attempted: 105,
             sent: 100,
+            accepted: 100,
             confirmed: 90,
             pending: 5,
             errors: 5,
+            valid: false,
+            invalid_reason: Some("5 transaction submissions failed".into()),
+            submission_errors: vec![SubmissionErrorSummary::new("rpc rejected tx", 5)],
             duration_ms: 5000,
             actual_tps: 18.0,
             latency: crate::types::LatencyStats {
@@ -959,14 +1007,18 @@ mod tests {
             .await;
 
         let tracker = Arc::new(LatencyTracker::new());
+        let attempted_count = Arc::new(AtomicU32::new(0));
         let sent_count = Arc::new(AtomicU32::new(0));
         let error_count = Arc::new(AtomicU32::new(0));
+        let submission_errors = Arc::new(Mutex::new(Vec::new()));
 
         run_worker(
             make_submitter(&mock_server.uri()),
             tracker.clone(),
+            attempted_count.clone(),
             sent_count.clone(),
             error_count.clone(),
+            submission_errors.clone(),
             test_metrics(),
             Duration::from_secs(1),
             0.0,
@@ -976,6 +1028,7 @@ mod tests {
         )
         .await;
 
+        assert_eq!(attempted_count.load(Ordering::SeqCst), 1);
         assert_eq!(sent_count.load(Ordering::SeqCst), 1);
         assert_eq!(error_count.load(Ordering::SeqCst), 0);
         assert_eq!(tracker.pending_count(), 1);
@@ -998,12 +1051,16 @@ mod tests {
 
         let sent_count = Arc::new(AtomicU32::new(0));
         let error_count = Arc::new(AtomicU32::new(0));
+        let attempted_count = Arc::new(AtomicU32::new(0));
+        let submission_errors = Arc::new(Mutex::new(Vec::new()));
 
         run_worker(
             make_submitter(&mock_server.uri()),
             Arc::new(LatencyTracker::new()),
+            attempted_count.clone(),
             sent_count.clone(),
             error_count.clone(),
+            submission_errors.clone(),
             test_metrics(),
             Duration::from_secs(1),
             100.0,
@@ -1013,21 +1070,27 @@ mod tests {
         )
         .await;
 
+        assert_eq!(attempted_count.load(Ordering::SeqCst), 1);
         assert_eq!(sent_count.load(Ordering::SeqCst), 0);
         assert_eq!(error_count.load(Ordering::SeqCst), 1);
+        assert_eq!(submission_errors.lock().await[0].message, "txpool full");
     }
 
     #[tokio::test]
     async fn test_run_worker_records_transport_errors() {
         let tracker = Arc::new(LatencyTracker::new());
+        let attempted_count = Arc::new(AtomicU32::new(0));
         let sent_count = Arc::new(AtomicU32::new(0));
         let error_count = Arc::new(AtomicU32::new(0));
+        let submission_errors = Arc::new(Mutex::new(Vec::new()));
 
         run_worker(
             make_submitter("testerr://forced"),
             tracker.clone(),
+            attempted_count.clone(),
             sent_count.clone(),
             error_count.clone(),
+            submission_errors.clone(),
             test_metrics(),
             Duration::from_secs(1),
             100.0,
@@ -1037,22 +1100,28 @@ mod tests {
         )
         .await;
 
+        assert_eq!(attempted_count.load(Ordering::SeqCst), 1);
         assert_eq!(sent_count.load(Ordering::SeqCst), 0);
         assert_eq!(error_count.load(Ordering::SeqCst), 1);
-        assert_eq!(tracker.pending_count(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+        assert_eq!(submission_errors.lock().await.len(), 1);
     }
 
     #[tokio::test]
     async fn test_run_worker_exits_cleanly_when_presigned_pool_is_empty() {
         let tracker = Arc::new(LatencyTracker::new());
+        let attempted_count = Arc::new(AtomicU32::new(0));
         let sent_count = Arc::new(AtomicU32::new(0));
         let error_count = Arc::new(AtomicU32::new(0));
+        let submission_errors = Arc::new(Mutex::new(Vec::new()));
 
         run_worker(
             make_submitter("http://127.0.0.1:19999"),
             tracker.clone(),
+            attempted_count.clone(),
             sent_count.clone(),
             error_count.clone(),
+            submission_errors.clone(),
             test_metrics(),
             Duration::from_secs(1),
             100.0,
@@ -1062,6 +1131,7 @@ mod tests {
         )
         .await;
 
+        assert_eq!(attempted_count.load(Ordering::SeqCst), 0);
         assert_eq!(sent_count.load(Ordering::SeqCst), 0);
         assert_eq!(error_count.load(Ordering::SeqCst), 0);
         assert_eq!(tracker.pending_count(), 0);

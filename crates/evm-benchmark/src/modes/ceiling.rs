@@ -1137,9 +1137,15 @@ mod tests {
         Box::pin(async {
             Ok((
                 BurstResult {
+                    attempted: 1,
                     submitted: 1,
+                    accepted: 1,
+                    failed: 0,
                     confirmed: 1,
                     pending: 0,
+                    valid: true,
+                    invalid_reason: None,
+                    submission_errors: vec![],
                     sign_ms: 0,
                     submit_ms: 0,
                     confirm_ms: 0,

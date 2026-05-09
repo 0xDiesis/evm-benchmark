@@ -403,6 +403,7 @@ make_sweep_dir() {
 index_add_run() {
     local path="${1:?}" chain="${2:?}" mode="${3:?}" env="${4:?}"
     local tps="${5:?}" p50="${6:?}" p99="${7:?}" confirmed_rate="${8:?}"
+    local valid="${9:-0}"
 
     local index_file="${RESULTS_BASE}/index.json"
     mkdir -p "$(dirname "$index_file")"
@@ -425,6 +426,7 @@ data.append({
     'p50': float('$p50'),
     'p99': float('$p99'),
     'confirmed_rate': float('$confirmed_rate'),
+    'valid': bool(int('$valid')),
     'timestamp': '$(timestamp)'
 })
 with open(index_file, 'w') as f:

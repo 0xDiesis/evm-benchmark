@@ -293,6 +293,7 @@ echo ""
 echo "Running ${CHAIN} ${MODE} benchmark (env=${ENV})..."
 echo "  RPC:     ${CHAIN_RPC}"
 echo "  Senders: ${SENDERS}"
+echo "  Workers: ${WORKERS}"
 echo "  Output:  ${RUN_DIR}/report.json"
 echo ""
 
@@ -333,8 +334,20 @@ import json, sys
 try:
     with open('${RUN_DIR}/report.json') as f:
         r = json.load(f)['results']
-    print(f'  Submitted:     {r[\"submitted\"]}')
+    attempted = r.get('attempted', r.get('submitted', 0))
+    accepted = r.get('accepted', r.get('submitted', 0))
+    failed = r.get('failed', max(0, attempted - accepted))
+    valid = r.get('valid', failed == 0 and r.get('pending', 0) == 0 and r.get('confirmed', 0) == accepted)
+    print(f'  Attempted:     {attempted}')
+    print(f'  Accepted:      {accepted}')
+    print(f'  Failed:        {failed}')
     print(f'  Confirmed:     {r[\"confirmed\"]}')
+    print(f'  Valid run:     {valid}')
+    if not valid and r.get('invalid_reason'):
+        print(f'  Invalid:       {r[\"invalid_reason\"]}')
+    if r.get('submission_errors'):
+        top = ', '.join(f\"{e.get('message','?')} ({e.get('count',0)})\" for e in r['submission_errors'][:3])
+        print(f'  Errors:        {top}')
     print(f'  Confirmed TPS: {r[\"confirmed_tps\"]:.1f}')
     print(f'  Latency p50:   {r[\"latency\"][\"p50\"]}ms')
     print(f'  Latency p95:   {r[\"latency\"][\"p95\"]}ms')
@@ -346,15 +359,17 @@ fi
 
 # ── Update index ─────────────────────────────────────────────────────────
 if type -t index_add_run &>/dev/null && [[ -f "${RUN_DIR}/report.json" ]]; then
-    read -r IDX_TPS IDX_P50 IDX_P99 IDX_RATE < <(python3 -c "
+    read -r IDX_TPS IDX_P50 IDX_P99 IDX_RATE IDX_VALID < <(python3 -c "
 import json
 with open('${RUN_DIR}/report.json') as f:
     r = json.load(f)['results']
-    confirmed_rate = r['confirmed'] / r['submitted'] if r['submitted'] > 0 else 0
-    print(f\"{r['confirmed_tps']:.1f} {r['latency']['p50']} {r['latency']['p99']} {confirmed_rate:.4f}\")
+    accepted = r.get('accepted', r.get('submitted', 0))
+    confirmed_rate = r['confirmed'] / accepted if accepted > 0 else 0
+    valid = 1 if r.get('valid', False) else 0
+    print(f\"{r['confirmed_tps']:.1f} {r['latency']['p50']} {r['latency']['p99']} {confirmed_rate:.4f} {valid}\")
 " 2>/dev/null) || true
     index_add_run "${RUN_DIR}" "${CHAIN}" "${MODE}" "${ENV}" \
-        "${IDX_TPS:-0}" "${IDX_P50:-0}" "${IDX_P99:-0}" "${IDX_RATE:-0}" 2>/dev/null || true
+        "${IDX_TPS:-0}" "${IDX_P50:-0}" "${IDX_P99:-0}" "${IDX_RATE:-0}" "${IDX_VALID:-0}" 2>/dev/null || true
 fi
 
 # ── Done ─────────────────────────────────────────────────────────────────

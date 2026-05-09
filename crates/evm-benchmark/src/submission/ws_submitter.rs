@@ -1,5 +1,7 @@
 use crate::submission::rpc::SubmissionResult;
-use crate::types::SignedTxWithMetadata;
+use crate::types::{
+    SignedTxWithMetadata, SubmissionErrorSummary, merge_submission_error_summaries,
+};
 use alloy_network::AnyNetwork;
 use alloy_provider::Provider;
 use anyhow::Result;
@@ -129,6 +131,7 @@ impl WsSubmitter {
         let mut errors = 0u32;
         let mut hashes = vec![];
         let mut accepted_txs = vec![];
+        let mut error_summaries = vec![];
 
         for chunk in txs.chunks(self.batch_size as usize) {
             let batch_result = Self::submit_chunk(&provider, chunk, self.retry_profile).await?;
@@ -136,6 +139,7 @@ impl WsSubmitter {
             errors += batch_result.errors;
             hashes.extend(batch_result.hashes);
             accepted_txs.extend(batch_result.accepted_txs);
+            error_summaries.extend(batch_result.error_summaries);
         }
 
         Ok(SubmissionResult {
@@ -144,6 +148,7 @@ impl WsSubmitter {
             hashes,
             accepted_txs,
             pool_full_txs: vec![],
+            error_summaries: merge_submission_error_summaries(error_summaries),
         })
     }
 
@@ -165,6 +170,7 @@ impl WsSubmitter {
         let mut hashes = vec![];
         let mut errors = 0;
         let mut accepted_txs = vec![];
+        let mut error_summaries = vec![];
 
         for (idx, tx) in txs.iter().enumerate() {
             let mut attempt = 0;
@@ -195,6 +201,7 @@ impl WsSubmitter {
 
                         error!(tx_idx = idx, error = %e, "TX submission failed");
                         errors += 1;
+                        error_summaries.push(SubmissionErrorSummary::new(error_str, 1));
                         break;
                     }
                 }
@@ -207,6 +214,7 @@ impl WsSubmitter {
             hashes,
             accepted_txs,
             pool_full_txs: vec![],
+            error_summaries: merge_submission_error_summaries(error_summaries),
         })
     }
 }

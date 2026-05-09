@@ -91,6 +91,81 @@ pub struct LatencyStats {
     pub avg: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubmissionErrorSummary {
+    pub message: String,
+    pub count: u32,
+}
+
+impl SubmissionErrorSummary {
+    pub fn new(message: impl Into<String>, count: u32) -> Self {
+        Self {
+            message: message.into(),
+            count,
+        }
+    }
+}
+
+pub fn merge_submission_error_summaries(
+    summaries: impl IntoIterator<Item = SubmissionErrorSummary>,
+) -> Vec<SubmissionErrorSummary> {
+    let mut counts: BTreeMap<String, u32> = BTreeMap::new();
+    for summary in summaries {
+        if summary.count == 0 {
+            continue;
+        }
+        counts
+            .entry(summary.message)
+            .and_modify(|count| *count = count.saturating_add(summary.count))
+            .or_insert(summary.count);
+    }
+
+    let mut merged: Vec<_> = counts
+        .into_iter()
+        .map(|(message, count)| SubmissionErrorSummary { message, count })
+        .collect();
+    merged.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.message.cmp(&b.message))
+    });
+    merged
+}
+
+pub fn benchmark_validity(
+    attempted: u32,
+    accepted: u32,
+    failed: u32,
+    confirmed: u32,
+    pending: u32,
+) -> (bool, Option<String>) {
+    let mut reasons = Vec::new();
+    if attempted != accepted {
+        reasons.push(format!(
+            "accepted {} of {} attempted transactions",
+            accepted, attempted
+        ));
+    }
+    if failed > 0 {
+        reasons.push(format!("{} transaction submissions failed", failed));
+    }
+    if pending > 0 {
+        reasons.push(format!("{} accepted transactions still pending", pending));
+    }
+    if confirmed != accepted {
+        reasons.push(format!(
+            "confirmed {} of {} accepted transactions",
+            confirmed, accepted
+        ));
+    }
+
+    if reasons.is_empty() {
+        (true, None)
+    } else {
+        (false, Some(reasons.join("; ")))
+    }
+}
+
 // Per-method statistics for EVM benchmarks
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PerMethodStats {
@@ -123,9 +198,28 @@ pub struct ServerMetrics {
 // Burst mode results
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BurstResult {
+    /// Transactions signed and attempted by the client.
+    #[serde(default)]
+    pub attempted: u32,
+    /// Transactions accepted by RPC/txpool. Kept as `submitted` for backward
+    /// compatibility with existing reports.
     pub submitted: u32,
+    /// Alias for `submitted` that makes report accounting explicit.
+    #[serde(default)]
+    pub accepted: u32,
+    /// Transactions rejected by RPC/txpool or missing a valid JSON-RPC response.
+    #[serde(default)]
+    pub failed: u32,
     pub confirmed: u32,
     pub pending: u32,
+    /// True only when attempted == accepted == confirmed, with no failures or
+    /// pending transactions. Invalid runs should not be used for best-TPS claims.
+    #[serde(default)]
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submission_errors: Vec<SubmissionErrorSummary>,
     pub sign_ms: u64,
     pub submit_ms: u64,
     pub confirm_ms: u64,
@@ -169,10 +263,20 @@ pub struct WindowEntry {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SustainedResult {
+    #[serde(default)]
+    pub attempted: u32,
     pub sent: u32,
+    #[serde(default)]
+    pub accepted: u32,
     pub confirmed: u32,
     pub pending: u32,
     pub errors: u32,
+    #[serde(default)]
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submission_errors: Vec<SubmissionErrorSummary>,
     pub duration_ms: u64,
     pub actual_tps: f32,
     pub latency: LatencyStats,
@@ -187,9 +291,15 @@ impl SustainedResult {
     /// and `confirm_ms` is set to zero to avoid double-counting.
     pub fn to_burst_result(&self) -> BurstResult {
         BurstResult {
+            attempted: self.attempted,
             submitted: self.sent,
+            accepted: self.accepted,
+            failed: self.errors,
             confirmed: self.confirmed,
             pending: self.pending,
+            valid: self.valid,
+            invalid_reason: self.invalid_reason.clone(),
+            submission_errors: self.submission_errors.clone(),
             sign_ms: 0,
             submit_ms: self.duration_ms,
             confirm_ms: 0,
@@ -372,10 +482,15 @@ mod tests {
     #[test]
     fn test_sustained_result_to_burst_result() {
         let sustained = SustainedResult {
+            attempted: 503,
             sent: 500,
+            accepted: 500,
             confirmed: 480,
             pending: 20,
             errors: 3,
+            valid: false,
+            invalid_reason: Some("3 transaction submissions failed".into()),
+            submission_errors: vec![SubmissionErrorSummary::new("rpc rejected tx", 3)],
             duration_ms: 10_000,
             actual_tps: 48.0,
             latency: LatencyStats {
@@ -496,9 +611,15 @@ mod tests {
     #[test]
     fn test_burst_result_serde_roundtrip() {
         let br = BurstResult {
+            attempted: 1000,
             submitted: 1000,
+            accepted: 1000,
+            failed: 0,
             confirmed: 950,
             pending: 50,
+            valid: false,
+            invalid_reason: Some("50 accepted transactions still pending".into()),
+            submission_errors: vec![],
             sign_ms: 10,
             submit_ms: 200,
             confirm_ms: 500,
@@ -532,9 +653,15 @@ mod tests {
                 worker_count: 8,
             },
             results: BurstResult {
+                attempted: 500,
                 submitted: 500,
+                accepted: 500,
+                failed: 0,
                 confirmed: 490,
                 pending: 10,
+                valid: false,
+                invalid_reason: Some("10 accepted transactions still pending".into()),
+                submission_errors: vec![],
                 sign_ms: 5,
                 submit_ms: 100,
                 confirm_ms: 300,
@@ -643,10 +770,15 @@ mod tests {
     #[test]
     fn test_sustained_result_serde() {
         let sr = SustainedResult {
+            attempted: 1001,
             sent: 1000,
+            accepted: 1000,
             confirmed: 990,
             pending: 10,
             errors: 1,
+            valid: false,
+            invalid_reason: Some("1 transaction submissions failed".into()),
+            submission_errors: vec![SubmissionErrorSummary::new("txpool is full", 1)],
             duration_ms: 60_000,
             actual_tps: 16.5,
             latency: make_latency_stats(),

@@ -29,11 +29,14 @@ for rpt in sorted(glob.glob(os.path.join(runs_dir,'*','*','*','report.json'))):
     chain,mode,ts=parts[0],parts[1],parts[2]
     try:
         r=json.load(open(rpt)); res=r.get('results',{}); lat=res.get('latency',{})
-        sub,conf=res.get('submitted',0),res.get('confirmed',0)
+        sub,conf=res.get('accepted',res.get('submitted',0)),res.get('confirmed',0)
+        attempted=res.get('attempted',sub); failed=res.get('failed',max(0,attempted-sub))
+        valid=res.get('valid', failed==0 and res.get('pending',0)==0 and conf==sub)
         mp=os.path.join(d,'meta.json'); env_v=json.load(open(mp)).get('env','') if os.path.isfile(mp) else ''
         entries.append(dict(path=d,chain=chain,mode=mode,env=env_v,tps=res.get('confirmed_tps',0),
             p50=lat.get('p50',0),p99=lat.get('p99',0),
             confirmed_rate=round(conf/sub*100,1) if sub else 0,
+            attempted=attempted,accepted=sub,failed=failed,valid=valid,
             timestamp=ts.split('_')[0] if '_' in ts else ts))
     except Exception: pass
 print(json.dumps(entries))"
@@ -52,11 +55,11 @@ if cf: data=[r for r in data if r['chain']==cf]
 if mf: data=[r for r in data if r['mode']==mf]
 data.sort(key=lambda r:r.get('timestamp',''),reverse=True); data=data[:lim]
 if not data: print('No runs found.'); sys.exit(0)
-h=f\"{'#':<4}{'Chain':<12}{'Mode':<10}{'Env':<10}{'TPS':>8}{'p50':>8}{'p99':>8}{'Conf%':>7} {'Timestamp':<16}\"
+h=f\"{'#':<4}{'Chain':<12}{'Mode':<10}{'Env':<10}{'TPS':>8}{'p50':>8}{'p99':>8}{'Conf%':>7}{'Valid':>8} {'Timestamp':<16}\"
 print(h); print('-'*len(h))
 for i,r in enumerate(data,1):
     t=f\"{r['tps']:.1f}\" if isinstance(r['tps'],float) else str(r['tps'])
-    print(f\"{i:<4}{r['chain']:<12}{r['mode']:<10}{r.get('env',''):<10}{t:>8}{str(r['p50'])+'ms':>8}{str(r['p99'])+'ms':>8}{str(round(r.get('confirmed_rate',0)))+'%':>7} {r.get('timestamp',''):<16}\")"
+    print(f\"{i:<4}{r['chain']:<12}{r['mode']:<10}{r.get('env',''):<10}{t:>8}{str(r['p50'])+'ms':>8}{str(r['p99'])+'ms':>8}{str(round(r.get('confirmed_rate',0)))+'%':>7}{str(bool(r.get('valid',False))):>8} {r.get('timestamp',''):<16}\")"
 }
 
 cmd_latest() {
@@ -91,8 +94,10 @@ import json,sys,os
 runs=[]
 for p in sys.argv[1:]:
     d=json.load(open(p)); label=d.get('benchmark',os.path.basename(os.path.dirname(p)))
-    res=d.get('results',{}); lat=res.get('latency',{}); sub=res.get('submitted',0); conf=res.get('confirmed',0)
-    runs.append(dict(label=label,submitted=sub,confirmed=conf,confirmed_tps=res.get('confirmed_tps',0),
+    res=d.get('results',{}); lat=res.get('latency',{}); sub=res.get('accepted',res.get('submitted',0)); conf=res.get('confirmed',0)
+    attempted=res.get('attempted',sub); failed=res.get('failed',max(0,attempted-sub))
+    valid=res.get('valid', failed==0 and res.get('pending',0)==0 and conf==sub)
+    runs.append(dict(label=label,attempted=attempted,accepted=sub,failed=failed,confirmed=conf,valid=valid,confirmed_tps=res.get('confirmed_tps',0),
         submitted_tps=res.get('submitted_tps',0),p50=lat.get('p50',0),p95=lat.get('p95',0),
         p99=lat.get('p99',0),avg=lat.get('avg',0),conf_rate=round(conf/sub*100,1) if sub else 0))
 w=14; cols=[r['label'] for r in runs]
@@ -102,8 +107,8 @@ def fmt(v,s=''): return f"{v:.1f}{s}" if isinstance(v,float) else f"{v}{s}"
 def delta(b,c):
     if not b: return '-'
     p=(c-b)/abs(b)*100; return f"{'+' if p>=0 else ''}{p:.1f}%"
-for name,key,sfx in [('Submitted','submitted',''),('Confirmed','confirmed',''),
-    ('Confirmed TPS','confirmed_tps',''),('Submitted TPS','submitted_tps',''),
+for name,key,sfx in [('Attempted','attempted',''),('Accepted','accepted',''),('Failed','failed',''),('Confirmed','confirmed',''),
+    ('Valid','valid',''),('Confirmed TPS','confirmed_tps',''),('Accepted TPS','submitted_tps',''),
     ('Confirm %','conf_rate','%'),('Latency p50','p50','ms'),('Latency p95','p95','ms'),
     ('Latency p99','p99','ms'),('Latency avg','avg','ms')]:
     vals=[r[key] for r in runs]; row=f"{name:<20}"+''.join(f"{fmt(v,sfx):>{w}}" for v in vals)
@@ -150,10 +155,14 @@ if meta:
         s=meta['system']; kv('system',f"{s.get('os','')} {s.get('arch','')} ({s.get('cpus','')} CPUs, {s.get('memory_gb','')} GB)",B)
 sec('Config')
 for k,v in report.get('config',{}).items(): kv(k,v)
-sec('Results'); res=report.get('results',{}); sub=res.get('submitted',0); conf=res.get('confirmed',0)
+sec('Results'); res=report.get('results',{}); sub=res.get('accepted',res.get('submitted',0)); conf=res.get('confirmed',0)
+attempted=res.get('attempted',sub); failed=res.get('failed',max(0,attempted-sub)); valid=res.get('valid',failed==0 and res.get('pending',0)==0 and conf==sub)
 rate=f"{conf/sub*100:.1f}%" if sub else '-'
-kv('Submitted',sub); kv('Confirmed',f"{conf} ({rate})")
-kv('Submitted TPS',f"{res.get('submitted_tps',0):.1f}"); kv('Confirmed TPS',f"{res.get('confirmed_tps',0):.1f}",Y)
+kv('Attempted',attempted); kv('Accepted',sub); kv('Failed',failed)
+kv('Confirmed',f"{conf} ({rate})"); kv('Valid run',valid,Y if not valid else G)
+if not valid and res.get('invalid_reason'): kv('Invalid reason',res['invalid_reason'],Y)
+if res.get('submission_errors'): kv('Submission errors',', '.join(f"{e.get('message','?')} ({e.get('count',0)})" for e in res['submission_errors'][:3]),Y)
+kv('Accepted TPS',f"{res.get('submitted_tps',0):.1f}"); kv('Confirmed TPS',f"{res.get('confirmed_tps',0):.1f}",Y)
 sec('Latency'); lat=res.get('latency',{})
 for k in ('p50','p95','p99','min','max','avg'):
     if k in lat: kv(k,f"{lat[k]}ms")

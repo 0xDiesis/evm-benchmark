@@ -7,28 +7,30 @@ use chrono::Utc;
 /// Extract harness metrics from a benchmark result
 pub fn extract_harness_metrics(result: &BurstResult) -> HarnessMetrics {
     let confirmed = result.confirmed as f32;
-    let submitted = result.submitted as f32;
+    let accepted = result.submitted as f32;
+    let attempted = if result.attempted > 0 {
+        result.attempted as f32
+    } else {
+        accepted
+    };
 
     let tps_submitted = result.submitted_tps;
     let tps_confirmed = result.confirmed_tps;
 
-    let confirmation_rate = if submitted > 0.0 {
-        confirmed / submitted
+    let confirmation_rate = if accepted > 0.0 {
+        confirmed / accepted
     } else {
         0.0
     };
 
-    let pending_ratio = if submitted > 0.0 {
-        (result.pending as f32) / submitted
+    let pending_ratio = if accepted > 0.0 {
+        (result.pending as f32) / accepted
     } else {
         0.0
     };
 
-    // Calculate error rate - we infer it from pending and confirmed vs submitted
-    // error_rate = 1.0 - (confirmed + pending) / submitted
-    let total_accounted = (result.confirmed + result.pending) as f32;
-    let error_rate = if result.submitted > 0 {
-        ((result.submitted as f32) - total_accounted) / (result.submitted as f32)
+    let error_rate = if attempted > 0.0 {
+        result.failed as f32 / attempted
     } else {
         0.0
     };
@@ -96,9 +98,15 @@ mod tests {
     #[test]
     fn test_extract_harness_metrics() {
         let result = BurstResult {
+            attempted: 1000,
             submitted: 1000,
+            accepted: 1000,
+            failed: 10,
             confirmed: 980,
             pending: 10,
+            valid: false,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 50,
             submit_ms: 100,
             confirm_ms: 200,
@@ -176,9 +184,15 @@ mod tests {
     #[test]
     fn test_extract_harness_metrics_zero_submitted() {
         let result = BurstResult {
+            attempted: 0,
             submitted: 0,
+            accepted: 0,
+            failed: 0,
             confirmed: 0,
             pending: 0,
+            valid: true,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 0,
             submit_ms: 0,
             confirm_ms: 0,
@@ -208,9 +222,15 @@ mod tests {
     #[test]
     fn test_extract_harness_metrics_confirmation_rate_correct() {
         let result = BurstResult {
+            attempted: 1050,
             submitted: 1000,
+            accepted: 1000,
+            failed: 50,
             confirmed: 900,
             pending: 50,
+            valid: false,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 50,
             submit_ms: 100,
             confirm_ms: 200,
@@ -233,8 +253,8 @@ mod tests {
         let metrics = extract_harness_metrics(&result);
         // confirmation_rate should be confirmed / submitted = 900 / 1000 = 0.9
         assert!((metrics.confirmation_rate - 0.9).abs() < 0.001);
-        // error_rate should be failed / submitted = (submitted - confirmed - pending) / submitted = 50 / 1000 = 0.05
-        assert!((metrics.error_rate - 0.05).abs() < 0.001);
+        // error_rate is explicit failed / attempted = 50 / 1050.
+        assert!((metrics.error_rate - (50.0 / 1050.0)).abs() < 0.001);
     }
 
     #[test]
@@ -299,9 +319,15 @@ mod tests {
     #[test]
     fn test_extract_harness_metrics_error_rate_all_confirmed() {
         let result = BurstResult {
+            attempted: 1000,
             submitted: 1000,
+            accepted: 1000,
+            failed: 0,
             confirmed: 1000,
             pending: 0,
+            valid: true,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 50,
             submit_ms: 100,
             confirm_ms: 200,

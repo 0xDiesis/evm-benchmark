@@ -171,9 +171,15 @@ mod tests {
     #[tokio::test]
     async fn test_run_analysis_basic() {
         let result = BurstResult {
+            attempted: 1000,
             submitted: 1000,
+            accepted: 1000,
+            failed: 0,
             confirmed: 980,
             pending: 10,
+            valid: false,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 50,
             submit_ms: 100,
             confirm_ms: 200,
@@ -208,9 +214,15 @@ mod tests {
     #[tokio::test]
     async fn test_run_analysis_with_regression() {
         let result = BurstResult {
+            attempted: 1000,
             submitted: 1000,
+            accepted: 1000,
+            failed: 0,
             confirmed: 980,
             pending: 10,
+            valid: false,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 50,
             submit_ms: 100,
             confirm_ms: 200,
@@ -245,9 +257,15 @@ mod tests {
     #[tokio::test]
     async fn test_run_analysis_all_reports_generated() {
         let result = BurstResult {
+            attempted: 500,
             submitted: 500,
+            accepted: 500,
+            failed: 0,
             confirmed: 490,
             pending: 5,
+            valid: false,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 25,
             submit_ms: 50,
             confirm_ms: 100,
@@ -297,9 +315,15 @@ mod tests {
     #[tokio::test]
     async fn test_run_analysis_zero_values() {
         let result = BurstResult {
+            attempted: 0,
             submitted: 0,
+            accepted: 0,
+            failed: 0,
             confirmed: 0,
             pending: 0,
+            valid: true,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 0,
             submit_ms: 0,
             confirm_ms: 0,
@@ -331,9 +355,15 @@ mod tests {
     #[tokio::test]
     async fn test_run_analysis_regression_detected() {
         let result = BurstResult {
+            attempted: 1250,
             submitted: 1000,
+            accepted: 1000,
+            failed: 250,
             confirmed: 700,
             pending: 50,
+            valid: false,
+            invalid_reason: None,
+            submission_errors: vec![],
             sign_ms: 50,
             submit_ms: 100,
             confirm_ms: 200,

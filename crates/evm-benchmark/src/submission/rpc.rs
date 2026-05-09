@@ -1,4 +1,6 @@
-use crate::types::SignedTxWithMetadata;
+use crate::types::{
+    SignedTxWithMetadata, SubmissionErrorSummary, merge_submission_error_summaries,
+};
 use anyhow::Result;
 use rand::Rng;
 use reqwest::Client;
@@ -63,6 +65,8 @@ pub struct SubmissionResult {
     /// Txs rejected specifically because the txpool was full (retriable).
     #[allow(dead_code)]
     pub pool_full_txs: Vec<SignedTxWithMetadata>,
+    /// Aggregated RPC/client rejection diagnostics.
+    pub error_summaries: Vec<SubmissionErrorSummary>,
 }
 
 #[derive(Debug)]
@@ -162,6 +166,10 @@ impl RpcSubmitter {
                             hashes: vec![],
                             accepted_txs: vec![],
                             pool_full_txs: vec![],
+                            error_summaries: vec![SubmissionErrorSummary::new(
+                                e.to_string(),
+                                chunk.len() as u32,
+                            )],
                         }
                     })
                 }
@@ -174,12 +182,16 @@ impl RpcSubmitter {
         let mut errors = 0u32;
         let mut hashes = vec![];
         let mut accepted_txs = vec![];
+        let mut pool_full_txs = vec![];
+        let mut error_summaries = vec![];
 
         for r in results {
             submitted += r.submitted;
             errors += r.errors;
             hashes.extend(r.hashes);
             accepted_txs.extend(r.accepted_txs);
+            pool_full_txs.extend(r.pool_full_txs);
+            error_summaries.extend(r.error_summaries);
         }
 
         Ok(SubmissionResult {
@@ -187,7 +199,8 @@ impl RpcSubmitter {
             errors,
             hashes,
             accepted_txs,
-            pool_full_txs: vec![],
+            pool_full_txs,
+            error_summaries: merge_submission_error_summaries(error_summaries),
         })
     }
 
@@ -265,11 +278,11 @@ impl RpcSubmitter {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Expected JSON array response from batch RPC"))?;
 
-        let mut submitted = 0u32;
-        let mut errors = 0u32;
-        let mut hashes = Vec::with_capacity(responses.len());
-        let mut accepted_txs = Vec::with_capacity(responses.len());
+        let mut hashes = Vec::with_capacity(txs.len());
+        let mut accepted_txs = Vec::with_capacity(txs.len());
         let mut pool_full_txs = Vec::new();
+        let mut outcomes: Vec<Option<Result<String, String>>> = vec![None; txs.len()];
+        let mut error_summaries = Vec::new();
 
         // Collect unique error messages for diagnostics (cap at 3 distinct messages)
         let mut seen_errors: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -279,14 +292,24 @@ impl RpcSubmitter {
             // If the id is missing or non-numeric, skip the tx mapping rather
             // than silently defaulting to index 0.
             let tx_idx = item.get("id").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let Some(idx) = tx_idx.filter(|idx| *idx < txs.len()) else {
+                error_summaries.push(SubmissionErrorSummary::new(
+                    "RPC batch response missing valid id",
+                    1,
+                ));
+                continue;
+            };
+
+            if outcomes[idx].is_some() {
+                error_summaries.push(SubmissionErrorSummary::new(
+                    "duplicate JSON-RPC response id",
+                    1,
+                ));
+                continue;
+            }
+
             if let Some(result) = item.get("result").and_then(|r| r.as_str()) {
-                submitted += 1;
-                hashes.push(result.to_string());
-                if let Some(idx) = tx_idx
-                    && idx < txs.len()
-                {
-                    accepted_txs.push(txs[idx].clone());
-                }
+                outcomes[idx] = Some(Ok(result.to_string()));
             } else {
                 let err_msg = item
                     .get("error")
@@ -295,15 +318,33 @@ impl RpcSubmitter {
                     .unwrap_or("unknown error")
                     .to_string();
                 if seen_errors.len() < 3 && seen_errors.insert(err_msg.clone()) {
-                    debug!(tx_idx = ?tx_idx, error = %err_msg, "RPC tx rejected");
+                    debug!(tx_idx = idx, error = %err_msg, "RPC tx rejected");
                 }
-                if let Some(idx) = tx_idx
-                    && err_msg.contains("txpool is full")
-                    && idx < txs.len()
-                {
+                if err_msg.contains("txpool is full") {
                     pool_full_txs.push(txs[idx].clone());
                 }
-                errors += 1;
+                error_summaries.push(SubmissionErrorSummary::new(err_msg.clone(), 1));
+                outcomes[idx] = Some(Err(err_msg));
+            }
+        }
+
+        let mut submitted = 0u32;
+        let mut errors = 0u32;
+        for (idx, outcome) in outcomes.into_iter().enumerate() {
+            match outcome {
+                Some(Ok(hash)) => {
+                    submitted += 1;
+                    hashes.push(hash);
+                    accepted_txs.push(txs[idx].clone());
+                }
+                Some(Err(_)) => {
+                    errors += 1;
+                }
+                None => {
+                    errors += 1;
+                    error_summaries
+                        .push(SubmissionErrorSummary::new("missing JSON-RPC response", 1));
+                }
             }
         }
 
@@ -313,6 +354,7 @@ impl RpcSubmitter {
             hashes,
             accepted_txs,
             pool_full_txs,
+            error_summaries: merge_submission_error_summaries(error_summaries),
         })
     }
 }
@@ -490,6 +532,7 @@ mod tests {
             hashes: vec![],
             accepted_txs: vec![],
             pool_full_txs: vec![],
+            error_summaries: vec![],
         };
         assert_eq!(result.submitted, 0);
         assert_eq!(result.errors, 0);
@@ -638,9 +681,9 @@ mod tests {
 
         assert_eq!(result.submitted, 1);
         assert_eq!(result.errors, 2);
-        // pool_full_txs are collected per-chunk in submit_batch_jsonrpc but the
-        // outer submit_batch currently resets pool_full_txs to empty vec.
-        // The inner results still counted the errors correctly.
+        assert_eq!(result.pool_full_txs.len(), 2);
+        assert_eq!(result.error_summaries[0].message, "txpool is full");
+        assert_eq!(result.error_summaries[0].count, 2);
     }
 
     /// Submit a single transaction via `submit_single`.
@@ -717,14 +760,17 @@ mod tests {
             .await
             .expect("submit_batch should succeed");
 
-        // 3 chunks * 2 results each = 6 submitted total
-        assert_eq!(result.submitted, 6);
+        // Only responses with ids that map to txs in their chunk count as
+        // accepted. The extra id=1 response for the last one-tx chunk is a
+        // diagnostic, not a phantom accepted transaction.
+        assert_eq!(result.submitted, 5);
         assert_eq!(result.errors, 0);
-        assert_eq!(result.hashes.len(), 6);
-        // accepted_txs: for the first two chunks (size 2), both ids 0 and 1
-        // map to real txs. For the third chunk (size 1), only id=0 maps.
-        // Total accepted_txs = 2 + 2 + 1 = 5.
+        assert_eq!(result.hashes.len(), 5);
         assert_eq!(result.accepted_txs.len(), 5);
+        assert_eq!(
+            result.error_summaries[0].message,
+            "RPC batch response missing valid id"
+        );
     }
 
     /// When the RPC returns a non-array body, `submit_batch_jsonrpc` should

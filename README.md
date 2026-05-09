@@ -100,7 +100,7 @@ All targets accept override variables on the command line. Defaults are shown in
 | `DURATION` | `30` | Duration in seconds (sustained mode) |
 | `SENDERS` | `200` | Number of sender accounts |
 | `BATCH_SIZE` | `200` | RPC batch submission size |
-| `WORKERS` | `8` | Number of async worker tasks |
+| `WORKERS` | `8` | Number of async worker tasks. In burst mode this is the actual submission concurrency; use a value close to `SENDERS` when testing high fanout. |
 | `TAG` | *(auto)* | Custom tag for the run directory |
 | `TEST_MODE` | `transfer` | Test mode: `transfer` or `evm` |
 
@@ -199,7 +199,7 @@ make results-summary
 
 ### Burst
 
-Submit all transactions as fast as possible and measure peak throughput. Transactions are pre-signed, then submitted in configurable waves with batch RPC calls.
+Submit all transactions as fast as possible and measure peak throughput. Transactions are pre-signed, then submitted by `WORKERS` concurrent tasks with batch RPC calls.
 
 ```bash
 make bench MODE=burst TXS=5000
@@ -212,6 +212,18 @@ Maintain a target TPS for a fixed duration to measure stability and latency unde
 ```bash
 make bench MODE=sustained TPS=500 DURATION=60
 ```
+
+### Result Accounting
+
+Reports distinguish client-side attempts from transactions the chain actually accepted:
+
+- `attempted`: signed transactions the benchmark tried to submit.
+- `submitted` / `accepted`: transactions accepted by RPC/txpool.
+- `failed`: rejected submissions or missing/invalid JSON-RPC responses.
+- `confirmed`: accepted transactions with receipts at the configured finality depth.
+- `valid`: true only when `attempted == accepted == confirmed`, with zero failures and zero pending txs.
+
+Use only `valid: true` runs for best-TPS comparisons. Invalid runs are still useful for finding RPC, txpool, or client bottlenecks.
 
 ### Ceiling
 
@@ -364,7 +376,7 @@ cargo run -p evm-benchmark --release -- \
 | `--senders` | `200` | Sender account count |
 | `--waves` | `8` | Submission waves (burst) |
 | `--wave-delay-ms` | `0` | Delay between waves in ms (burst) |
-| `--workers` | `8` | Async worker count |
+| `--workers` | `8` | Async worker count. Burst mode uses this directly instead of deriving concurrency from sender count. |
 | `--batch-size` | `100` | RPC batch size |
 | `--fund` | off | Auto-fund sender accounts via MultiSend |
 | `--out` | `report.json` | JSON report output path |
