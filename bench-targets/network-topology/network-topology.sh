@@ -368,7 +368,7 @@ cmd_verify_quick() {
                 echo "$filter_output" | awk -v hex="${dst_hex}/ffffffff" '
                     $1 == "match" && $2 == hex { print prev; exit }
                     { prev = $0 }
-                ' | sed -nE 's/.*\*flowid 1:([0-9]+).*/\1/p'
+                ' | sed -nE 's/.*flowid 1:([0-9]+).*/\1/p'
             )
             local delay_ms=""
             if [[ -n "$flowid" ]]; then
