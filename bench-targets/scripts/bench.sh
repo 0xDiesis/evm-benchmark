@@ -242,6 +242,10 @@ if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
     fi
 fi
 
+if [[ "${MODE}" == "sustained" && -n "${TOPOLOGY_LAYOUT}" ]]; then
+    export BENCH_CONFIRM_WAIT_SECS="${BENCH_CONFIRM_WAIT_SECS:-90}"
+fi
+
 # ── Generate metadata ────────────────────────────────────────────────────
 if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
     # shellcheck source=meta.sh

@@ -99,6 +99,7 @@ pub async fn write_report(
             "BENCH_KEY": if config.sender_keys.is_empty() { None } else { Some("<redacted>") },
             "BENCH_RETRY_PROFILE": Some(&config.retry_profile),
             "BENCH_FINALITY_CONFIRMATIONS": Some(config.finality_confirmations.to_string()),
+            "BENCH_CONFIRM_WAIT_SECS": std::env::var("BENCH_CONFIRM_WAIT_SECS").ok(),
             "BENCH_PREFLIGHT_STRICT": std::env::var("BENCH_PREFLIGHT_STRICT").ok(),
         }
     });

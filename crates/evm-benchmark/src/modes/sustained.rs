@@ -197,7 +197,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
 
     // Spawn block tracker. Kept alive through the post-run confirmation wait —
     // do NOT abort it until after the wait loop.
-    let max_wait = Duration::from_secs(30);
+    let max_wait = super::confirmation_wait_duration(30);
     let tracker_run_duration = max_wait + Duration::from_secs(config.duration_secs);
     let tracker_clone = tracker.clone();
     let ws_url = config.ws.clone();

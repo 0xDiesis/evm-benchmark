@@ -416,7 +416,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         );
     }
 
-    let max_wait = Duration::from_secs(60);
+    let max_wait = super::confirmation_wait_duration(60);
 
     // Phase 3: One worker per sender — each submits its own tx slice concurrently.
     // This avoids the per-account txpool slot limit (5000 slots/sender) by spreading

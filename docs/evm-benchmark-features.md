@@ -74,6 +74,11 @@ confirmation time; for sustained mode, it includes the load window and any final
 confirmation drain. Use `confirmed_tps` for public claims and `submitted_tps` to
 diagnose client ingress/headroom.
 
+Set `BENCH_CONFIRM_WAIT_SECS` to extend the post-submit receipt polling window
+when testing high-latency or backlogged networks. Geo sustained runs default this
+to 90s so delayed confirmations are counted instead of being reported as zero
+confirmed TPS.
+
 ### Confirmation Tracking
 
 Transactions are tracked from submission to on-chain confirmation:
@@ -388,6 +393,9 @@ cargo run -p evm-benchmark -- --finality-confirmations 100 --txs 10000
 
 # Via environment
 BENCH_FINALITY_CONFIRMATIONS=6 cargo run -p evm-benchmark -- --execution sustained --tps 500 --duration 30
+
+# Longer confirmation drain for geo/backlog tests
+BENCH_CONFIRM_WAIT_SECS=90 cargo run -p evm-benchmark -- --execution sustained --tps 500 --duration 30
 ```
 
 **Timeline Example:**
