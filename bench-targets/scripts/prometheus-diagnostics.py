@@ -127,6 +127,7 @@ GAUGES: dict[str, str] = {
     "fec_enabled": "max(reth_diesis_fec_enabled)",
     "fec_redundancy_ratio": "max(reth_diesis_fec_redundancy_ratio)",
     "fec_min_message_size": "max(reth_diesis_fec_min_message_size)",
+    "fec_target_data_shreds": "max(reth_diesis_fec_target_data_shreds)",
     "fec_max_concurrent_shred_sends_per_peer": "max(reth_diesis_fec_max_concurrent_shred_sends_per_peer)",
 }
 

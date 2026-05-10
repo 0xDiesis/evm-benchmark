@@ -298,6 +298,11 @@ FEC shred sends are bounded per peer by
 `E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER` or
 `BENCH_GEO_E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER`; sweep this when
 `prometheus_diagnostics` shows `fec_broadcast` QUIC send failures.
+FEC payload batches target `64` data shreds by default via
+`E2E_FEC_TARGET_DATA_SHREDS` or `BENCH_GEO_E2E_FEC_TARGET_DATA_SHREDS`; raising
+this creates smaller shreds and more QUIC streams, while lowering it creates
+larger shreds and fewer streams. Keep it near the per-peer fanout cap unless
+bench data shows loss recovery or latency moving in the wrong direction.
 
 ```bash
 # Single chain under global latency
@@ -378,7 +383,7 @@ breakdowns for decode failures, QUIC send failures, and transport hedging.
 Use `make results-ledger` or `bench-targets/scripts/results.sh ledger` to turn
 those per-run reports into CSV, Markdown, JSON, or a console table. The ledger
 joins `meta.json` and `report.json` so each row includes the tested knobs
-(`block_period`, `ordering_window`, FEC fanout, payload mode, benchmark load)
+(`block_period`, `ordering_window`, FEC fanout, FEC target data shreds, payload mode, benchmark load)
 beside the outcomes (`valid`, TPS, latency) and diagnostics (`quic_fail_pct`,
 `fec_fail_per_1k`, missing payload deferrals, payload repair failures, queue
 depths). This is the preferred input for tuning decisions and marketing or
