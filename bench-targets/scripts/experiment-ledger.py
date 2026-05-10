@@ -68,6 +68,9 @@ DEFAULT_FIELDS = [
     "tx_source_selected_primary",
     "tx_source_selected_fallback",
     "tx_source_scan_limit_hits",
+    "tx_source_empty_selections",
+    "tx_source_empty_backoff",
+    "tx_source_empty_anomalous",
     "tx_source_proposal_utilization",
     "quic_fail_pct",
     "peer_command_full_drops",
@@ -320,6 +323,11 @@ def run_from_path(report_path: Path) -> dict[str, Any] | None:
         ),
         "tx_source_skipped_partition": int(counter_delta(report, "tx_source_skipped_partition")),
         "tx_source_scan_limit_hits": int(counter_delta(report, "tx_source_scan_limit_hit")),
+        "tx_source_empty_selections": int(counter_delta(report, "tx_source_empty_selection")),
+        "tx_source_empty_backoff": int(counter_delta(report, "tx_source_empty_selection_backoff")),
+        "tx_source_empty_anomalous": int(
+            counter_delta(report, "tx_source_empty_selection_anomalous")
+        ),
         "tx_source_proposal_utilization": round(
             float(gauge_after(report, "tx_source_proposal_utilization")), 4
         ),

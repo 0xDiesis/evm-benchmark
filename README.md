@@ -390,8 +390,9 @@ joins `meta.json` and `report.json` so each row includes the tested knobs
 (`block_period`, `ordering_window`, proposal caps, tx-selection mode, FEC
 fanout, FEC target data shreds, payload mode, benchmark load) beside the
 outcomes (`valid`, TPS, latency) and diagnostics (`commit_skip_pct`,
-tx-source scan/selection counters, `quic_fail_pct`, `fec_fail_per_1k`, missing
-payload deferrals, payload repair failures, queue depths). This is the
+tx-source scan/selection and empty-backoff/anomaly counters, `quic_fail_pct`,
+`fec_fail_per_1k`, missing payload deferrals, payload repair failures,
+queue depths). This is the
 preferred input for tuning decisions and marketing or research summaries;
 compare rows only when the environment, benchmark load, and host contention are
 comparable.
