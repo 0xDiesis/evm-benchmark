@@ -160,6 +160,14 @@ attempted=res.get('attempted',sub); failed=res.get('failed',max(0,attempted-sub)
 rate=f"{conf/sub*100:.1f}%" if sub else '-'
 kv('Attempted',attempted); kv('Accepted',sub); kv('Failed',failed)
 kv('Confirmed',f"{conf} ({rate})"); kv('Valid run',valid,Y if not valid else G)
+cfg=report.get('config',{})
+if cfg.get('execution_mode') == 'sustained' and cfg.get('target_tps') and cfg.get('duration_secs'):
+    target=float(cfg['target_tps']); duration=float(cfg['duration_secs'])
+    attempted_tps=attempted/duration; accepted_tps=sub/duration
+    kv('Target TPS',f"{target:.1f}")
+    kv('Window attempted TPS',f"{attempted_tps:.1f}")
+    kv('Window accepted TPS',f"{accepted_tps:.1f}")
+    kv('Target hit',attempted_tps >= target*0.95,G if attempted_tps >= target*0.95 else Y)
 if not valid and res.get('invalid_reason'): kv('Invalid reason',res['invalid_reason'],Y)
 if res.get('submission_errors'): kv('Submission errors',', '.join(f"{e.get('message','?')} ({e.get('count',0)})" for e in res['submission_errors'][:3]),Y)
 kv('Accepted TPS',f"{res.get('submitted_tps',0):.1f}"); kv('Confirmed TPS',f"{res.get('confirmed_tps',0):.1f}",Y)

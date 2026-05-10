@@ -104,6 +104,18 @@ All targets accept override variables on the command line. Defaults are shown in
 | `TAG` | *(auto)* | Custom tag for the run directory |
 | `TEST_MODE` | `transfer` | Test mode: `transfer` or `evm` |
 
+Diesis clean benchmarks keep RPC transaction rate limiting enabled, but use a
+larger local e2e ingress profile so high-volume runs measure chain behavior
+instead of the public-RPC anti-abuse ceiling. Override with:
+`BENCH_DIESIS_RATE_LIMIT_GLOBAL_RPS`,
+`BENCH_DIESIS_RATE_LIMIT_GLOBAL_BURST`,
+`BENCH_DIESIS_RATE_LIMIT_PER_CONN_RPS`, and
+`BENCH_DIESIS_RATE_LIMIT_PER_CONN_BURST`.
+
+Sustained reports also capture the requested `target_tps`, `duration_secs`, and
+`batch_size`; result printers show whether the load generator actually hit the
+target window rate.
+
 **Examples:**
 
 ```bash

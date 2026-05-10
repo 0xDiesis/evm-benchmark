@@ -49,6 +49,24 @@ HTTP mode supports **multi-endpoint round-robin** with automatic failover:
 - 30-second recovery timeout for degraded endpoints
 - Transparent failover to next healthy endpoint
 
+### Diesis E2E Ingress Profile
+
+Diesis benchmark runs keep the chain's RPC transaction limiter enabled, but the
+local e2e harness raises the limiter caps by default. This prevents high-volume
+burst sweeps from being reported as chain saturation when the only bottleneck is
+the public-RPC anti-abuse profile. The values are still configurable with
+`BENCH_DIESIS_RATE_LIMIT_GLOBAL_RPS`,
+`BENCH_DIESIS_RATE_LIMIT_GLOBAL_BURST`,
+`BENCH_DIESIS_RATE_LIMIT_PER_CONN_RPS`, and
+`BENCH_DIESIS_RATE_LIMIT_PER_CONN_BURST`.
+
+### Sustained Target Accounting
+
+Sustained reports include `target_tps`, `duration_secs`, and `batch_size` in the
+captured config. The result printers derive window attempted/accepted TPS from
+those fields and flag whether the load generator reached at least 95% of the
+requested target, which separates chain saturation from client pacing limits.
+
 ### Confirmation Tracking
 
 Transactions are tracked from submission to on-chain confirmation:

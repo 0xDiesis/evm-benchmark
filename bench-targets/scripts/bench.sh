@@ -106,7 +106,12 @@ default_chain_overrides() {
 
     case "${chain_name}" in
         diesis)
-            echo "E2E_BLOCK_PERIOD=100ms E2E_ORDERING_WINDOW=15ms E2E_MIN_ROUND_DELAY=10ms E2E_MAX_EXECUTION_LAG=32 E2E_PROPAGATION_DELAY_STOP_THRESHOLD=40 E2E_MAX_PROPOSAL_TX_COUNT=2048 E2E_MAX_GAS_PER_PROPOSAL=30000000"
+            local rpc_per_conn_rps="${BENCH_DIESIS_RATE_LIMIT_PER_CONN_RPS:-1500}"
+            local rpc_per_conn_burst="${BENCH_DIESIS_RATE_LIMIT_PER_CONN_BURST:-3000}"
+            local rpc_global_rps="${BENCH_DIESIS_RATE_LIMIT_GLOBAL_RPS:-30000}"
+            local rpc_global_burst="${BENCH_DIESIS_RATE_LIMIT_GLOBAL_BURST:-40000}"
+
+            echo "E2E_BLOCK_PERIOD=100ms E2E_ORDERING_WINDOW=15ms E2E_MIN_ROUND_DELAY=10ms E2E_MAX_EXECUTION_LAG=32 E2E_PROPAGATION_DELAY_STOP_THRESHOLD=40 E2E_MAX_PROPOSAL_TX_COUNT=2048 E2E_MAX_GAS_PER_PROPOSAL=30000000 DIESIS_RATE_LIMIT_ENABLED=true DIESIS_RATE_LIMIT_PER_CONN_RPS=${rpc_per_conn_rps} DIESIS_RATE_LIMIT_PER_CONN_BURST=${rpc_per_conn_burst} DIESIS_RATE_LIMIT_GLOBAL_RPS=${rpc_global_rps} DIESIS_RATE_LIMIT_GLOBAL_BURST=${rpc_global_burst}"
             ;;
         *)
             echo ""
@@ -333,7 +338,9 @@ if [[ -f "${RUN_DIR}/report.json" ]]; then
 import json, sys
 try:
     with open('${RUN_DIR}/report.json') as f:
-        r = json.load(f)['results']
+        report = json.load(f)
+        r = report['results']
+        cfg = report.get('config', {})
     attempted = r.get('attempted', r.get('submitted', 0))
     accepted = r.get('accepted', r.get('submitted', 0))
     failed = r.get('failed', max(0, attempted - accepted))
@@ -343,6 +350,16 @@ try:
     print(f'  Failed:        {failed}')
     print(f'  Confirmed:     {r[\"confirmed\"]}')
     print(f'  Valid run:     {valid}')
+    if cfg.get('execution_mode') == 'sustained' and cfg.get('target_tps') and cfg.get('duration_secs'):
+        target_tps = float(cfg['target_tps'])
+        duration_secs = float(cfg['duration_secs'])
+        attempted_tps = attempted / duration_secs
+        accepted_tps = accepted / duration_secs
+        target_hit = attempted_tps >= target_tps * 0.95
+        print(f'  Target TPS:    {target_tps:.1f}')
+        print(f'  Window attempted TPS: {attempted_tps:.1f}')
+        print(f'  Window accepted TPS:  {accepted_tps:.1f}')
+        print(f'  Target hit:    {target_hit}')
     if not valid and r.get('invalid_reason'):
         print(f'  Invalid:       {r[\"invalid_reason\"]}')
     if r.get('submission_errors'):
