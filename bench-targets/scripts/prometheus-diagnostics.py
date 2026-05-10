@@ -57,6 +57,8 @@ COUNTERS: dict[str, str] = {
     "fec_shreds_total": "sum(reth_diesis_fec_shreds_total)",
     "fec_shreds_sent": "sum(reth_diesis_fec_shreds_sent)",
     "fec_shreds_received": "sum(reth_diesis_fec_shreds_received)",
+    "fec_shreds_rejected_invalid": "sum(reth_diesis_fec_shreds_rejected_invalid)",
+    "fec_shreds_rejected_inconsistent": "sum(reth_diesis_fec_shreds_rejected_inconsistent)",
     "fec_groups_completed": "sum(reth_diesis_fec_groups_completed)",
     "fec_groups_expired": "sum(reth_diesis_fec_groups_expired)",
     "fec_groups_dropped_capacity": "sum(reth_diesis_fec_groups_dropped_capacity)",
@@ -434,6 +436,14 @@ def print_summary(args: argparse.Namespace) -> int:
         ("Parent selected power", gauges.get("parent_selected_power", {}).get("after")),
         ("FEC encodes", counters.get("fec_encode_count", {}).get("delta")),
         ("FEC shreds sent", counters.get("fec_shreds_sent", {}).get("delta")),
+        (
+            "FEC invalid shreds rejected",
+            counters.get("fec_shreds_rejected_invalid", {}).get("delta"),
+        ),
+        (
+            "FEC inconsistent shreds rejected",
+            counters.get("fec_shreds_rejected_inconsistent", {}).get("delta"),
+        ),
         ("FEC shred send failures", counters.get("fec_shred_send_failures", {}).get("delta")),
         (
             "FEC reassembly hash mismatches",
