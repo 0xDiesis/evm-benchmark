@@ -67,6 +67,7 @@ COUNTERS: dict[str, str] = {
     "fec_reassembly_complete": "sum(reth_diesis_fec_reassembly_complete)",
     "fec_reassembly_duplicate": "sum(reth_diesis_fec_reassembly_duplicate)",
     "fec_reassembly_evicted": "sum(reth_diesis_fec_reassembly_evicted)",
+    "fec_reassembly_hash_mismatch": "sum(reth_diesis_fec_reassembly_hash_mismatch)",
     "quic_connect_failures": "sum(reth_diesis_quic_connect_failures)",
     "quic_send_succeeded": "sum(reth_diesis_quic_send_succeeded_total)",
     "quic_send_failed": "sum(reth_diesis_quic_send_failed_total)",
@@ -410,6 +411,10 @@ def print_summary(args: argparse.Namespace) -> int:
         ("FEC encodes", counters.get("fec_encode_count", {}).get("delta")),
         ("FEC shreds sent", counters.get("fec_shreds_sent", {}).get("delta")),
         ("FEC shred send failures", counters.get("fec_shred_send_failures", {}).get("delta")),
+        (
+            "FEC reassembly hash mismatches",
+            counters.get("fec_reassembly_hash_mismatch", {}).get("delta"),
+        ),
         ("FEC groups expired", counters.get("fec_groups_expired", {}).get("delta")),
         ("FEC below-threshold skips", counters.get("fec_below_threshold_skip", {}).get("delta")),
         ("QUIC send successes", counters.get("quic_send_succeeded", {}).get("delta")),

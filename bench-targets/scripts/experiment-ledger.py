@@ -57,6 +57,7 @@ DEFAULT_FIELDS = [
     "payload_batch_requests",
     "payload_response_send_failures",
     "fec_groups_expired",
+    "fec_reassembly_hash_mismatches",
     "decode_failures",
     "txpool_pending_after",
     "ordered_queue_depth_after",
@@ -270,6 +271,9 @@ def run_from_path(report_path: Path) -> dict[str, Any] | None:
         "fec_shreds_sent": int(fec_shreds_sent),
         "fec_shred_send_failures": int(fec_failures),
         "fec_groups_expired": int(counter_delta(report, "fec_groups_expired")),
+        "fec_reassembly_hash_mismatches": int(
+            counter_delta(report, "fec_reassembly_hash_mismatch")
+        ),
         "fec_below_threshold_skips": int(counter_delta(report, "fec_below_threshold_skip")),
         "quic_send_successes": int(quic_success),
         "quic_send_failures": int(quic_failed),
