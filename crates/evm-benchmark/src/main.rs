@@ -608,6 +608,8 @@ mod tests {
             valid: false,
             invalid_reason: Some("2 accepted transactions still pending".into()),
             submission_errors: vec![],
+            load_duration_ms: 1_000,
+            confirm_wait_ms: 0,
             duration_ms: 1_000,
             actual_tps: 18.0,
             latency: sample_latency(),

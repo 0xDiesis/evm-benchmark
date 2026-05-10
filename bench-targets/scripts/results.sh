@@ -55,7 +55,7 @@ if cf: data=[r for r in data if r['chain']==cf]
 if mf: data=[r for r in data if r['mode']==mf]
 data.sort(key=lambda r:r.get('timestamp',''),reverse=True); data=data[:lim]
 if not data: print('No runs found.'); sys.exit(0)
-h=f\"{'#':<4}{'Chain':<12}{'Mode':<10}{'Env':<10}{'TPS':>8}{'p50':>8}{'p99':>8}{'Conf%':>7}{'Valid':>8} {'Timestamp':<16}\"
+h=f\"{'#':<4}{'Chain':<12}{'Mode':<10}{'Env':<10}{'E2E TPS':>8}{'p50':>8}{'p99':>8}{'Conf%':>7}{'Valid':>8} {'Timestamp':<16}\"
 print(h); print('-'*len(h))
 for i,r in enumerate(data,1):
     t=f\"{r['tps']:.1f}\" if isinstance(r['tps'],float) else str(r['tps'])
@@ -108,7 +108,7 @@ def delta(b,c):
     if not b: return '-'
     p=(c-b)/abs(b)*100; return f"{'+' if p>=0 else ''}{p:.1f}%"
 for name,key,sfx in [('Attempted','attempted',''),('Accepted','accepted',''),('Failed','failed',''),('Confirmed','confirmed',''),
-    ('Valid','valid',''),('Confirmed TPS','confirmed_tps',''),('Accepted TPS','submitted_tps',''),
+    ('Valid','valid',''),('E2E TPS','confirmed_tps',''),('Accepted TPS','submitted_tps',''),
     ('Confirm %','conf_rate','%'),('Latency p50','p50','ms'),('Latency p95','p95','ms'),
     ('Latency p99','p99','ms'),('Latency avg','avg','ms')]:
     vals=[r[key] for r in runs]; row=f"{name:<20}"+''.join(f"{fmt(v,sfx):>{w}}" for v in vals)
@@ -170,7 +170,7 @@ if cfg.get('execution_mode') == 'sustained' and cfg.get('target_tps') and cfg.ge
     kv('Target hit',attempted_tps >= target*0.95,G if attempted_tps >= target*0.95 else Y)
 if not valid and res.get('invalid_reason'): kv('Invalid reason',res['invalid_reason'],Y)
 if res.get('submission_errors'): kv('Submission errors',', '.join(f"{e.get('message','?')} ({e.get('count',0)})" for e in res['submission_errors'][:3]),Y)
-kv('Accepted TPS',f"{res.get('submitted_tps',0):.1f}"); kv('Confirmed TPS',f"{res.get('confirmed_tps',0):.1f}",Y)
+kv('Accepted TPS',f"{res.get('submitted_tps',0):.1f}"); kv('E2E confirmed TPS',f"{res.get('confirmed_tps',0):.1f}",Y)
 sec('Latency'); lat=res.get('latency',{})
 for k in ('p50','p95','p99','min','max','avg'):
     if k in lat: kv(k,f"{lat[k]}ms")

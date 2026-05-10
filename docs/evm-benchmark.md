@@ -119,7 +119,7 @@ and multi-format reports (ASCII, JSON, Markdown, HTML).
 
 ## E2E Benchmark Results
 
-| Scenario | Txs   | Confirmed TPS | Latency p50 | Latency p99 |
+| Scenario | Txs   | E2E confirmed TPS | Latency p50 | Latency p99 |
 |----------|-------|---------------|-------------|-------------|
 | Small    | 100   | ~170          | <10ms       | <50ms       |
 | Medium   | 500   | ~3,740        | ~25ms       | ~100ms      |
@@ -148,4 +148,3 @@ cargo test -p evm-benchmark
 # Run E2E tests (requires a running EVM chain)
 cargo test -p evm-benchmark --test e2e_validation -- --ignored --test-threads=1
 ```
-

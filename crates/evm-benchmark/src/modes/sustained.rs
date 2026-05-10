@@ -253,6 +253,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     for handle in handles {
         let _ = handle.await;
     }
+    let load_duration = start.elapsed();
 
     timeline_handle.abort();
 
@@ -308,6 +309,8 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         valid,
         invalid_reason,
         submission_errors,
+        load_duration_ms: load_duration.as_millis() as u64,
+        confirm_wait_ms: confirm_start.elapsed().as_millis() as u64,
         duration_ms: total_duration.as_millis() as u64,
         actual_tps,
         latency: stats,
@@ -751,6 +754,8 @@ mod tests {
             valid: false,
             invalid_reason: Some("10 transaction submissions failed".into()),
             submission_errors: vec![SubmissionErrorSummary::new("rpc rejected tx", 10)],
+            load_duration_ms: 5000,
+            confirm_wait_ms: 0,
             duration_ms: 5000,
             actual_tps: 96.0,
             latency: LatencyStats {
@@ -776,7 +781,7 @@ mod tests {
         // sign_ms is 0 (pre-signed)
         assert_eq!(burst.sign_ms, 0);
         // TPS values
-        assert_eq!(burst.submitted_tps, 96.0);
+        assert_eq!(burst.submitted_tps, 100.0);
         assert_eq!(burst.confirmed_tps, 96.0);
         // Latency stats preserved
         assert_eq!(burst.latency.p50, 25);
@@ -913,6 +918,8 @@ mod tests {
             valid: false,
             invalid_reason: Some("50 transaction submissions failed".into()),
             submission_errors: vec![SubmissionErrorSummary::new("txpool is full", 50)],
+            load_duration_ms: 10_000,
+            confirm_wait_ms: 0,
             duration_ms: 10_000,
             actual_tps: 90.0,
             latency: crate::types::LatencyStats {
@@ -943,6 +950,8 @@ mod tests {
             valid: false,
             invalid_reason: Some("5 transaction submissions failed".into()),
             submission_errors: vec![SubmissionErrorSummary::new("rpc rejected tx", 5)],
+            load_duration_ms: 5000,
+            confirm_wait_ms: 0,
             duration_ms: 5000,
             actual_tps: 18.0,
             latency: crate::types::LatencyStats {

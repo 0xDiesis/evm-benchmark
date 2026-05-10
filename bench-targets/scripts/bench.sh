@@ -365,7 +365,7 @@ try:
     if r.get('submission_errors'):
         top = ', '.join(f\"{e.get('message','?')} ({e.get('count',0)})\" for e in r['submission_errors'][:3])
         print(f'  Errors:        {top}')
-    print(f'  Confirmed TPS: {r[\"confirmed_tps\"]:.1f}')
+    print(f'  E2E confirmed TPS: {r[\"confirmed_tps\"]:.1f}')
     print(f'  Latency p50:   {r[\"latency\"][\"p50\"]}ms')
     print(f'  Latency p95:   {r[\"latency\"][\"p95\"]}ms')
     print(f'  Latency p99:   {r[\"latency\"][\"p99\"]}ms')

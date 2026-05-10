@@ -277,7 +277,7 @@ def R(c):
 METRICS = [
     ("Submitted",        lambda r: r.get("submitted", 0),                          False),
     ("Confirmed",        lambda r: r.get("confirmed", 0),                          False),
-    ("Confirmed TPS",    lambda r: r.get("confirmed_tps", 0.0),                    False),
+    ("E2E confirmed TPS",lambda r: r.get("confirmed_tps", 0.0),                    False),
     ("Submitted TPS",    lambda r: r.get("submitted_tps", 0.0),                    False),
     ("Latency p50 (ms)", lambda r: r.get("latency", {}).get("p50", 0),             True),
     ("Latency p95 (ms)", lambda r: r.get("latency", {}).get("p95", 0),             True),
@@ -342,7 +342,7 @@ with open(md, "w") as f:
     for label, fn, lb in METRICS:
         vals = [fn(R(c)) for c in chains]
         vs = [f"{v:.1f}" if isinstance(v, float) else str(v) for v in vals]
-        bold = "Confirmed TPS" in label
+        bold = "E2E confirmed TPS" in label
         if bold: vs = [f"**{s}**" for s in vs]
         ds = []
         for v in vals[1:]:

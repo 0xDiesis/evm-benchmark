@@ -277,6 +277,12 @@ pub struct SustainedResult {
     pub invalid_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub submission_errors: Vec<SubmissionErrorSummary>,
+    /// Time spent in the configured load-generation window.
+    #[serde(default)]
+    pub load_duration_ms: u64,
+    /// Additional time spent waiting for accepted transactions to confirm.
+    #[serde(default)]
+    pub confirm_wait_ms: u64,
     pub duration_ms: u64,
     pub actual_tps: f32,
     pub latency: LatencyStats,
@@ -303,7 +309,11 @@ impl SustainedResult {
             sign_ms: 0,
             submit_ms: self.duration_ms,
             confirm_ms: 0,
-            submitted_tps: self.actual_tps,
+            submitted_tps: if self.load_duration_ms > 0 {
+                self.accepted as f32 / (self.load_duration_ms as f32 / 1000.0)
+            } else {
+                0.0
+            },
             confirmed_tps: self.actual_tps,
             latency: self.latency.clone(),
             server_metrics: None,
@@ -494,6 +504,8 @@ mod tests {
             valid: false,
             invalid_reason: Some("3 transaction submissions failed".into()),
             submission_errors: vec![SubmissionErrorSummary::new("rpc rejected tx", 3)],
+            load_duration_ms: 5_000,
+            confirm_wait_ms: 5_000,
             duration_ms: 10_000,
             actual_tps: 48.0,
             latency: LatencyStats {
@@ -514,7 +526,7 @@ mod tests {
         assert_eq!(burst.pending, 20);
         assert_eq!(burst.submit_ms, 10_000);
         assert_eq!(burst.confirm_ms, 0);
-        assert_eq!(burst.submitted_tps, 48.0);
+        assert_eq!(burst.submitted_tps, 100.0);
         assert_eq!(burst.confirmed_tps, 48.0);
         assert_eq!(burst.sign_ms, 0);
         assert!(burst.server_metrics.is_none());
@@ -788,6 +800,8 @@ mod tests {
             valid: false,
             invalid_reason: Some("1 transaction submissions failed".into()),
             submission_errors: vec![SubmissionErrorSummary::new("txpool is full", 1)],
+            load_duration_ms: 10_000,
+            confirm_wait_ms: 50_000,
             duration_ms: 60_000,
             actual_tps: 16.5,
             latency: make_latency_stats(),

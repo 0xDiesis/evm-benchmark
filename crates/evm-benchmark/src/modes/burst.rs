@@ -151,9 +151,9 @@ pub(crate) async fn poll_pending_receipts(
         .await;
 }
 
-fn confirmed_tps(confirmed: u32, confirm_ms: Duration) -> f32 {
-    if !confirm_ms.is_zero() {
-        confirmed as f32 / confirm_ms.as_secs_f32()
+fn confirmed_tps(confirmed: u32, elapsed: Duration) -> f32 {
+    if !elapsed.is_zero() {
+        confirmed as f32 / elapsed.as_secs_f32()
     } else {
         0.0
     }
@@ -545,11 +545,15 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         pending,
     );
 
-    // confirmed_tps: chain throughput = txs confirmed / time spent waiting for confirmations.
-    // This measures how fast the chain processes transactions, excluding submission overhead.
+    // confirmed_tps is conservative end-to-end burst throughput: confirmed
+    // transactions divided by submission plus post-submit confirmation time.
+    // Blocks are produced while the client is submitting, so measuring only the
+    // post-submit receipt polling phase can overstate chain throughput.
+    let end_to_end = submit_time.saturating_add(confirm_ms);
+
     metrics.set_pending_transactions(pending as i64);
-    if !confirm_ms.is_zero() {
-        metrics.set_current_tps(confirmed as f64 / confirm_ms.as_secs_f64());
+    if !end_to_end.is_zero() {
+        metrics.set_current_tps(confirmed as f64 / end_to_end.as_secs_f64());
     }
 
     let result = BurstResult {
@@ -570,7 +574,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         } else {
             0.0
         },
-        confirmed_tps: confirmed_tps(confirmed, confirm_ms),
+        confirmed_tps: confirmed_tps(confirmed, end_to_end),
         latency: stats,
         server_metrics: None,
         per_method: None,
@@ -1672,16 +1676,16 @@ mod tests {
         assert!((submitted_tps - 500.0).abs() < 0.01);
     }
 
-    /// Verify confirmed_tps calculation: confirmed / confirm_time.
+    /// Verify confirmed_tps calculation: confirmed / elapsed end-to-end time.
     #[test]
     fn test_burst_result_confirmed_tps_calculation() {
         let confirmed = 1800u32;
-        let confirm_secs = 3.0f32;
-        let confirmed_tps = confirmed as f32 / confirm_secs;
-        assert!((confirmed_tps - 600.0).abs() < 0.01);
+        let elapsed_secs = 6.0f32;
+        let confirmed_tps = confirmed as f32 / elapsed_secs;
+        assert!((confirmed_tps - 300.0).abs() < 0.01);
     }
 
-    /// When confirm time is zero, confirmed_tps should be 0.
+    /// When elapsed time is zero, confirmed_tps should be 0.
     #[test]
     fn test_burst_result_zero_confirm_time() {
         assert_eq!(confirmed_tps(100, Duration::ZERO), 0.0);

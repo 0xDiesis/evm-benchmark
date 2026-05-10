@@ -190,8 +190,8 @@ for value in config["values"]:
     except Exception as e:
         print(f"  WARN: could not parse {report_path}: {e}", file=sys.stderr)
 
-# Prefer valid no-error runs, then sort by TPS descending. Invalid runs remain
-# visible but cannot become the "best" setting.
+# Prefer valid no-error runs, then sort by conservative end-to-end TPS
+# descending. Invalid runs remain visible but cannot become the "best" setting.
 results.sort(key=lambda x: (x["valid"], x["tps"]), reverse=True)
 
 # Write summary.json
@@ -206,7 +206,7 @@ md_lines = [
     f"**Parameter:** `{param}`  ",
     f"**Mode:** {config['mode']}  |  **TXS:** {config['txs']}  |  **TPS target:** {config['tps']}",
     "",
-    "| Value | Valid | Attempted | Accepted | Failed | Confirmed TPS | p50 (ms) | p95 (ms) | p99 (ms) | Confirmed % |",
+    "| Value | Valid | Attempted | Accepted | Failed | E2E TPS | p50 (ms) | p95 (ms) | p99 (ms) | Confirmed % |",
     "|-------|-------|----------:|---------:|-------:|--------------:|---------:|---------:|---------:|------------:|",
 ]
 for r in results:
@@ -224,11 +224,11 @@ if valid_results:
     if os.path.islink(best_link):
         os.unlink(best_link)
     os.symlink(best_value, best_link)
-    print(f"  Best valid: {param}={best_value} ({valid_results[0]['tps']} TPS)")
+    print(f"  Best valid: {param}={best_value} ({valid_results[0]['tps']} E2E TPS)")
 
 # Print table
 print()
-print(f"  {'Value':<14} {'Valid':>7} {'TPS':>10} {'p50':>8} {'p95':>8} {'p99':>8} {'Confirmed':>10}")
+print(f"  {'Value':<14} {'Valid':>7} {'E2E TPS':>10} {'p50':>8} {'p95':>8} {'p99':>8} {'Confirmed':>10}")
 print(f"  {'-'*14} {'-'*7} {'-'*10} {'-'*8} {'-'*8} {'-'*8} {'-'*10}")
 for r in results:
     print(f"  {r['value']:<14} {str(r['valid']):>7} {r['tps']:>10} {r['p50']:>8} {r['p95']:>8} {r['p99']:>8} {r['confirmed_rate']:>9}%")

@@ -30,7 +30,7 @@ latencies. Latency is verified by pinging between nodes before each geo benchmar
 
 ### Clean (0ms RTT — local Docker networking)
 
-| Chain | Confirmed TPS | p50 | p95 | p99 | Confirmed |
+| Chain | E2E confirmed TPS | p50 | p95 | p99 | Confirmed |
 |-------|-------------:|----:|----:|----:|----------:|
 | **Diesis** | **3,114** | **588ms** | **797ms** | **810ms** | 100% |
 | Sei | 1,795 | 2,660ms | 4,123ms | 4,570ms | 100% |
@@ -42,7 +42,7 @@ latencies. Latency is verified by pinging between nodes before each geo benchmar
 
 ### Geo-US (20-60ms RTT — simulated US-distributed)
 
-| Chain | Confirmed TPS | p50 | p95 | p99 | Confirmed |
+| Chain | E2E confirmed TPS | p50 | p95 | p99 | Confirmed |
 |-------|-------------:|----:|----:|----:|----------:|
 | **Diesis** | **2,013** | **845ms** | **971ms** | **976ms** | 100% |
 | Sei | 1,163 | 2,762ms | 4,232ms | 4,846ms | 100% |
@@ -52,7 +52,7 @@ latencies. Latency is verified by pinging between nodes before each geo benchmar
 
 ### Geo-Global (60-240ms RTT — US / EU / Asia spread)
 
-| Chain | Confirmed TPS | p50 | p95 | p99 | Confirmed |
+| Chain | E2E confirmed TPS | p50 | p95 | p99 | Confirmed |
 |-------|-------------:|----:|----:|----:|----------:|
 | Sei | 1,441 | 3,686ms | 5,294ms | 5,579ms | 100% |
 | **Diesis** | **985** | **1,810ms** | **1,981ms** | **1,984ms** | 100% |

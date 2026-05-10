@@ -33,8 +33,8 @@ evm-benchmark --update-targets --txs 2000 --execution burst
 
 | Mode | Description | Key Metrics |
 |------|-------------|-------------|
-| **Burst** | Submit all txs as fast as possible, measure chain throughput | confirmed_tps, latency p50/p95/p99 |
-| **Sustained** | Maintain target TPS for a duration, measure stability | actual_tps, timeline, latency over time |
+| **Burst** | Submit all txs as fast as possible, measure end-to-end throughput | confirmed_tps, submitted_tps, latency p50/p95/p99 |
+| **Sustained** | Maintain target TPS for a duration, measure stability | confirmed_tps, submitted_tps, timeline, latency over time |
 | **Ceiling** | Ramp TPS until saturation, find max throughput | ceiling_tps, saturation point |
 
 ### Submission Methods
@@ -66,6 +66,13 @@ Sustained reports include `target_tps`, `duration_secs`, and `batch_size` in the
 captured config. The result printers derive window attempted/accepted TPS from
 those fields and flag whether the load generator reached at least 95% of the
 requested target, which separates chain saturation from client pacing limits.
+
+`submitted_tps` is the accepted transaction rate during the load window.
+`confirmed_tps` is conservative end-to-end confirmed throughput. For burst mode,
+that means confirmed transactions divided by submission plus post-submit receipt
+confirmation time; for sustained mode, it includes the load window and any final
+confirmation drain. Use `confirmed_tps` for public claims and `submitted_tps` to
+diagnose client ingress/headroom.
 
 ### Confirmation Tracking
 
