@@ -8,7 +8,7 @@ use crate::types::{
     BurstResult, SubmissionErrorSummary, TestMode, benchmark_validity,
     merge_submission_error_summaries,
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use std::str::FromStr;
@@ -16,6 +16,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MIN_BALANCE_WEI: u128 = 1_000_000_000_000_000_000; // 1 ETH
+const RECEIPT_POLL_PENDING_LIMIT: u32 = 512;
+const BLOCK_CONFIRM_RESCAN_DEPTH: u64 = 64;
+
+struct BlockTxIdentity {
+    hash: Option<B256>,
+    sender: Option<Address>,
+    nonce: Option<u64>,
+}
 
 /// Attempt to fund the test account if it has insufficient balance.
 /// This is a best-effort function that tries to send a self-transfer if the balance
@@ -149,6 +157,140 @@ pub(crate) async fn poll_pending_receipts(
             }
         })
         .await;
+}
+
+pub(crate) async fn rpc_latest_block_number(
+    client: &reqwest::Client,
+    rpc_url: &str,
+) -> Option<u64> {
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_blockNumber",
+        "params": [],
+        "id": 1
+    });
+    let resp = client.post(rpc_url).json(&payload).send().await.ok()?;
+    let body = resp.json::<serde_json::Value>().await.ok()?;
+    let hex = body.get("result").and_then(|v| v.as_str())?;
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
+}
+
+fn parse_hex_u64(hex: &str) -> Option<u64> {
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
+}
+
+fn assume_isolated_block_counts() -> bool {
+    std::env::var("BENCH_ASSUME_ISOLATED_BLOCKS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+async fn fetch_block_transactions(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    block_num: u64,
+) -> Option<Vec<BlockTxIdentity>> {
+    let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": [format!("0x{block_num:x}"), true],
+        "id": 1
+    });
+    let resp = client.post(rpc_url).json(&payload).send().await.ok()?;
+    let body = resp.json::<serde_json::Value>().await.ok()?;
+    let txs = body
+        .get("result")
+        .and_then(|b| b.get("transactions"))
+        .and_then(|t| t.as_array())?;
+    Some(
+        txs.iter()
+            .filter_map(|tx| {
+                if let Some(hash) = tx.as_str().and_then(|hash| hash.parse().ok()) {
+                    return Some(BlockTxIdentity {
+                        hash: Some(hash),
+                        sender: None,
+                        nonce: None,
+                    });
+                }
+                let obj = tx.as_object()?;
+                Some(BlockTxIdentity {
+                    hash: obj
+                        .get("hash")
+                        .and_then(|hash| hash.as_str())
+                        .and_then(|hash| hash.parse().ok()),
+                    sender: obj
+                        .get("from")
+                        .and_then(|from| from.as_str())
+                        .and_then(|from| from.parse().ok()),
+                    nonce: obj
+                        .get("nonce")
+                        .and_then(|nonce| nonce.as_str())
+                        .and_then(parse_hex_u64),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// Scan newly produced blocks for pending benchmark tx hashes.
+///
+/// Some EVM nodes can expose block bodies before receipt indexes are cheap to
+/// query under load. Block scanning prevents confirmed transactions from being
+/// reported as pending when `eth_getTransactionReceipt` lags.
+pub(crate) async fn poll_new_block_inclusions(
+    client: &reqwest::Client,
+    rpc_url: &str,
+    tracker: &LatencyTracker,
+    last_scanned_block: &mut u64,
+    scan_floor_block: u64,
+    finality_confirmations: u32,
+) {
+    let Some(latest_block) = rpc_latest_block_number(client, rpc_url).await else {
+        return;
+    };
+    let scan_to = latest_block.saturating_sub(finality_confirmations as u64);
+    if scan_to < scan_floor_block {
+        return;
+    }
+
+    let next_unscanned = last_scanned_block.saturating_add(1);
+    let rescan_start = rescan_floor(scan_to).max(scan_floor_block);
+    let scan_from = next_unscanned.min(rescan_start).max(scan_floor_block);
+    let mut processed_to = *last_scanned_block;
+    let assume_isolated_blocks = assume_isolated_block_counts();
+    for block_num in scan_from..=scan_to {
+        let Some(block_txs) = fetch_block_transactions(client, rpc_url, block_num).await else {
+            break;
+        };
+        let arrival = Instant::now();
+        let block_tx_count = block_txs.len() as u32;
+        let pending_before = tracker.pending_count();
+        for tx in block_txs {
+            let hash_matched = tx
+                .hash
+                .is_some_and(|hash| tracker.on_block_inclusion(hash, arrival));
+            if !hash_matched && let (Some(sender), Some(nonce)) = (tx.sender, tx.nonce) {
+                tracker.on_account_nonce_inclusion(sender, nonce, arrival);
+            }
+        }
+        if assume_isolated_blocks {
+            let matched = pending_before.saturating_sub(tracker.pending_count());
+            let unmatched = block_tx_count.saturating_sub(matched);
+            tracker.confirm_oldest_pending(unmatched, arrival);
+        }
+        processed_to = processed_to.max(block_num);
+    }
+    *last_scanned_block = processed_to;
+}
+
+fn rescan_floor(scan_to: u64) -> u64 {
+    scan_to
+        .saturating_sub(BLOCK_CONFIRM_RESCAN_DEPTH.saturating_sub(1))
+        .max(1)
+}
+
+pub(crate) fn should_poll_receipts(pending_count: u32) -> bool {
+    pending_count > 0 && pending_count <= RECEIPT_POLL_PENDING_LIMIT
 }
 
 fn confirmed_tps(confirmed: u32, elapsed: Duration) -> f32 {
@@ -417,6 +559,10 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     }
 
     let max_wait = super::confirmation_wait_duration(60);
+    let mut last_scanned_block = rpc_latest_block_number(&client, config.rpc.as_str())
+        .await
+        .unwrap_or(0);
+    let scan_floor_block = last_scanned_block.saturating_add(1);
 
     // Phase 3: One worker per sender — each submits its own tx slice concurrently.
     // This avoids the per-account txpool slot limit (5000 slots/sender) by spreading
@@ -521,17 +667,37 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
 
     while confirm_start.elapsed() < max_wait && tracker.pending_count() > 0 {
         metrics.set_pending_transactions(tracker.pending_count() as i64);
-        poll_pending_receipts(
+        poll_new_block_inclusions(
             &client,
             config.rpc.as_str(),
             &tracker,
+            &mut last_scanned_block,
+            scan_floor_block,
             config.finality_confirmations,
         )
         .await;
+        if should_poll_receipts(tracker.pending_count()) {
+            poll_pending_receipts(
+                &client,
+                config.rpc.as_str(),
+                &tracker,
+                config.finality_confirmations,
+            )
+            .await;
+        }
         if tracker.pending_count() > 0 {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
+    poll_new_block_inclusions(
+        &client,
+        config.rpc.as_str(),
+        &tracker,
+        &mut last_scanned_block,
+        scan_floor_block,
+        config.finality_confirmations,
+    )
+    .await;
 
     let confirm_ms = confirm_start.elapsed();
     let stats = tracker.statistics();
@@ -679,6 +845,28 @@ mod tests {
         })
     }
 
+    fn block_response(tx_hashes: &[String]) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "number": "0x1",
+                "transactions": tx_hashes
+            }
+        })
+    }
+
+    fn full_block_response(transactions: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "number": "0x1",
+                "transactions": transactions
+            }
+        })
+    }
+
     fn receipt_response_with_block(tx_hash: &str, block_number: &str) -> serde_json::Value {
         serde_json::json!({
             "jsonrpc": "2.0",
@@ -780,6 +968,224 @@ mod tests {
         ensure_account_funded(&client, &mock_server.uri(), account, false)
             .await
             .expect("low balance should still return ok when noisy");
+    }
+
+    #[tokio::test]
+    async fn test_poll_new_block_inclusions_tracks_block_transactions() {
+        let mock_server = MockServer::start().await;
+        let tracker = LatencyTracker::new();
+        let hash_a = B256::with_last_byte(0xa1);
+        let hash_b = B256::with_last_byte(0xb2);
+        tracker.record_submit(
+            hash_a,
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+        tracker.record_submit(
+            hash_b,
+            1,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        let txs = vec![format!("{hash_a:?}"), format!("{hash_b:?}")];
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("eth_blockNumber") => ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}),
+                    ),
+                    Some("eth_getBlockByNumber") => {
+                        ResponseTemplate::new(200).set_body_json(block_response(&txs))
+                    }
+                    other => panic!("unexpected rpc method: {other:?}"),
+                }
+            })
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut last_scanned_block = 0;
+        poll_new_block_inclusions(
+            &client,
+            &mock_server.uri(),
+            &tracker,
+            &mut last_scanned_block,
+            1,
+            0,
+        )
+        .await;
+
+        assert_eq!(last_scanned_block, 1);
+        assert_eq!(tracker.confirmed_count(), 2);
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_poll_new_block_inclusions_honors_finality_depth() {
+        let mock_server = MockServer::start().await;
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(0xc3);
+        tracker.record_submit(
+            hash,
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        let txs = vec![format!("{hash:?}")];
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("eth_blockNumber") => ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "0x2"}),
+                    ),
+                    Some("eth_getBlockByNumber") => {
+                        let block = body["params"][0].as_str().unwrap_or_default();
+                        let block_txs = if block == "0x1" { vec![] } else { txs.clone() };
+                        ResponseTemplate::new(200).set_body_json(block_response(&block_txs))
+                    }
+                    other => panic!("unexpected rpc method: {other:?}"),
+                }
+            })
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut last_scanned_block = 0;
+        poll_new_block_inclusions(
+            &client,
+            &mock_server.uri(),
+            &tracker,
+            &mut last_scanned_block,
+            1,
+            1,
+        )
+        .await;
+
+        assert_eq!(last_scanned_block, 1);
+        assert_eq!(tracker.confirmed_count(), 0);
+        assert_eq!(tracker.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_new_block_inclusions_matches_sender_nonce_fallback() {
+        let mock_server = MockServer::start().await;
+        let tracker = LatencyTracker::new();
+        let pending_hash = B256::with_last_byte(0xd4);
+        let block_hash = B256::with_last_byte(0xee);
+        let sender = Address::with_last_byte(0x44);
+        tracker.record_submit(
+            pending_hash,
+            9,
+            sender,
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("eth_blockNumber") => ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "0x1"}),
+                    ),
+                    Some("eth_getBlockByNumber") => {
+                        ResponseTemplate::new(200).set_body_json(full_block_response(vec![
+                            serde_json::json!({
+                                "hash": format!("{block_hash:?}"),
+                                "from": format!("{sender:?}"),
+                                "nonce": "0x9"
+                            }),
+                        ]))
+                    }
+                    other => panic!("unexpected rpc method: {other:?}"),
+                }
+            })
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut last_scanned_block = 0;
+        poll_new_block_inclusions(
+            &client,
+            &mock_server.uri(),
+            &tracker,
+            &mut last_scanned_block,
+            1,
+            0,
+        )
+        .await;
+
+        assert_eq!(tracker.confirmed_count(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_poll_new_block_inclusions_rescans_recent_blocks() {
+        let mock_server = MockServer::start().await;
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(0xf5);
+        tracker.record_submit(
+            hash,
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        let txs = vec![format!("{hash:?}")];
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("eth_blockNumber") => ResponseTemplate::new(200).set_body_json(
+                        serde_json::json!({"jsonrpc": "2.0", "id": 1, "result": "0x3"}),
+                    ),
+                    Some("eth_getBlockByNumber") => {
+                        let block = body["params"][0].as_str().unwrap_or_default();
+                        let block_txs = if block == "0x2" { txs.clone() } else { vec![] };
+                        ResponseTemplate::new(200).set_body_json(block_response(&block_txs))
+                    }
+                    other => panic!("unexpected rpc method: {other:?}"),
+                }
+            })
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let mut last_scanned_block = 2;
+        poll_new_block_inclusions(
+            &client,
+            &mock_server.uri(),
+            &tracker,
+            &mut last_scanned_block,
+            1,
+            0,
+        )
+        .await;
+
+        assert_eq!(last_scanned_block, 3);
+        assert_eq!(tracker.confirmed_count(), 1);
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_should_poll_receipts_only_for_small_pending_sets() {
+        assert!(!should_poll_receipts(0));
+        assert!(should_poll_receipts(1));
+        assert!(should_poll_receipts(RECEIPT_POLL_PENDING_LIMIT));
+        assert!(!should_poll_receipts(RECEIPT_POLL_PENDING_LIMIT + 1));
     }
 
     #[tokio::test]

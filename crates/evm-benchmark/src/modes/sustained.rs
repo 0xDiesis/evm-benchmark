@@ -198,6 +198,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     // Spawn block tracker. Kept alive through the post-run confirmation wait —
     // do NOT abort it until after the wait loop.
     let max_wait = super::confirmation_wait_duration(30);
+    let mut last_scanned_block =
+        super::burst::rpc_latest_block_number(&client, config.rpc.as_str())
+            .await
+            .unwrap_or(0);
+    let scan_floor_block = last_scanned_block.saturating_add(1);
     let tracker_run_duration = max_wait + Duration::from_secs(config.duration_secs);
     let tracker_clone = tracker.clone();
     let ws_url = config.ws.clone();
@@ -276,16 +281,36 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let confirm_start = Instant::now();
     while confirm_start.elapsed() < max_wait && tracker.pending_count() > 0 {
         metrics.set_pending_transactions(tracker.pending_count() as i64);
-        super::burst::poll_pending_receipts(
+        super::burst::poll_new_block_inclusions(
             &client,
             config.rpc.as_str(),
             &tracker,
+            &mut last_scanned_block,
+            scan_floor_block,
             config.finality_confirmations,
         )
         .await;
+        if super::burst::should_poll_receipts(tracker.pending_count()) {
+            super::burst::poll_pending_receipts(
+                &client,
+                config.rpc.as_str(),
+                &tracker,
+                config.finality_confirmations,
+            )
+            .await;
+        }
         let pending_sleep_ms = u64::from(tracker.pending_count() > 0) * 25;
         tokio::time::sleep(Duration::from_millis(pending_sleep_ms)).await;
     }
+    super::burst::poll_new_block_inclusions(
+        &client,
+        config.rpc.as_str(),
+        &tracker,
+        &mut last_scanned_block,
+        scan_floor_block,
+        config.finality_confirmations,
+    )
+    .await;
 
     // Now abort the block tracker
     tracker_handle.abort();

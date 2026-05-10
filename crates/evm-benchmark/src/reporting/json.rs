@@ -100,6 +100,7 @@ pub async fn write_report(
             "BENCH_RETRY_PROFILE": Some(&config.retry_profile),
             "BENCH_FINALITY_CONFIRMATIONS": Some(config.finality_confirmations.to_string()),
             "BENCH_CONFIRM_WAIT_SECS": std::env::var("BENCH_CONFIRM_WAIT_SECS").ok(),
+            "BENCH_ASSUME_ISOLATED_BLOCKS": std::env::var("BENCH_ASSUME_ISOLATED_BLOCKS").ok(),
             "BENCH_PREFLIGHT_STRICT": std::env::var("BENCH_PREFLIGHT_STRICT").ok(),
         }
     });

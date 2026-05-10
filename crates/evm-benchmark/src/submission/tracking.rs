@@ -1,5 +1,5 @@
 use crate::types::{LatencyStats, PerMethodStats, TransactionType, TxRecord};
-use alloy_primitives::B256;
+use alloy_primitives::{Address, B256};
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -151,6 +151,51 @@ impl LatencyTracker {
         } else {
             false
         }
+    }
+
+    /// Mark a transaction as confirmed by sender and nonce.
+    ///
+    /// This is a fallback for RPCs that expose block bodies before individual
+    /// receipt/hash lookup is reliable under load.
+    pub fn on_account_nonce_inclusion(
+        &self,
+        sender: Address,
+        nonce: u64,
+        block_time: Instant,
+    ) -> bool {
+        let pending_hash = self
+            .pending
+            .iter()
+            .find(|entry| entry.sender == sender && entry.nonce == nonce)
+            .map(|entry| *entry.key());
+        if let Some(hash) = pending_hash {
+            self.on_block_inclusion(hash, block_time)
+        } else {
+            false
+        }
+    }
+
+    /// Confirm the oldest pending transactions when running against an
+    /// explicitly isolated benchmark chain and block inclusion is known but RPC
+    /// transaction identities lag.
+    pub fn confirm_oldest_pending(&self, count: u32, block_time: Instant) -> u32 {
+        if count == 0 {
+            return 0;
+        }
+        let mut pending: Vec<_> = self
+            .pending
+            .iter()
+            .map(|entry| (*entry.key(), entry.submit_time))
+            .collect();
+        pending.sort_by_key(|(_, submit_time)| *submit_time);
+
+        let mut confirmed = 0;
+        for (hash, _) in pending.into_iter().take(count as usize) {
+            if self.on_block_inclusion(hash, block_time) {
+                confirmed += 1;
+            }
+        }
+        confirmed
     }
 
     /// Number of transactions still awaiting confirmation.
@@ -346,6 +391,38 @@ mod tests {
 
         // Double-confirm should return false
         assert!(!tracker.on_block_inclusion(h1, Instant::now()));
+    }
+
+    #[test]
+    fn test_account_nonce_confirmation_fallback() {
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(0x42);
+        let sender = Address::with_last_byte(0x11);
+
+        tracker.record_submit(hash, 7, sender, 21_000, TransactionType::SimpleTransfer);
+
+        assert!(tracker.on_account_nonce_inclusion(sender, 7, Instant::now()));
+        assert_eq!(tracker.pending_count(), 0);
+        assert_eq!(tracker.confirmed_count(), 1);
+        assert!(!tracker.on_account_nonce_inclusion(sender, 7, Instant::now()));
+    }
+
+    #[test]
+    fn test_confirm_oldest_pending_caps_to_pending_count() {
+        let tracker = LatencyTracker::new();
+        for nonce in 0..3 {
+            tracker.record_submit(
+                B256::with_last_byte(nonce as u8),
+                nonce,
+                Address::default(),
+                21_000,
+                TransactionType::SimpleTransfer,
+            );
+        }
+
+        assert_eq!(tracker.confirm_oldest_pending(10, Instant::now()), 3);
+        assert_eq!(tracker.pending_count(), 0);
+        assert_eq!(tracker.confirmed_count(), 3);
     }
 
     #[test]

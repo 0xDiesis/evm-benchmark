@@ -79,12 +79,18 @@ when testing high-latency or backlogged networks. Geo sustained runs default thi
 to 90s so delayed confirmations are counted instead of being reported as zero
 confirmed TPS.
 
+For isolated e2e runs started from a clean chain, `BENCH_ASSUME_ISOLATED_BLOCKS`
+can be set to `true` so the harness also counts unmatched transactions in blocks
+after the benchmark start block as confirmed benchmark traffic. The bench target
+scripts enable this by default after pre-funding and before the measured run.
+
 ### Confirmation Tracking
 
 Transactions are tracked from submission to on-chain confirmation:
 
-1. **Receipt polling** (primary) — concurrent `eth_getTransactionReceipt` for all pending txs (200 concurrent, 25ms interval)
-2. **WS BlockTracker** (backup) — `eth_subscribe("newHeads")` with `eth_getBlockReceipts`
+1. **Recent block scanning** — rescans recent block bodies so delayed receipt indexes or late block-body visibility do not undercount confirmations.
+2. **Receipt polling** — concurrent `eth_getTransactionReceipt` for smaller pending sets.
+3. **WS BlockTracker** — `eth_subscribe("newHeads")` with `eth_getBlockReceipts`.
 
 Confirmed txs are **immediately removed** from the pending set (O(1) pending count).
 Latency is measured as `poll_start - submit_time` using monotonic `Instant` timestamps.

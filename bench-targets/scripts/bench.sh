@@ -274,6 +274,7 @@ fi
 if [[ "${MODE}" == "sustained" && -n "${TOPOLOGY_LAYOUT}" ]]; then
     export BENCH_CONFIRM_WAIT_SECS="${BENCH_CONFIRM_WAIT_SECS:-90}"
 fi
+export BENCH_ASSUME_ISOLATED_BLOCKS="${BENCH_ASSUME_ISOLATED_BLOCKS:-true}"
 
 # ── Generate metadata ────────────────────────────────────────────────────
 if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
