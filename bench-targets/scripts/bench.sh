@@ -110,8 +110,16 @@ default_chain_overrides() {
             local rpc_per_conn_burst="${BENCH_DIESIS_RATE_LIMIT_PER_CONN_BURST:-3000}"
             local rpc_global_rps="${BENCH_DIESIS_RATE_LIMIT_GLOBAL_RPS:-30000}"
             local rpc_global_burst="${BENCH_DIESIS_RATE_LIMIT_GLOBAL_BURST:-40000}"
+            local referenced_payloads="${BENCH_DIESIS_E2E_REFERENCED_PAYLOADS:-${E2E_REFERENCED_PAYLOADS:-true}}"
+            local fec_enabled="${BENCH_DIESIS_E2E_FEC_ENABLED:-${E2E_FEC_ENABLED:-true}}"
+            local burst_drain="${BENCH_DIESIS_E2E_DAG_INBOUND_BURST_DRAIN_LIMIT:-${E2E_DAG_INBOUND_BURST_DRAIN_LIMIT:-128}}"
+            local validator_capacity="${BENCH_DIESIS_E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY:-${E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY:-2048}}"
+            local nonvalidator_capacity="${BENCH_DIESIS_E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY:-${E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY:-8192}}"
+            local peer_event_capacity="${BENCH_DIESIS_E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY:-${E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY:-1024}}"
+            local hedge_rlpx_min_bytes="${BENCH_DIESIS_QUIC_HEDGE_RLPX_MIN_BYTES:-${E2E_QUIC_HEDGE_RLPX_MIN_BYTES:-65536}}"
+            local hedge_rlpx_broadcast_min_bytes="${BENCH_DIESIS_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES:-${E2E_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES:-0}}"
 
-            echo "E2E_BLOCK_PERIOD=100ms E2E_ORDERING_WINDOW=15ms E2E_MIN_ROUND_DELAY=10ms E2E_MAX_EXECUTION_LAG=32 E2E_PROPAGATION_DELAY_STOP_THRESHOLD=40 E2E_MAX_PROPOSAL_TX_COUNT=2048 E2E_MAX_GAS_PER_PROPOSAL=30000000 DIESIS_RATE_LIMIT_ENABLED=true DIESIS_RATE_LIMIT_PER_CONN_RPS=${rpc_per_conn_rps} DIESIS_RATE_LIMIT_PER_CONN_BURST=${rpc_per_conn_burst} DIESIS_RATE_LIMIT_GLOBAL_RPS=${rpc_global_rps} DIESIS_RATE_LIMIT_GLOBAL_BURST=${rpc_global_burst}"
+            echo "E2E_BLOCK_PERIOD=100ms E2E_ORDERING_WINDOW=15ms E2E_MIN_ROUND_DELAY=10ms E2E_MAX_EXECUTION_LAG=32 E2E_PROPAGATION_DELAY_STOP_THRESHOLD=40 E2E_MAX_PROPOSAL_TX_COUNT=2048 E2E_MAX_GAS_PER_PROPOSAL=30000000 E2E_REFERENCED_PAYLOADS=${referenced_payloads} E2E_MAX_PAYLOAD_BATCHES=8192 E2E_FEC_ENABLED=${fec_enabled} E2E_DAG_INBOUND_BURST_DRAIN_LIMIT=${burst_drain} E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY=${validator_capacity} E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY=${nonvalidator_capacity} E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY=${peer_event_capacity} E2E_QUIC_HEDGE_RLPX_MIN_BYTES=${hedge_rlpx_min_bytes} E2E_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES=${hedge_rlpx_broadcast_min_bytes} DIESIS_RATE_LIMIT_ENABLED=true DIESIS_RATE_LIMIT_PER_CONN_RPS=${rpc_per_conn_rps} DIESIS_RATE_LIMIT_PER_CONN_BURST=${rpc_per_conn_burst} DIESIS_RATE_LIMIT_GLOBAL_RPS=${rpc_global_rps} DIESIS_RATE_LIMIT_GLOBAL_BURST=${rpc_global_burst}"
             ;;
         *)
             echo ""
@@ -161,9 +169,15 @@ geo_chain_overrides() {
     [[ -n "${BENCH_GEO_E2E_MAX_GAS_PER_PROPOSAL:-}" ]] && overrides+=" E2E_MAX_GAS_PER_PROPOSAL=${BENCH_GEO_E2E_MAX_GAS_PER_PROPOSAL}"
     [[ -n "${BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO:-}" ]] && overrides+=" E2E_FEC_REDUNDANCY_RATIO=${BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO}"
     [[ -n "${BENCH_GEO_E2E_FEC_MIN_MESSAGE_SIZE:-}" ]] && overrides+=" E2E_FEC_MIN_MESSAGE_SIZE=${BENCH_GEO_E2E_FEC_MIN_MESSAGE_SIZE}"
+    overrides+=" E2E_REFERENCED_PAYLOADS=${BENCH_GEO_E2E_REFERENCED_PAYLOADS:-true}"
+    overrides+=" E2E_FEC_ENABLED=${BENCH_GEO_E2E_FEC_ENABLED:-true}"
+    overrides+=" E2E_MAX_PAYLOAD_BATCHES=${BENCH_GEO_E2E_MAX_PAYLOAD_BATCHES:-8192}"
+    overrides+=" E2E_DAG_INBOUND_BURST_DRAIN_LIMIT=${BENCH_GEO_E2E_DAG_INBOUND_BURST_DRAIN_LIMIT:-512}"
     overrides+=" E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY=${BENCH_GEO_E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY:-8192}"
     overrides+=" E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY=${BENCH_GEO_E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY:-16384}"
     overrides+=" E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY=${BENCH_GEO_E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY:-2048}"
+    overrides+=" E2E_QUIC_HEDGE_RLPX_MIN_BYTES=${BENCH_GEO_DIESIS_QUIC_HEDGE_RLPX_MIN_BYTES:-65536}"
+    overrides+=" E2E_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES=${BENCH_GEO_DIESIS_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES:-0}"
 
     echo "${overrides}"
 }
@@ -179,6 +193,10 @@ fi
 CHAIN_OVERRIDES="${BASE_OVERRIDES}"
 if [[ -n "${GEO_OVERRIDES}" ]]; then
     CHAIN_OVERRIDES="${CHAIN_OVERRIDES} ${GEO_OVERRIDES}"
+fi
+if [[ "${BENCH_PRINT_CHAIN_OVERRIDES:-true}" == "true" && -n "${CHAIN_OVERRIDES}" ]]; then
+    echo "Effective chain overrides:"
+    printf '  %s\n' ${CHAIN_OVERRIDES}
 fi
 if [[ "${REBUILD}" == "true" && -n "${CHAIN_REBUILD_CMD:-}" ]]; then
     if [[ "${DEV}" == "true" && -n "${CHAIN_REBUILD_DEV_CMD:-}" ]]; then
@@ -271,6 +289,25 @@ if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
     fi
 fi
 
+PROMETHEUS_DIAGNOSTICS="${SCRIPT_DIR}/prometheus-diagnostics.py"
+PROMETHEUS_URL="${BENCH_PROMETHEUS_URL:-}"
+if [[ -z "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
+    PROMETHEUS_URL="http://localhost:9090"
+fi
+BENCH_PROMETHEUS_AFTER_SETTLE_SECS="${BENCH_PROMETHEUS_AFTER_SETTLE_SECS:-5}"
+export BENCH_PROMETHEUS_AFTER_SETTLE_SECS
+PROMETHEUS_CAPTURED="false"
+if [[ "${BENCH_PROMETHEUS_CAPTURE:-true}" == "true" && -n "${PROMETHEUS_URL}" && -x "${PROMETHEUS_DIAGNOSTICS}" ]]; then
+    echo "Capturing Prometheus before snapshot: ${PROMETHEUS_URL}"
+    if python3 "${PROMETHEUS_DIAGNOSTICS}" snapshot \
+        --url "${PROMETHEUS_URL}" \
+        --out "${RUN_DIR}/prometheus-before.json" >/dev/null; then
+        PROMETHEUS_CAPTURED="true"
+    else
+        echo "WARNING: Prometheus before snapshot failed; continuing without deltas." >&2
+    fi
+fi
+
 if [[ "${MODE}" == "sustained" && -n "${TOPOLOGY_LAYOUT}" ]]; then
     export BENCH_CONFIRM_WAIT_SECS="${BENCH_CONFIRM_WAIT_SECS:-90}"
 fi
@@ -339,6 +376,28 @@ HARNESS_EXIT=${PIPESTATUS[0]}
 
 if [[ "${HARNESS_EXIT}" -ne 0 ]]; then
     echo "ERROR: Harness exited with code ${HARNESS_EXIT}" >&2
+fi
+
+if [[ "${PROMETHEUS_CAPTURED}" == "true" ]]; then
+    if [[ "${BENCH_PROMETHEUS_AFTER_SETTLE_SECS}" != "0" ]]; then
+        echo "Waiting ${BENCH_PROMETHEUS_AFTER_SETTLE_SECS}s for async network metrics to settle..."
+        sleep "${BENCH_PROMETHEUS_AFTER_SETTLE_SECS}"
+    fi
+    echo "Capturing Prometheus after snapshot..."
+    if python3 "${PROMETHEUS_DIAGNOSTICS}" snapshot \
+        --url "${PROMETHEUS_URL}" \
+        --out "${RUN_DIR}/prometheus-after.json" >/dev/null; then
+        python3 "${PROMETHEUS_DIAGNOSTICS}" delta \
+            --before "${RUN_DIR}/prometheus-before.json" \
+            --after "${RUN_DIR}/prometheus-after.json" \
+            --out "${RUN_DIR}/prometheus-delta.json" \
+            --report "${RUN_DIR}/report.json" >/dev/null || true
+        echo "Prometheus deltas:"
+        python3 "${PROMETHEUS_DIAGNOSTICS}" summary \
+            --delta "${RUN_DIR}/prometheus-delta.json" || true
+    else
+        echo "WARNING: Prometheus after snapshot failed; continuing without deltas." >&2
+    fi
 fi
 
 # ── Clear topology if applied ────────────────────────────────────────────

@@ -254,6 +254,9 @@ Override controls (optional):
 - `BENCH_CEILING_COOLDOWN_SECS=<n>`
 - `BENCH_CEILING_WARMUP_SECS=<n>`
 - `BENCH_CEILING_RESTART_READY_TIMEOUT_SECS=<n>`
+- `BENCH_PROMETHEUS_CAPTURE=true|false`
+- `BENCH_PROMETHEUS_URL=http://localhost:9090`
+- `BENCH_PROMETHEUS_AFTER_SETTLE_SECS=5`
 
 ## Environment Modes
 
@@ -283,6 +286,10 @@ undercount confirmations on the clean e2e network.
 Keep the default Diesis FEC settings for this profile unless a sweep proves
 otherwise: FEC-off and a `256` byte FEC threshold both reduced throughput and
 increased p95 latency in the 2,000 transaction global-spread benchmark.
+Diesis geo profiles keep large unicast QUIC-to-RLPx repair hedging enabled and
+large broadcast hedging disabled by default. Broadcast hedging is useful as a
+diagnostic or emergency-recovery knob, but it materially increased latency in
+local global-spread testing.
 
 ```bash
 # Single chain under global latency
@@ -323,6 +330,9 @@ bench-targets/results/
 │   └── <chain>/<mode>/<timestamp>_<tag>/
 │       ├── report.json                # Harness output (TPS, latency, etc.)
 │       ├── meta.json                  # Run metadata (git sha, chain config, system info)
+│       ├── prometheus-before.json     # Optional pre-run Prometheus snapshot
+│       ├── prometheus-after.json      # Optional post-run Prometheus snapshot
+│       ├── prometheus-delta.json      # Optional metric deltas
 │       └── console.log                # Captured stdout/stderr
 │
 ├── comparisons/                       # Head-to-head comparisons
@@ -351,6 +361,12 @@ Every run captures `meta.json` with:
 - Chain configuration (block period, ordering window, execution mode, commitment type, etc.)
 - Benchmark parameters (txs, senders, batch size, workers, TPS, duration)
 - System information (OS, architecture, CPU count, memory)
+
+Diesis runs with Prometheus available also capture before/after snapshots, write
+deltas to `prometheus-delta.json`, and embed the same data under
+`prometheus_diagnostics` in `report.json`. The deltas include aggregate
+consensus, payload, QUIC, FEC, txpool, and pipeline metrics plus labeled
+breakdowns for decode failures, QUIC send failures, and transport hedging.
 
 ## Standalone Usage
 

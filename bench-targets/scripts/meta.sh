@@ -20,6 +20,13 @@ import json, os, subprocess, platform
 def env_or(key, default):
     return os.environ.get(key, default)
 
+def env_first(keys, default):
+    for key in keys:
+        value = os.environ.get(key)
+        if value not in (None, ''):
+            return value
+    return default
+
 # --- chain config ---
 chain_config = {}
 if '${chain}' == 'diesis':
@@ -32,13 +39,22 @@ if '${chain}' == 'diesis':
         'max_block_txs':           int(env_or('E2E_MAX_BLOCK_TX_COUNT', '5000')),
         'max_execution_lag':       int(env_or('E2E_MAX_EXECUTION_LAG', '32')),
         'max_proposal_txs':        int(env_or('E2E_MAX_PROPOSAL_TX_COUNT',  '2048')),
+        'referenced_payloads':      env_or('E2E_REFERENCED_PAYLOADS',  'false'),
+        'max_payload_batches':      int(env_or('E2E_MAX_PAYLOAD_BATCHES', '8192')),
         'max_gas_per_proposal':    int(env_or('E2E_MAX_GAS_PER_PROPOSAL', '30000000')),
         'propagation_delay_stop_threshold': int(env_or('E2E_PROPAGATION_DELAY_STOP_THRESHOLD', '40')),
+        'dag_inbound_burst_drain_limit': int(env_or('E2E_DAG_INBOUND_BURST_DRAIN_LIMIT', '128')),
+        'dag_validator_inbound_channel_capacity': int(env_or('E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY', '2048')),
+        'dag_nonvalidator_inbound_channel_capacity': int(env_or('E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY', '8192')),
+        'dag_peer_event_channel_capacity': int(env_or('E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY', '1024')),
+        'quic_hedge_rlpx_min_bytes': int(env_first(['E2E_QUIC_HEDGE_RLPX_MIN_BYTES', 'DIESIS_QUIC_HEDGE_RLPX_MIN_BYTES'], '65536')),
+        'quic_hedge_rlpx_broadcast_min_bytes': int(env_first(['E2E_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES', 'DIESIS_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES'], '0')),
         'parallel_execution':      env_or('E2E_PARALLEL_EXECUTION',    'full'),
         'commitment_mode':         env_or('E2E_COMMITMENT_MODE',       'verkle'),
         'fec_enabled':             env_or('E2E_FEC_ENABLED',           'true'),
         'fec_redundancy_ratio':    env_or('E2E_FEC_REDUNDANCY_RATIO',  '0.33'),
         'fec_min_message_size':    int(env_or('E2E_FEC_MIN_MESSAGE_SIZE', '1024')),
+        'fec_max_groups_per_peer':  int(env_or('E2E_FEC_MAX_GROUPS_PER_PEER', '512')),
         'txpool_max_account_slots': int(env_or('E2E_TXPOOL_MAX_ACCOUNT_SLOTS', '5000')),
     }
 else:
@@ -55,6 +71,7 @@ bench_params = {
     'workers':    int(env_or('BENCH_WORKERS',     '8')),
     'tps':        int(env_or('BENCH_TPS',         '200')),
     'duration':   int(env_or('BENCH_DURATION',    '30')),
+    'prometheus_after_settle_secs': float(env_or('BENCH_PROMETHEUS_AFTER_SETTLE_SECS', '5')),
 }
 
 # --- system info ---
