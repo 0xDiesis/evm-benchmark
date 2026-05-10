@@ -292,9 +292,9 @@ pub struct SustainedResult {
 impl SustainedResult {
     /// Convert to a [`BurstResult`] for the analytics pipeline.
     ///
-    /// Sustained mode interleaves submission and confirmation, so there is no
-    /// distinct confirm phase. `submit_ms` carries the total wall-clock duration
-    /// and `confirm_ms` is set to zero to avoid double-counting.
+    /// Sustained mode submits during a configured load window, then waits for
+    /// accepted transactions to confirm. Keep those phases separate so reports
+    /// can distinguish send capacity from inclusion/finality lag.
     pub fn to_burst_result(&self) -> BurstResult {
         BurstResult {
             attempted: self.attempted,
@@ -307,8 +307,8 @@ impl SustainedResult {
             invalid_reason: self.invalid_reason.clone(),
             submission_errors: self.submission_errors.clone(),
             sign_ms: 0,
-            submit_ms: self.duration_ms,
-            confirm_ms: 0,
+            submit_ms: self.load_duration_ms,
+            confirm_ms: self.confirm_wait_ms,
             submitted_tps: if self.load_duration_ms > 0 {
                 self.accepted as f32 / (self.load_duration_ms as f32 / 1000.0)
             } else {
@@ -524,8 +524,8 @@ mod tests {
         assert_eq!(burst.submitted, 500);
         assert_eq!(burst.confirmed, 480);
         assert_eq!(burst.pending, 20);
-        assert_eq!(burst.submit_ms, 10_000);
-        assert_eq!(burst.confirm_ms, 0);
+        assert_eq!(burst.submit_ms, 5_000);
+        assert_eq!(burst.confirm_ms, 5_000);
         assert_eq!(burst.submitted_tps, 100.0);
         assert_eq!(burst.confirmed_tps, 48.0);
         assert_eq!(burst.sign_ms, 0);

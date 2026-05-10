@@ -811,9 +811,9 @@ mod tests {
         assert_eq!(burst.submitted, 500);
         assert_eq!(burst.confirmed, 480);
         assert_eq!(burst.pending, 10);
-        // duration_ms maps to submit_ms
+        // load_duration_ms maps to submit_ms
         assert_eq!(burst.submit_ms, 5000);
-        // confirm_ms is 0 for sustained (no separate confirm phase)
+        // confirm_wait_ms maps to confirm_ms
         assert_eq!(burst.confirm_ms, 0);
         // sign_ms is 0 (pre-signed)
         assert_eq!(burst.sign_ms, 0);

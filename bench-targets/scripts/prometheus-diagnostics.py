@@ -111,9 +111,12 @@ SERIES_COUNTERS: dict[str, str] = {
 }
 
 GAUGES: dict[str, str] = {
-    "txpool_pending": "sum(reth_transaction_pool_pending_transactions)",
+    "txpool_pending": "sum(reth_transaction_pool_pending_pool_transactions)",
+    "txpool_basefee": "sum(reth_transaction_pool_basefee_pool_transactions)",
     "txpool_queued": "sum(reth_transaction_pool_queued_pool_transactions)",
     "txpool_total": "sum(reth_transaction_pool_total_transactions)",
+    "txpool_all_by_hash": "sum(reth_transaction_pool_all_transactions_by_hash)",
+    "txpool_all_by_sender": "sum(reth_transaction_pool_all_transactions_by_all_senders)",
     "consensus_current_round": "max(reth_diesis_consensus_current_round)",
     "consensus_head": "max(reth_diesis_consensus_head)",
     "ordered_queue_depth": "sum(reth_diesis_pipeline_ordered_queue_depth)",
@@ -449,6 +452,9 @@ def print_summary(args: argparse.Namespace) -> int:
             counters.get("quic_hedged_rlpx_broadcast", {}).get("delta"),
         ),
         ("Txpool pending after", gauges.get("txpool_pending", {}).get("after")),
+        ("Txpool basefee after", gauges.get("txpool_basefee", {}).get("after")),
+        ("Txpool queued after", gauges.get("txpool_queued", {}).get("after")),
+        ("Txpool all by hash after", gauges.get("txpool_all_by_hash", {}).get("after")),
         ("Ordered queue depth after", gauges.get("ordered_queue_depth", {}).get("after")),
         ("Publication lag after", gauges.get("publication_lag", {}).get("after")),
         ("Avg pipeline execution ms", histograms.get("pipeline_execution_ms", {}).get("avg")),

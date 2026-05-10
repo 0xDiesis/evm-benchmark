@@ -298,7 +298,7 @@ FEC shred sends are bounded per peer by
 `E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER` or
 `BENCH_GEO_E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER`; sweep this when
 `prometheus_diagnostics` shows `fec_broadcast` QUIC send failures.
-Clean/local and geo FEC payload batches target `32` data shreds by default via
+Clean/local and geo FEC payload batches target `16` data shreds by default via
 `E2E_FEC_TARGET_DATA_SHREDS` or `BENCH_GEO_E2E_FEC_TARGET_DATA_SHREDS`.
 This keeps QUIC stream fanout lower before decode recovery becomes the limit.
 Raising the target creates smaller shreds and more streams; lowering it creates
