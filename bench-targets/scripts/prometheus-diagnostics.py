@@ -33,6 +33,8 @@ COUNTERS: dict[str, str] = {
     "payload_batch_response_send_failed": "sum(reth_diesis_consensus_payload_batch_response_send_failed_total)",
     "payload_batch_response_rebroadcast": "sum(reth_diesis_consensus_payload_batch_response_rebroadcast_total)",
     "payload_batch_response_rebroadcast_failed": "sum(reth_diesis_consensus_payload_batch_response_rebroadcast_failed_total)",
+    "payload_batch_response_rebroadcast_skipped_recent": "sum(reth_diesis_consensus_payload_batch_response_rebroadcast_skipped_recent_total)",
+    "payload_batch_response_rebroadcast_cooldown_pruned": "sum(reth_diesis_consensus_payload_batch_response_rebroadcast_cooldown_pruned_total)",
     "payload_batches_stored": "sum(reth_diesis_consensus_payload_batches_stored_total)",
     "payload_batches_broadcast": "sum(reth_diesis_consensus_payload_batches_broadcast_total)",
     "payload_batch_author_rejections": "sum(reth_diesis_consensus_payload_batch_rejected_author_total)",
@@ -66,6 +68,7 @@ COUNTERS: dict[str, str] = {
     "fec_reassembly_duplicate": "sum(reth_diesis_fec_reassembly_duplicate)",
     "fec_reassembly_evicted": "sum(reth_diesis_fec_reassembly_evicted)",
     "quic_connect_failures": "sum(reth_diesis_quic_connect_failures)",
+    "quic_send_succeeded": "sum(reth_diesis_quic_send_succeeded_total)",
     "quic_send_failed": "sum(reth_diesis_quic_send_failed_total)",
     "quic_reconnect_attempts": "sum(reth_diesis_quic_reconnect_attempts)",
     "quic_reconnect_successes": "sum(reth_diesis_quic_reconnect_successes)",
@@ -83,6 +86,13 @@ SERIES_COUNTERS: dict[str, str] = {
     "payload_batch_response_send_failed_by_role": (
         "sum by (requester_is_validator) "
         "(reth_diesis_consensus_payload_batch_response_send_failed_total)"
+    ),
+    "payload_batch_response_rebroadcast_skipped_by_role": (
+        "sum by (requester_is_validator) "
+        "(reth_diesis_consensus_payload_batch_response_rebroadcast_skipped_recent_total)"
+    ),
+    "quic_send_succeeded_by_op_msg": (
+        "sum by (op,msg_id) (reth_diesis_quic_send_succeeded_total)"
     ),
     "quic_send_failed_by_op_msg": (
         "sum by (op,msg_id) (reth_diesis_quic_send_failed_total)"
@@ -117,6 +127,7 @@ GAUGES: dict[str, str] = {
     "fec_enabled": "max(reth_diesis_fec_enabled)",
     "fec_redundancy_ratio": "max(reth_diesis_fec_redundancy_ratio)",
     "fec_min_message_size": "max(reth_diesis_fec_min_message_size)",
+    "fec_max_concurrent_shred_sends_per_peer": "max(reth_diesis_fec_max_concurrent_shred_sends_per_peer)",
 }
 
 HISTOGRAMS: dict[str, str] = {
@@ -219,7 +230,7 @@ def snapshot(args: argparse.Namespace) -> int:
         "errors": errors,
     }
     Path(args.out).write_text(json.dumps(output, indent=2) + "\n")
-    return 0 if not errors else 2
+    return 0
 
 
 def numeric(value: Any) -> float | None:
@@ -372,10 +383,16 @@ def print_summary(args: argparse.Namespace) -> int:
             "Payload response rebroadcasts",
             counters.get("payload_batch_response_rebroadcast", {}).get("delta"),
         ),
+        (
+            "Payload response rebroadcast cooldown skips",
+            counters.get("payload_batch_response_rebroadcast_skipped_recent", {}).get("delta"),
+        ),
         ("FEC encodes", counters.get("fec_encode_count", {}).get("delta")),
+        ("FEC shreds sent", counters.get("fec_shreds_sent", {}).get("delta")),
         ("FEC shred send failures", counters.get("fec_shred_send_failures", {}).get("delta")),
         ("FEC groups expired", counters.get("fec_groups_expired", {}).get("delta")),
         ("FEC below-threshold skips", counters.get("fec_below_threshold_skip", {}).get("delta")),
+        ("QUIC send successes", counters.get("quic_send_succeeded", {}).get("delta")),
         ("QUIC send failures", counters.get("quic_send_failed", {}).get("delta")),
         ("QUIC to RLPx hedges", counters.get("quic_hedged_rlpx", {}).get("delta")),
         (

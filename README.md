@@ -290,6 +290,10 @@ Diesis geo profiles keep large unicast QUIC-to-RLPx repair hedging enabled and
 large broadcast hedging disabled by default. Broadcast hedging is useful as a
 diagnostic or emergency-recovery knob, but it materially increased latency in
 local global-spread testing.
+FEC shred sends are bounded per peer by
+`E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER` or
+`BENCH_GEO_E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER`; sweep this when
+`prometheus_diagnostics` shows `fec_broadcast` QUIC send failures.
 
 ```bash
 # Single chain under global latency
