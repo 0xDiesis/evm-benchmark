@@ -304,6 +304,9 @@ Clean/local FEC payload batches target `64` data shreds by default via
 limited by QUIC stream fanout before it is limited by decode recovery. Raising
 the target creates smaller shreds and more streams; lowering it creates larger
 shreds and fewer streams.
+For ceiling probes above the low-latency geo profile, sweep
+`BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO`; `0.5` can recover more missing FEC groups
+at the cost of higher confirmation latency.
 
 ```bash
 # Single chain under global latency
