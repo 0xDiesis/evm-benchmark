@@ -381,17 +381,20 @@ Every run captures `meta.json` with:
 Diesis runs with Prometheus available also capture before/after snapshots, write
 deltas to `prometheus-delta.json`, and embed the same data under
 `prometheus_diagnostics` in `report.json`. The deltas include aggregate
-consensus, payload, QUIC, FEC, txpool, and pipeline metrics plus labeled
-breakdowns for decode failures, QUIC send failures, and transport hedging.
+consensus, payload, tx-source selection, commit uniqueness, QUIC, FEC, txpool,
+and pipeline metrics plus labeled breakdowns for decode failures, QUIC send
+failures, and transport hedging.
 Use `make results-ledger` or `bench-targets/scripts/results.sh ledger` to turn
 those per-run reports into CSV, Markdown, JSON, or a console table. The ledger
 joins `meta.json` and `report.json` so each row includes the tested knobs
-(`block_period`, `ordering_window`, FEC fanout, FEC target data shreds, payload mode, benchmark load)
-beside the outcomes (`valid`, TPS, latency) and diagnostics (`quic_fail_pct`,
-`fec_fail_per_1k`, missing payload deferrals, payload repair failures, queue
-depths). This is the preferred input for tuning decisions and marketing or
-research summaries; compare rows only when the environment, benchmark load, and
-host contention are comparable.
+(`block_period`, `ordering_window`, proposal caps, tx-selection mode, FEC
+fanout, FEC target data shreds, payload mode, benchmark load) beside the
+outcomes (`valid`, TPS, latency) and diagnostics (`commit_skip_pct`,
+tx-source scan/selection counters, `quic_fail_pct`, `fec_fail_per_1k`, missing
+payload deferrals, payload repair failures, queue depths). This is the
+preferred input for tuning decisions and marketing or research summaries;
+compare rows only when the environment, benchmark load, and host contention are
+comparable.
 
 ## Standalone Usage
 

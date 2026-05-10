@@ -48,10 +48,27 @@ DEFAULT_FIELDS = [
     "ordering_window",
     "min_round_delay",
     "block_period_to_max_rtt",
+    "max_proposal_txs",
+    "max_proposal_bytes",
+    "max_gas_per_proposal",
+    "tx_selection_mode",
+    "tx_source_lookahead_multiplier",
+    "tx_source_max_scan",
+    "tx_partition_fallback_fill",
     "fec_fanout",
     "fec_target_data_shreds",
     "dag_peer_command_channel_capacity",
     "referenced_payloads",
+    "commit_unique_txs",
+    "commit_duplicate_skips",
+    "commit_capacity_skips",
+    "commit_skip_pct",
+    "tx_source_scanned",
+    "tx_source_pulled",
+    "tx_source_selected_primary",
+    "tx_source_selected_fallback",
+    "tx_source_scan_limit_hits",
+    "tx_source_proposal_utilization",
     "quic_fail_pct",
     "peer_command_full_drops",
     "fec_fail_per_1k",
@@ -221,6 +238,16 @@ def run_from_path(report_path: Path) -> dict[str, Any] | None:
         else:
             invalid_reason = "invalid result"
 
+    commit_unique_txs = counter_delta(report, "commit_transactions_unique")
+    commit_duplicate_skips = counter_delta(report, "commit_duplicate_skips")
+    commit_capacity_skips = counter_delta(report, "commit_capacity_skips")
+    commit_considered = commit_unique_txs + commit_duplicate_skips + commit_capacity_skips
+    commit_skip_pct = (
+        round((commit_duplicate_skips + commit_capacity_skips) / commit_considered * 100.0, 3)
+        if commit_considered
+        else 0.0
+    )
+
     row = {
         "run": run_dir.name,
         "timestamp": meta.get("timestamp", ""),
@@ -252,6 +279,12 @@ def run_from_path(report_path: Path) -> dict[str, Any] | None:
         "leader_timeout": chain_config.get("leader_timeout", ""),
         "block_period_to_max_rtt": timing_margin,
         "max_proposal_txs": chain_config.get("max_proposal_txs", ""),
+        "max_proposal_bytes": chain_config.get("max_proposal_bytes", ""),
+        "max_gas_per_proposal": chain_config.get("max_gas_per_proposal", ""),
+        "tx_selection_mode": chain_config.get("tx_selection_mode", ""),
+        "tx_source_lookahead_multiplier": chain_config.get("tx_source_lookahead_multiplier", ""),
+        "tx_source_max_scan": chain_config.get("tx_source_max_scan", ""),
+        "tx_partition_fallback_fill": chain_config.get("tx_partition_fallback_fill", ""),
         "referenced_payloads": chain_config.get("referenced_payloads", ""),
         "fec_enabled": chain_config.get("fec_enabled", ""),
         "fec_fanout": chain_config.get("fec_max_concurrent_shred_sends_per_peer", ""),
@@ -273,6 +306,23 @@ def run_from_path(report_path: Path) -> dict[str, Any] | None:
         "payload_request_cooldown_skips": int(counter_delta(report, "payload_batch_request_skipped_recent")),
         "payload_response_send_failures": int(counter_delta(report, "payload_batch_response_send_failed")),
         "payload_response_rebroadcasts": int(counter_delta(report, "payload_batch_response_rebroadcast")),
+        "commit_unique_txs": int(commit_unique_txs),
+        "commit_duplicate_skips": int(commit_duplicate_skips),
+        "commit_capacity_skips": int(commit_capacity_skips),
+        "commit_skip_pct": commit_skip_pct,
+        "tx_source_scanned": int(counter_delta(report, "tx_source_scanned")),
+        "tx_source_pulled": int(counter_delta(report, "tx_source_pulled")),
+        "tx_source_selected_primary": int(counter_delta(report, "tx_source_selected_primary")),
+        "tx_source_selected_fallback": int(counter_delta(report, "tx_source_selected_fallback")),
+        "tx_source_suppressed_committed": int(counter_delta(report, "tx_source_suppressed_committed")),
+        "tx_source_suppressed_recently_proposed": int(
+            counter_delta(report, "tx_source_suppressed_recently_proposed")
+        ),
+        "tx_source_skipped_partition": int(counter_delta(report, "tx_source_skipped_partition")),
+        "tx_source_scan_limit_hits": int(counter_delta(report, "tx_source_scan_limit_hit")),
+        "tx_source_proposal_utilization": round(
+            float(gauge_after(report, "tx_source_proposal_utilization")), 4
+        ),
         "ancestor_available_authors": round(float(gauge_after(report, "ancestor_available_authors")), 2),
         "ancestor_payload_unavailable_authors": round(float(gauge_after(report, "ancestor_payload_unavailable_authors")), 2),
         "ancestor_pending_unselectable_authors": round(float(gauge_after(report, "ancestor_pending_unselectable_authors")), 2),
