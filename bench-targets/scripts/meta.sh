@@ -47,6 +47,7 @@ if '${chain}' == 'diesis':
         'dag_validator_inbound_channel_capacity': int(env_or('E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY', '2048')),
         'dag_nonvalidator_inbound_channel_capacity': int(env_or('E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY', '8192')),
         'dag_peer_event_channel_capacity': int(env_or('E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY', '1024')),
+        'dag_peer_command_channel_capacity': int(env_or('E2E_DAG_PEER_COMMAND_CHANNEL_CAPACITY', '1024')),
         'quic_hedge_rlpx_min_bytes': int(env_first(['E2E_QUIC_HEDGE_RLPX_MIN_BYTES', 'DIESIS_QUIC_HEDGE_RLPX_MIN_BYTES'], '65536')),
         'quic_hedge_rlpx_broadcast_min_bytes': int(env_first(['E2E_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES', 'DIESIS_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES'], '0')),
         'parallel_execution':      env_or('E2E_PARALLEL_EXECUTION',    'full'),

@@ -21,6 +21,8 @@ COUNTERS: dict[str, str] = {
     "dag_peer_commands_dropped_closed": "sum(reth_diesis_dag_peer_command_dropped_closed_total)",
     "pending_vertices_dropped_capacity": "sum(reth_diesis_consensus_pending_vertices_dropped_capacity_total)",
     "pending_vertices_dropped_bytes": "sum(reth_diesis_consensus_pending_vertices_dropped_bytes_total)",
+    "pending_vertex_parent_repairs": "sum(reth_diesis_consensus_pending_vertex_parent_repairs_total)",
+    "pending_vertex_payload_repairs": "sum(reth_diesis_consensus_pending_vertex_payload_repairs_total)",
     "missing_payload_deferrals": "sum(reth_diesis_consensus_vertex_deferred_missing_payload_total)",
     "decode_failed": "sum(reth_diesis_consensus_decode_failed_total)",
     "round_ahead_rejections": "sum(reth_diesis_consensus_vertex_rejected_round_ahead_total)",
@@ -73,6 +75,8 @@ COUNTERS: dict[str, str] = {
     "quic_send_failed": "sum(reth_diesis_quic_send_failed_total)",
     "quic_reconnect_attempts": "sum(reth_diesis_quic_reconnect_attempts)",
     "quic_reconnect_successes": "sum(reth_diesis_quic_reconnect_successes)",
+    "quic_rlpx_disconnect_retained": "sum(reth_diesis_quic_rlpx_disconnect_retained_total)",
+    "quic_advertisement_rejected_nonvalidator": "sum(reth_diesis_quic_advertisement_rejected_nonvalidator_total)",
     "quic_broadcast_dedup": "sum(reth_diesis_quic_broadcast_dedup_count)",
     "quic_fallback": "sum(reth_diesis_quic_fallback_count)",
     "quic_hedged_rlpx": "sum(reth_diesis_quic_hedged_rlpx_total)",
@@ -129,6 +133,9 @@ GAUGES: dict[str, str] = {
     "ancestor_eligible_authors": "avg(reth_diesis_consensus_ancestor_eligible_authors)",
     "ancestor_payload_unavailable_authors": "avg(reth_diesis_consensus_ancestor_payload_unavailable_authors)",
     "ancestor_pending_unselectable_authors": "avg(reth_diesis_consensus_ancestor_pending_unselectable_authors)",
+    "pending_vertices": "sum(reth_diesis_consensus_pending_vertices)",
+    "pending_vertex_missing_parents": "sum(reth_diesis_consensus_pending_vertex_missing_parents)",
+    "pending_vertex_missing_payloads": "sum(reth_diesis_consensus_pending_vertex_missing_payloads)",
     "parent_candidate_count": "avg(reth_diesis_consensus_parent_candidate_count)",
     "parent_selected_count": "avg(reth_diesis_consensus_parent_selected_count)",
     "parent_selected_power": "avg(reth_diesis_consensus_parent_selected_power)",
@@ -137,6 +144,7 @@ GAUGES: dict[str, str] = {
     "fec_min_message_size": "max(reth_diesis_fec_min_message_size)",
     "fec_target_data_shreds": "max(reth_diesis_fec_target_data_shreds)",
     "fec_max_concurrent_shred_sends_per_peer": "max(reth_diesis_fec_max_concurrent_shred_sends_per_peer)",
+    "dag_peer_command_channel_capacity": "max(reth_diesis_dag_peer_command_channel_capacity)",
 }
 
 HISTOGRAMS: dict[str, str] = {
@@ -372,7 +380,11 @@ def print_summary(args: argparse.Namespace) -> int:
     important = [
         ("DAG inbound drops", counters.get("dag_inbound_dropped_full", {}).get("delta")),
         ("Peer event drops", counters.get("dag_peer_events_dropped_full", {}).get("delta")),
+        ("Peer command full drops", counters.get("dag_peer_commands_dropped_full", {}).get("delta")),
+        ("Peer command closed drops", counters.get("dag_peer_commands_dropped_closed", {}).get("delta")),
         ("Pending vertex drops", counters.get("pending_vertices_dropped_capacity", {}).get("delta")),
+        ("Pending parent repairs", counters.get("pending_vertex_parent_repairs", {}).get("delta")),
+        ("Pending payload repairs", counters.get("pending_vertex_payload_repairs", {}).get("delta")),
         ("Decode failures", counters.get("decode_failed", {}).get("delta")),
         ("Missing payload deferrals", counters.get("missing_payload_deferrals", {}).get("delta")),
         ("Payload batch requests", counters.get("payload_batch_requests_sent", {}).get("delta")),
@@ -405,6 +417,15 @@ def print_summary(args: argparse.Namespace) -> int:
             "Ancestor pending-unselectable authors",
             gauges.get("ancestor_pending_unselectable_authors", {}).get("after"),
         ),
+        ("Pending vertices", gauges.get("pending_vertices", {}).get("after")),
+        (
+            "Pending vertex missing parents",
+            gauges.get("pending_vertex_missing_parents", {}).get("after"),
+        ),
+        (
+            "Pending vertex missing payloads",
+            gauges.get("pending_vertex_missing_payloads", {}).get("after"),
+        ),
         ("Parent candidates", gauges.get("parent_candidate_count", {}).get("after")),
         ("Parents selected", gauges.get("parent_selected_count", {}).get("after")),
         ("Parent selected power", gauges.get("parent_selected_power", {}).get("after")),
@@ -419,6 +440,9 @@ def print_summary(args: argparse.Namespace) -> int:
         ("FEC below-threshold skips", counters.get("fec_below_threshold_skip", {}).get("delta")),
         ("QUIC send successes", counters.get("quic_send_succeeded", {}).get("delta")),
         ("QUIC send failures", counters.get("quic_send_failed", {}).get("delta")),
+        ("QUIC reconnect attempts", counters.get("quic_reconnect_attempts", {}).get("delta")),
+        ("QUIC reconnect successes", counters.get("quic_reconnect_successes", {}).get("delta")),
+        ("QUIC routes retained after RLPx disconnect", counters.get("quic_rlpx_disconnect_retained", {}).get("delta")),
         ("QUIC to RLPx hedges", counters.get("quic_hedged_rlpx", {}).get("delta")),
         (
             "QUIC broadcast RLPx hedges",
