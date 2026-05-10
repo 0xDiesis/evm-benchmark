@@ -54,7 +54,7 @@ if '${chain}' == 'diesis':
         'fec_enabled':             env_or('E2E_FEC_ENABLED',           'true'),
         'fec_redundancy_ratio':    env_or('E2E_FEC_REDUNDANCY_RATIO',  '0.33'),
         'fec_min_message_size':    int(env_or('E2E_FEC_MIN_MESSAGE_SIZE', '1024')),
-        'fec_target_data_shreds':  int(env_or('E2E_FEC_TARGET_DATA_SHREDS', '64')),
+        'fec_target_data_shreds':  int(env_or('E2E_FEC_TARGET_DATA_SHREDS', '32')),
         'fec_max_groups_per_peer':  int(env_or('E2E_FEC_MAX_GROUPS_PER_PEER', '512')),
         'fec_max_concurrent_shred_sends_per_peer': int(env_or('E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER', '64')),
         'txpool_max_account_slots': int(env_or('E2E_TXPOOL_MAX_ACCOUNT_SLOTS', '5000')),

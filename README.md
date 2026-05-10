@@ -298,12 +298,11 @@ FEC shred sends are bounded per peer by
 `E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER` or
 `BENCH_GEO_E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER`; sweep this when
 `prometheus_diagnostics` shows `fec_broadcast` QUIC send failures.
-Clean/local FEC payload batches target `64` data shreds by default via
-`E2E_FEC_TARGET_DATA_SHREDS`. Geo profiles default to `32` via
-`BENCH_GEO_E2E_FEC_TARGET_DATA_SHREDS` because the global-spread profile is
-limited by QUIC stream fanout before it is limited by decode recovery. Raising
-the target creates smaller shreds and more streams; lowering it creates larger
-shreds and fewer streams.
+Clean/local and geo FEC payload batches target `32` data shreds by default via
+`E2E_FEC_TARGET_DATA_SHREDS` or `BENCH_GEO_E2E_FEC_TARGET_DATA_SHREDS`.
+This keeps QUIC stream fanout lower before decode recovery becomes the limit.
+Raising the target creates smaller shreds and more streams; lowering it creates
+larger shreds and fewer streams.
 For ceiling probes above the low-latency geo profile, sweep
 `BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO`; `0.5` can recover more missing FEC groups
 at the cost of higher confirmation latency.
