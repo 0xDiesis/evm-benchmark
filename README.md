@@ -172,6 +172,7 @@ make compare CHAINS="diesis sonic" ENV=geo-global
 | `make results` | List all benchmark results |
 | `make results-latest` | Show the most recent result |
 | `make results-compare RUNS="..."` | Ad-hoc compare 2+ runs |
+| `make results-ledger` | Export a run ledger with config knobs, outcomes, and Prometheus diagnostics |
 | `make results-summary` | Aggregate stats across all runs |
 
 **Filter variables** (for `results` and `results-latest`):
@@ -195,6 +196,9 @@ make results-latest FILTER_CHAIN=sonic
 
 # Compare two specific runs side by side
 make results-compare RUNS="bench-targets/results/runs/diesis/burst/20260402-211524_clean bench-targets/results/runs/sonic/burst/20260402-212030_clean"
+
+# Build a tuning ledger for Diesis sustained runs
+make results-ledger FILTER_CHAIN=diesis FILTER_MODE=sustained FORMAT=csv > /tmp/diesis-sustained-ledger.csv
 
 # Aggregate stats grouped by chain
 make results-summary
@@ -371,6 +375,15 @@ deltas to `prometheus-delta.json`, and embed the same data under
 `prometheus_diagnostics` in `report.json`. The deltas include aggregate
 consensus, payload, QUIC, FEC, txpool, and pipeline metrics plus labeled
 breakdowns for decode failures, QUIC send failures, and transport hedging.
+Use `make results-ledger` or `bench-targets/scripts/results.sh ledger` to turn
+those per-run reports into CSV, Markdown, JSON, or a console table. The ledger
+joins `meta.json` and `report.json` so each row includes the tested knobs
+(`block_period`, `ordering_window`, FEC fanout, payload mode, benchmark load)
+beside the outcomes (`valid`, TPS, latency) and diagnostics (`quic_fail_pct`,
+`fec_fail_per_1k`, missing payload deferrals, payload repair failures, queue
+depths). This is the preferred input for tuning decisions and marketing or
+research summaries; compare rows only when the environment, benchmark load, and
+host contention are comparable.
 
 ## Standalone Usage
 

@@ -14,6 +14,7 @@ Commands:
   latest [--chain <name>] [--mode <mode>]                Show latest run details
   show <run_path>                                        Show full details of a specific run
   compare <path1> <path2> [<path3>...]                   Ad-hoc compare 2+ run report.json files
+  ledger [options] [run_path...]                         Tabular run ledger with config + diagnostics
   summary                                                Show aggregate stats across all runs
 EOF
 exit 0; }
@@ -135,6 +136,10 @@ for c in sorted(g):
     print(f\"{c:<12}{len(runs):>5}{at:>9.1f}{bt:>9.1f}{ap:>8.0f}ms{bp:>8.0f}ms {lr[0] if lr else '-':<16}\")"
 }
 
+cmd_ledger() {
+    python3 "${SCRIPT_DIR}/experiment-ledger.py" "$@"
+}
+
 _pretty_print_run() {
     local run_dir="$1"
     [[ ! -f "${run_dir}/report.json" ]] && { log_error "No report.json in ${run_dir}"; exit 1; }
@@ -186,6 +191,6 @@ PYEOF
 cmd="${1:-}"; shift || true
 case "${cmd}" in
     list) cmd_list "$@";; latest) cmd_latest "$@";; show) cmd_show "$@";;
-    compare) cmd_compare "$@";; summary) cmd_summary;;
+    compare) cmd_compare "$@";; ledger) cmd_ledger "$@";; summary) cmd_summary;;
     -h|--help|help|"") usage;; *) log_error "Unknown command: ${cmd}"; usage;;
 esac

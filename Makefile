@@ -1,7 +1,7 @@
 .PHONY: build test clippy fmt check quality quality-fix help \
        bench bench-all compare compare-all \
        sweep sweep-all sweep-list \
-       results results-latest results-compare results-summary \
+       results results-latest results-compare results-ledger results-summary \
        chains \
        bytecode bytecode-check
 
@@ -166,6 +166,12 @@ results-latest: ## Show the latest benchmark result  (FILTER_CHAIN= FILTER_MODE=
 results-compare: ## Ad-hoc compare runs  (RUNS="path1 path2")
 	@test -n "$(RUNS)" || { echo "Error: RUNS is required, e.g. RUNS='results/runs/diesis/burst/... results/runs/sonic/burst/...'"; exit 2; }
 	@bash $(SCRIPTS)/results.sh compare $(RUNS)
+
+results-ledger: ## Export run ledger with config knobs and diagnostics  (FILTER_CHAIN= FILTER_MODE= FORMAT=table|csv|md|json)
+	@bash $(SCRIPTS)/results.sh ledger \
+		$(if $(FILTER_CHAIN),--chain $(FILTER_CHAIN)) \
+		$(if $(FILTER_MODE),--mode $(FILTER_MODE)) \
+		$(if $(FORMAT),--format $(FORMAT))
 
 results-summary: ## Aggregate stats across all runs
 	@bash $(SCRIPTS)/results.sh summary
