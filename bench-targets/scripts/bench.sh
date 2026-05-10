@@ -161,6 +161,9 @@ geo_chain_overrides() {
     [[ -n "${BENCH_GEO_E2E_MAX_GAS_PER_PROPOSAL:-}" ]] && overrides+=" E2E_MAX_GAS_PER_PROPOSAL=${BENCH_GEO_E2E_MAX_GAS_PER_PROPOSAL}"
     [[ -n "${BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO:-}" ]] && overrides+=" E2E_FEC_REDUNDANCY_RATIO=${BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO}"
     [[ -n "${BENCH_GEO_E2E_FEC_MIN_MESSAGE_SIZE:-}" ]] && overrides+=" E2E_FEC_MIN_MESSAGE_SIZE=${BENCH_GEO_E2E_FEC_MIN_MESSAGE_SIZE}"
+    overrides+=" E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY=${BENCH_GEO_E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY:-8192}"
+    overrides+=" E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY=${BENCH_GEO_E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY:-16384}"
+    overrides+=" E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY=${BENCH_GEO_E2E_DAG_PEER_EVENT_CHANNEL_CAPACITY:-2048}"
 
     echo "${overrides}"
 }
@@ -213,6 +216,14 @@ fi
 _BLOCK_ADVANCE_TIMEOUT="${BENCH_BLOCK_ADVANCE_TIMEOUT_SECS:-60}"
 wait_for_block_advance "${FIRST_RPC}" "${_BLOCK_ADVANCE_TIMEOUT}"
 
+# ── Build harness if needed ──────────────────────────────────────────────
+HARNESS="${BENCH_REPO_DIR}/target/release/evm-benchmark"
+if [[ ! -f "${HARNESS}" ]]; then
+    echo "Building evm-benchmark (release)..."
+    cargo build -p evm-benchmark --release \
+        --manifest-path "${BENCH_REPO_DIR}/Cargo.toml" 2>&1 | tail -3
+fi
+
 # ── Apply network topology if geo-* ─────────────────────────────────────
 TOPOLOGY_LAYOUT="$(env_to_layout "${ENV}")"
 if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
@@ -225,6 +236,24 @@ if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
         TOPOLOGY_LAYOUT=""
     fi
 fi
+
+if [[ "${FUND}" == "true" && "${TEST_MODE}" == "transfer" && -n "${TOPOLOGY_LAYOUT}" ]]; then
+    echo "Pre-funding sender accounts before applying network topology..."
+    PREFUND_ARGS=(
+        --rpc-endpoints "${CHAIN_RPC}" --ws "${CHAIN_WS}"
+        --chain-id "${CHAIN_CHAIN_ID}" --bench-name "${CHAIN}_prefund"
+        --senders "${SENDERS}" --workers 1 --batch-size 1 --test transfer
+        --out "${RUN_DIR}/prefund-report.json"
+        --execution burst --txs 1 --waves 1 --fund --quiet
+    )
+    if [[ -n "${CHAIN_KEYS:-}" ]]; then
+        BENCH_KEY="${CHAIN_KEYS}" "${HARNESS}" "${PREFUND_ARGS[@]}" >/dev/null
+    else
+        "${HARNESS}" "${PREFUND_ARGS[@]}" >/dev/null
+    fi
+    FUND="false"
+fi
+
 if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
     echo "Applying network topology: ${TOPOLOGY_LAYOUT} (${CHAIN})"
     eval "${CHAIN_TOPOLOGY_ENV:-}" bash "${TOPOLOGY_SCRIPT}" apply "${TOPOLOGY_LAYOUT}"
@@ -256,14 +285,6 @@ if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
         eval "export ${CHAIN_OVERRIDES}"
     fi
     generate_meta "${RUN_DIR}/meta.json" "${CHAIN}" "${MODE}" "${ENV}" "${RUN_TAG}" 2>/dev/null || true
-fi
-
-# ── Build harness if needed ──────────────────────────────────────────────
-HARNESS="${BENCH_REPO_DIR}/target/release/evm-benchmark"
-if [[ ! -f "${HARNESS}" ]]; then
-    echo "Building evm-benchmark (release)..."
-    cargo build -p evm-benchmark --release \
-        --manifest-path "${BENCH_REPO_DIR}/Cargo.toml" 2>&1 | tail -3
 fi
 
 # ── Construct harness CLI args ───────────────────────────────────────────
