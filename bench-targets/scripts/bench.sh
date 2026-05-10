@@ -317,7 +317,10 @@ fi
 if [[ "${MODE}" == "sustained" && -n "${TOPOLOGY_LAYOUT}" ]]; then
     export BENCH_CONFIRM_WAIT_SECS="${BENCH_CONFIRM_WAIT_SECS:-90}"
 fi
-export BENCH_ASSUME_ISOLATED_BLOCKS="${BENCH_ASSUME_ISOLATED_BLOCKS:-true}"
+# Strict hash/receipt matching is the safe default for benchmark claims. The
+# isolated-block fallback can over-count confirmations when a chain produces
+# non-benchmark transactions or when block transaction metadata lags receipts.
+export BENCH_ASSUME_ISOLATED_BLOCKS="${BENCH_ASSUME_ISOLATED_BLOCKS:-false}"
 
 # ── Generate metadata ────────────────────────────────────────────────────
 if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
