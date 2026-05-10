@@ -31,6 +31,16 @@ fn timeline_tps(confirmed: u32, elapsed_secs: f64) -> f64 {
     }
 }
 
+fn signer_transaction_count(total_txs: usize, signer_count: usize, signer_idx: usize) -> usize {
+    if signer_count == 0 || signer_idx >= signer_count {
+        return 0;
+    }
+
+    let base = total_txs / signer_count;
+    let extra = total_txs % signer_count;
+    base + usize::from(signer_idx < extra)
+}
+
 fn worker_interval_ms(tps_per_worker: f64) -> u64 {
     if tps_per_worker > 0.0 {
         (1000.0 / tps_per_worker) as u64
@@ -109,8 +119,10 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let worker_count = (config.worker_count as usize).max(1);
 
     // Pre-sign enough transactions for the full run, distributed across all senders.
-    let total_txs = (target_tps * config.duration_secs as usize * 5).max(1000);
-    let txs_per_key = total_txs.div_ceil(num_keys);
+    let total_txs = target_tps
+        .saturating_mul(config.duration_secs as usize)
+        .saturating_mul(5)
+        .max(1000);
 
     if !config.quiet {
         println!(
@@ -127,6 +139,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let mut all_pre_signed = Vec::new();
 
     for (i, key) in sender_keys.iter().enumerate() {
+        let count = signer_transaction_count(total_txs, num_keys, i);
+        if count == 0 {
+            continue;
+        }
+
         let signer = PrivateKeySigner::from_str(key)
             .map_err(|e| anyhow::anyhow!("Failed to parse sender key {}: {}", i, e))?;
         let account = signer.address();
@@ -149,11 +166,6 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
             .ok_or_else(|| anyhow::anyhow!("Failed to get nonce for sender {}", i))?;
         let nonce = u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16)?;
 
-        let count = if i < num_keys - 1 {
-            txs_per_key
-        } else {
-            total_txs - i * txs_per_key
-        };
         let tx_data: Vec<(Address, U256)> =
             (0..count).map(|_| (recipient, U256::from(1u32))).collect();
         let batch_signer =
@@ -812,7 +824,10 @@ mod tests {
     fn test_presign_pool_size_calculation() {
         let target_tps = 100usize;
         let duration_secs = 10usize;
-        let total_txs = (target_tps * duration_secs * 5).max(1000);
+        let total_txs = target_tps
+            .saturating_mul(duration_secs)
+            .saturating_mul(5)
+            .max(1000);
         assert_eq!(total_txs, 5000);
     }
 
@@ -821,28 +836,49 @@ mod tests {
     fn test_presign_pool_minimum_size() {
         let target_tps = 1usize;
         let duration_secs = 1usize;
-        let total_txs = (target_tps * duration_secs * 5).max(1000);
+        let total_txs = target_tps
+            .saturating_mul(duration_secs)
+            .saturating_mul(5)
+            .max(1000);
         assert_eq!(total_txs, 1000);
     }
 
-    /// Per-key distribution with remainder goes to last key.
+    /// Per-key distribution must assign exactly the requested total.
     #[test]
     fn test_per_key_tx_distribution() {
         let total_txs = 1000usize;
         let num_keys = 3usize;
-        let txs_per_key = total_txs.div_ceil(num_keys);
-        assert_eq!(txs_per_key, 334);
+        let counts: Vec<_> = (0..num_keys)
+            .map(|idx| signer_transaction_count(total_txs, num_keys, idx))
+            .collect();
 
-        let mut assigned = 0;
-        for i in 0..num_keys {
-            let count = if i < num_keys - 1 {
-                txs_per_key
-            } else {
-                total_txs - i * txs_per_key
-            };
-            assigned += count;
-        }
-        assert_eq!(assigned, total_txs);
+        assert_eq!(counts, vec![334, 333, 333]);
+        assert_eq!(counts.iter().sum::<usize>(), total_txs);
+    }
+
+    #[test]
+    fn test_signer_transaction_count_many_signers_no_underflow() {
+        let total_txs = 75_000usize;
+        let signer_count = 400usize;
+        let counts: Vec<_> = (0..signer_count)
+            .map(|idx| signer_transaction_count(total_txs, signer_count, idx))
+            .collect();
+
+        assert_eq!(counts.iter().sum::<usize>(), total_txs);
+        assert_eq!(counts[0], 188);
+        assert_eq!(counts[199], 188);
+        assert_eq!(counts[200], 187);
+        assert_eq!(counts[399], 187);
+    }
+
+    #[test]
+    fn test_signer_transaction_count_more_signers_than_transactions() {
+        let counts: Vec<_> = (0..5)
+            .map(|idx| signer_transaction_count(3, 5, idx))
+            .collect();
+
+        assert_eq!(counts, vec![1, 1, 1, 0, 0]);
+        assert_eq!(counts.iter().sum::<usize>(), 3);
     }
 
     // ── TPS distribution across workers ──────────────────────────────────
