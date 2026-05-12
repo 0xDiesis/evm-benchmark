@@ -313,6 +313,14 @@ impl HealthMonitor {
     }
 }
 
+impl Drop for HealthMonitor {
+    fn drop(&mut self) {
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,7 +619,7 @@ mod tests {
         assert!(monitor.task_handle.is_some());
 
         // Abort the background task so it doesn't leak
-        monitor.task_handle.unwrap().abort();
+        monitor.task_handle.take().unwrap().abort();
     }
 
     #[tokio::test]

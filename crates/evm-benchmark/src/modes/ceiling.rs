@@ -1,9 +1,10 @@
 use crate::config::Config;
+use crate::generators::evm_mix::EvmMixGenerator;
 use crate::metrics::MetricsExporter;
 use crate::modes::burst::run_burst;
 use crate::signing::BatchSigner;
 use crate::submission::{BlockTracker, LatencyTracker, Submitter};
-use crate::types::{BurstResult, CeilingResult, CeilingStep, SignedTxWithMetadata};
+use crate::types::{BurstResult, CeilingResult, CeilingStep, SignedTxWithMetadata, TestMode};
 use alloy_primitives::{Address, U256};
 use anyhow::Result;
 use std::future::Future;
@@ -369,20 +370,21 @@ fn compute_step_stats(
     confirmed: u32,
     pending: u32,
     errors: u32,
-    step_duration: Duration,
+    load_duration: Duration,
 ) -> StepStats {
     let pending_ratio = if sent > 0 {
         pending as f32 / sent as f32
     } else {
         0.0
     };
-    let error_rate = if sent > 0 {
-        errors as f32 / sent as f32
+    let attempted = sent.saturating_add(errors);
+    let error_rate = if attempted > 0 {
+        errors as f32 / attempted as f32
     } else {
         0.0
     };
-    let actual_tps = if step_duration.as_secs_f32() > 0.0 {
-        confirmed as f32 / step_duration.as_secs_f32()
+    let actual_tps = if load_duration.as_secs_f32() > 0.0 {
+        confirmed as f32 / load_duration.as_secs_f32()
     } else {
         0.0
     };
@@ -430,15 +432,44 @@ fn worker_interval_ms(tps_per_worker: f64) -> u64 {
 async fn wait_for_pending_confirmations(
     metrics: &MetricsExporter,
     tracker: &LatencyTracker,
+    mut poller: Option<ConfirmationPoller<'_>>,
     max_confirm_wait: Duration,
     poll_interval: Duration,
 ) -> u64 {
     let confirm_start = Instant::now();
     while confirm_start.elapsed() < max_confirm_wait && tracker.pending_count() > 0 {
         metrics.set_pending_transactions(tracker.pending_count() as i64);
+        if let Some(poller) = poller.as_mut() {
+            super::burst::poll_new_block_inclusions(
+                poller.client,
+                poller.rpc_url,
+                tracker,
+                &mut *poller.last_scanned_block,
+                poller.scan_floor_block,
+                poller.finality_confirmations,
+            )
+            .await;
+            if super::burst::should_poll_receipts(tracker.pending_count()) {
+                super::burst::poll_pending_receipts(
+                    poller.client,
+                    poller.rpc_url,
+                    tracker,
+                    poller.finality_confirmations,
+                )
+                .await;
+            }
+        }
         tokio::time::sleep(poll_interval).await;
     }
     confirm_start.elapsed().as_millis() as u64
+}
+
+struct ConfirmationPoller<'a> {
+    client: &'a reqwest::Client,
+    rpc_url: &'a str,
+    last_scanned_block: &'a mut u64,
+    scan_floor_block: u64,
+    finality_confirmations: u32,
 }
 
 fn next_step_increase(
@@ -631,7 +662,11 @@ async fn run_ceiling_with(
     }
 
     // Resolve sender keys for multi-account ceiling ramp.
-    let sender_keys = crate::funding::resolve_sender_keys(config.sender_count);
+    let sender_keys = if config.sender_keys.is_empty() {
+        crate::funding::resolve_sender_keys(config.sender_count)
+    } else {
+        config.sender_keys.clone()
+    };
     let parsed_senders = crate::funding::parse_sender_keys(&sender_keys)?;
     let signers: Vec<_> = parsed_senders
         .iter()
@@ -688,6 +723,11 @@ async fn run_ceiling_with(
     let ramp_start = Instant::now();
     let max_ramp_duration = Duration::from_secs(180);
     let isolation = CeilingIsolationConfig::from_env();
+    let evm_contracts = if config.test_mode == TestMode::Evm {
+        Some(super::evm_contracts(config)?)
+    } else {
+        None
+    };
 
     if should_print_status(config.quiet) && isolation.enabled() {
         println!(
@@ -747,18 +787,39 @@ async fn run_ceiling_with(
         for (idx, (signer, nonce_start)) in signers.iter().zip(current_nonces.iter()).enumerate() {
             let signer_txs = signer_transaction_count(total_txs, signer_count, idx);
             if signer_txs > 0 {
-                let batch_signer = BatchSigner::new_with_gas_price(
-                    signer.clone(),
-                    *nonce_start,
-                    gas_price,
-                    config.chain_id,
-                );
-                let tx_data: Vec<(Address, U256)> = (0..signer_txs)
-                    .map(|_| (recipient, U256::from(1u32)))
-                    .collect();
-                let mut signed = batch_signer
-                    .sign_batch_parallel(tx_data)
-                    .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", idx, e))?;
+                let mut signed = if let Some(ref contracts) = evm_contracts {
+                    let mut generator = EvmMixGenerator::new(
+                        contracts.clone(),
+                        super::evm_mix_config(contracts),
+                        vec![accounts[idx]],
+                        config.chain_id,
+                    )
+                    .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
+                    let descs = generator.generate_batch(signer_txs);
+                    EvmMixGenerator::sign_batch(
+                        &descs,
+                        signer,
+                        *nonce_start,
+                        gas_price,
+                        config.chain_id,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("EVM pre-signing failed for sender {}: {}", idx, e)
+                    })?
+                } else {
+                    let batch_signer = BatchSigner::new_with_gas_price(
+                        signer.clone(),
+                        *nonce_start,
+                        gas_price,
+                        config.chain_id,
+                    );
+                    let tx_data: Vec<(Address, U256)> = (0..signer_txs)
+                        .map(|_| (recipient, U256::from(1u32)))
+                        .collect();
+                    batch_signer.sign_batch_parallel(tx_data).map_err(|e| {
+                        anyhow::anyhow!("Pre-signing failed for sender {}: {}", idx, e)
+                    })?
+                };
                 pre_signed.append(&mut signed);
             }
         }
@@ -767,6 +828,11 @@ async fn run_ceiling_with(
 
         let dispatcher = build_step_submitter(config)?;
         let tracker = Arc::new(LatencyTracker::new());
+        let mut last_scanned_block =
+            super::burst::rpc_latest_block_number(&http_client, config.rpc.as_str())
+                .await
+                .unwrap_or(0);
+        let scan_floor_block = last_scanned_block.saturating_add(1);
 
         let pre_signed = Arc::new(pre_signed);
         let pool_idx = Arc::new(AtomicU32::new(0));
@@ -798,12 +864,20 @@ async fn run_ceiling_with(
         for handle in worker_handles {
             let _ = handle.await;
         }
-        let submit_ms = submit_start.elapsed().as_millis() as u64;
+        let load_duration = submit_start.elapsed();
+        let submit_ms = load_duration.as_millis() as u64;
 
         // Confirmation wait — block tracker still running
         let confirm_ms = wait_for_pending_confirmations(
             &metrics,
             &tracker,
+            Some(ConfirmationPoller {
+                client: &http_client,
+                rpc_url: config.rpc.as_str(),
+                last_scanned_block: &mut last_scanned_block,
+                scan_floor_block,
+                finality_confirmations: config.finality_confirmations,
+            }),
             options.max_confirm_wait,
             Duration::from_millis(100),
         )
@@ -819,14 +893,12 @@ async fn run_ceiling_with(
 
         metrics.set_pending_transactions(pending as i64);
         metrics.inc_transactions_confirmed(confirmed as u64);
-        if step_duration.as_secs_f32() > 0.0 {
-            metrics.set_current_tps((confirmed as f32 / step_duration.as_secs_f32()) as f64);
-        }
 
-        let step_stats = compute_step_stats(sent, confirmed, pending, errors, step_duration);
+        let step_stats = compute_step_stats(sent, confirmed, pending, errors, load_duration);
         let pending_ratio = step_stats.pending_ratio;
         let error_rate = step_stats.error_rate;
         let actual_tps = step_stats.actual_tps;
+        metrics.set_current_tps(actual_tps as f64);
 
         let timing = TimingBreakdown::new(
             step_duration.as_millis() as u64,
@@ -964,19 +1036,23 @@ async fn run_step_worker(
 
         let signed_tx = pre_signed[idx as usize].clone();
 
-        tracker.record_submit(
-            signed_tx.hash,
-            signed_tx.nonce,
-            signed_tx.sender,
-            signed_tx.gas_limit,
-            signed_tx.method,
-        );
-
+        let submit_time = Instant::now();
         match dispatcher.submit_single(signed_tx).await {
             Ok(result) => {
-                if result.submitted > 0 {
-                    metrics.inc_transactions_submitted(result.submitted as u64);
-                    sent_count.fetch_add(result.submitted, Ordering::SeqCst);
+                let accepted = result.accepted_txs.len() as u32;
+                if accepted > 0 {
+                    for tx in &result.accepted_txs {
+                        tracker.record_submit_at(
+                            tx.hash,
+                            tx.nonce,
+                            tx.sender,
+                            tx.gas_limit,
+                            tx.method,
+                            submit_time,
+                        );
+                    }
+                    metrics.inc_transactions_submitted(accepted as u64);
+                    sent_count.fetch_add(accepted, Ordering::SeqCst);
                 }
                 if result.errors > 0 {
                     metrics.inc_transactions_failed(result.errors as u64);
@@ -1374,7 +1450,7 @@ mod tests {
 
         run_step_worker(
             dispatcher,
-            tracker,
+            tracker.clone(),
             metrics,
             sent_count.clone(),
             error_count.clone(),
@@ -1388,6 +1464,7 @@ mod tests {
 
         assert_eq!(sent_count.load(Ordering::SeqCst), 0);
         assert_eq!(error_count.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.pending_count(), 0);
 
         drop(server);
     }
@@ -1413,7 +1490,7 @@ mod tests {
 
         run_step_worker(
             dispatcher,
-            tracker,
+            tracker.clone(),
             metrics,
             sent_count.clone(),
             error_count.clone(),
@@ -1427,6 +1504,7 @@ mod tests {
 
         assert_eq!(sent_count.load(Ordering::SeqCst), 0);
         assert_eq!(error_count.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.pending_count(), 0);
     }
 
     #[tokio::test]
@@ -1952,7 +2030,7 @@ mod tests {
             stats,
             StepStats {
                 pending_ratio: 0.2,
-                error_rate: 0.05,
+                error_rate: 5.0 / 105.0,
                 actual_tps: 20.0,
             }
         );
@@ -1962,7 +2040,7 @@ mod tests {
             zero_sent,
             StepStats {
                 pending_ratio: 0.0,
-                error_rate: 0.0,
+                error_rate: 1.0,
                 actual_tps: 0.0,
             }
         );
@@ -2121,6 +2199,7 @@ mod tests {
         let waited = wait_for_pending_confirmations(
             &metrics,
             &tracker,
+            None,
             Duration::from_millis(5),
             Duration::from_millis(1),
         )

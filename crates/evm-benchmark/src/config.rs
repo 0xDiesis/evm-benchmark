@@ -1,4 +1,5 @@
 use crate::types::{ExecutionMode, TestMode};
+use alloy_primitives::Address;
 use clap::Parser;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -200,6 +201,33 @@ pub struct Config {
 
 impl Args {
     pub fn into_config(self) -> anyhow::Result<Config> {
+        self.into_config_with_env(|name| match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(err) => Err(anyhow::anyhow!("Failed to read {}: {}", name, err)),
+        })
+    }
+
+    fn into_config_with_env<F>(self, get_env: F) -> anyhow::Result<Config>
+    where
+        F: Fn(&str) -> anyhow::Result<Option<String>>,
+    {
+        if self.batch_size == 0 {
+            anyhow::bail!("--batch-size must be greater than 0");
+        }
+        if self.txs == 0 {
+            anyhow::bail!("--txs must be greater than 0");
+        }
+        if self.senders == 0 {
+            anyhow::bail!("--senders must be greater than 0");
+        }
+        if self.workers == 0 {
+            anyhow::bail!("--workers must be greater than 0");
+        }
+        if self.waves == 0 {
+            anyhow::bail!("--waves must be greater than 0");
+        }
+
         let test_mode = match self.test.to_lowercase().as_str() {
             "transfer" => TestMode::Transfer,
             "evm" => TestMode::Evm,
@@ -246,6 +274,9 @@ impl Args {
 
         let submission_method =
             SubmissionMethod::from_str(&self.submission_method).map_err(|e| anyhow::anyhow!(e))?;
+        let evm_tokens = parse_env_addresses("BENCH_EVM_TOKENS", get_env("BENCH_EVM_TOKENS")?)?;
+        let evm_pairs = parse_env_addresses("BENCH_EVM_PAIRS", get_env("BENCH_EVM_PAIRS")?)?;
+        let evm_nfts = parse_env_addresses("BENCH_EVM_NFTS", get_env("BENCH_EVM_NFTS")?)?;
 
         Ok(Config {
             rpc_urls,
@@ -272,11 +303,28 @@ impl Args {
             bench_name: self.bench_name,
             fund: self.fund,
             sender_keys: vec![],
-            evm_tokens: vec![],
-            evm_pairs: vec![],
-            evm_nfts: vec![],
+            evm_tokens,
+            evm_pairs,
+            evm_nfts,
         })
     }
+}
+
+fn parse_env_addresses(var_name: &str, raw: Option<String>) -> anyhow::Result<Vec<Address>> {
+    raw.map(|raw| parse_address_list(var_name, &raw))
+        .unwrap_or_else(|| Ok(vec![]))
+}
+
+fn parse_address_list(var_name: &str, raw: &str) -> anyhow::Result<Vec<Address>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            Address::from_str(value).map_err(|err| {
+                anyhow::anyhow!("Invalid address in {} '{}': {}", var_name, value, err)
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -504,5 +552,90 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Invalid RPC URL"), "got: {msg}");
+    }
+
+    #[test]
+    fn test_batch_size_zero_errors_before_submitter_panic() {
+        let mut args = make_args("http://localhost:8545", "http");
+        args.batch_size = 0;
+
+        let result = args.into_config();
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("--batch-size must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn test_zero_count_arguments_are_rejected() {
+        for (field, expected) in [
+            ("txs", "--txs must be greater than 0"),
+            ("senders", "--senders must be greater than 0"),
+            ("workers", "--workers must be greater than 0"),
+            ("waves", "--waves must be greater than 0"),
+        ] {
+            let mut args = make_args("http://localhost:8545", "http");
+            match field {
+                "txs" => args.txs = 0,
+                "senders" => args.senders = 0,
+                "workers" => args.workers = 0,
+                "waves" => args.waves = 0,
+                _ => unreachable!(),
+            }
+
+            let result = args.into_config();
+            assert!(result.is_err(), "{field}=0 should fail");
+            assert!(
+                result.unwrap_err().to_string().contains(expected),
+                "{field}=0 should mention {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_evm_contract_env_vars_are_parsed() {
+        let config = make_args("http://localhost:8545", "http")
+            .into_config_with_env(|name| {
+                Ok(match name {
+                    "BENCH_EVM_TOKENS" => Some(
+                        "0x0000000000000000000000000000000000000001, 0x0000000000000000000000000000000000000002"
+                            .to_string(),
+                    ),
+                    "BENCH_EVM_PAIRS" => {
+                        Some("0x0000000000000000000000000000000000000003".to_string())
+                    }
+                    "BENCH_EVM_NFTS" => {
+                        Some("0x0000000000000000000000000000000000000004".to_string())
+                    }
+                    _ => None,
+                })
+            })
+            .expect("env contract addresses should parse");
+
+        assert_eq!(config.evm_tokens.len(), 2);
+        assert_eq!(config.evm_tokens[0], Address::with_last_byte(1));
+        assert_eq!(config.evm_tokens[1], Address::with_last_byte(2));
+        assert_eq!(config.evm_pairs, vec![Address::with_last_byte(3)]);
+        assert_eq!(config.evm_nfts, vec![Address::with_last_byte(4)]);
+    }
+
+    #[test]
+    fn test_invalid_evm_contract_env_var_errors() {
+        let result = make_args("http://localhost:8545", "http").into_config_with_env(|name| {
+            Ok(match name {
+                "BENCH_EVM_TOKENS" => Some("0xnot-an-address".to_string()),
+                _ => None,
+            })
+        });
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid address in BENCH_EVM_TOKENS")
+        );
     }
 }

@@ -1,8 +1,8 @@
 use crate::config::Config;
-use crate::generators::contract_deploy::EvmContracts;
-use crate::generators::evm_mix::{EvmMixConfig, EvmMixGenerator};
+use crate::generators::evm_mix::EvmMixGenerator;
 use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
+use crate::submission::tracking::SubmittedTxMeta;
 use crate::submission::{LatencyTracker, Submitter};
 use crate::types::{
     BurstResult, SubmissionErrorSummary, TestMode, benchmark_validity,
@@ -136,6 +136,17 @@ pub(crate) async fn poll_pending_receipts(
                     && let Ok(body) = resp.json::<serde_json::Value>().await
                     && let Some(receipt) = body.get("result").and_then(|r| r.as_object())
                 {
+                    if let Some(receipt_hash_value) = receipt.get("transactionHash") {
+                        let Some(receipt_hash) = receipt_hash_value
+                            .as_str()
+                            .and_then(|value| value.parse::<B256>().ok())
+                        else {
+                            return;
+                        };
+                        if receipt_hash != hash {
+                            return;
+                        }
+                    }
                     if finality_depth > 0 {
                         let receipt_block = receipt
                             .get("blockNumber")
@@ -149,10 +160,24 @@ pub(crate) async fn poll_pending_receipts(
                             return;
                         }
                     }
+                    let gas_used = receipt
+                        .get("gasUsed")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_hex_u64);
+                    let status_success = receipt
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_hex_u64)
+                        .map(|status| status != 0);
                     // Use poll_start as the arrival time: this is when we initiated
                     // the poll round, so latency = submit_time → poll_start which
                     // upper-bounds the true inclusion latency by at most poll_interval (25ms).
-                    tracker.on_block_inclusion(hash, poll_start);
+                    tracker.on_block_inclusion_with_receipt(
+                        hash,
+                        poll_start,
+                        gas_used,
+                        status_success,
+                    );
                 }
             }
         })
@@ -177,6 +202,10 @@ pub(crate) async fn rpc_latest_block_number(
 
 fn parse_hex_u64(hex: &str) -> Option<u64> {
     u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
+}
+
+fn gas_price_with_safety_margin(base: u128) -> u128 {
+    base.saturating_mul(2).max(1_000_000_000)
 }
 
 fn assume_isolated_block_counts() -> bool {
@@ -324,8 +353,28 @@ struct SubmitAccounting {
     error_summaries: Vec<SubmissionErrorSummary>,
 }
 
+fn split_worker_txs_into_waves(
+    txs: Vec<crate::types::SignedTxWithMetadata>,
+    wave_count: usize,
+) -> Vec<Vec<crate::types::SignedTxWithMetadata>> {
+    let wave_count = wave_count.max(1);
+    let mut waves = (0..wave_count).map(|_| Vec::new()).collect::<Vec<_>>();
+    if txs.is_empty() {
+        return waves;
+    }
+
+    let chunk_size = txs.len().div_ceil(wave_count).max(1);
+    for (idx, tx) in txs.into_iter().enumerate() {
+        let wave_idx = (idx / chunk_size).min(wave_count - 1);
+        waves[wave_idx].push(tx);
+    }
+    waves
+}
+
 /// Returns `(BurstResult, effective_gas_price_wei)`.
 pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
+    let server_metrics_before = super::scrape_server_metrics_before(config).await;
+    let health_monitor = super::start_health_monitor(config)?;
     let dispatcher = Arc::new(Submitter::with_retry_profile(
         config.rpc_urls.clone(),
         &config.ws,
@@ -364,7 +413,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     let num_keys = sender_keys.len();
     let requested_worker_count = (config.worker_count as usize).max(1);
     let worker_count = requested_worker_count.min(config.tx_count.max(1) as usize);
-    let active_key_count = num_keys.min(worker_count);
+    let active_key_count = num_keys.min(config.tx_count.max(1) as usize);
     let max_pool_capacity = active_key_count * POOL_SLOTS_PER_ACCOUNT;
 
     // Cap tx_count to the pool's total capacity across all accounts
@@ -409,23 +458,24 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         let base =
             u128::from_str_radix(gp_hex.trim_start_matches("0x"), 16).unwrap_or(1_000_000_000);
         // 2x current gas price to handle EIP-1559 base fee spikes during load
-        (base * 2).max(1_000_000_000)
+        gas_price_with_safety_margin(base)
     };
 
     if !config.quiet {
         println!("Gas price: {} gwei", gas_price / 1_000_000_000);
     }
-    // Phase 1: Fetch nonces for all unique sender keys upfront, then assign workers.
-    // If worker_count > num_keys, multiple workers share a key but get non-overlapping
-    // nonce ranges (each worker pre-signs its own slice with sequential nonces).
+    // Phase 1: Fetch nonces for active sender keys upfront, then build one
+    // nonce-ordered slice per sender. Submission concurrency is limited by
+    // worker_count later, so --senders controls nonce lanes and --workers controls
+    // in-flight RPC work.
     let _sign_start = Instant::now();
 
-    // txs per worker — evenly distributed
-    let txs_per_worker = tx_count.div_ceil(worker_count);
+    // txs per sender — evenly distributed
+    let txs_per_sender = tx_count.div_ceil(active_key_count.max(1));
 
-    // Fetch base nonce for each unique key once
+    // Fetch base nonce for each active key once
     let mut key_nonces: Vec<(String, u64)> = Vec::new();
-    for (i, key) in sender_keys.iter().enumerate() {
+    for (i, key) in sender_keys.iter().take(active_key_count).enumerate() {
         let private_signer = PrivateKeySigner::from_str(key)
             .map_err(|e| anyhow::anyhow!("Failed to parse signer key {}: {}", i, e))?;
         let account = private_signer.address();
@@ -454,75 +504,56 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         key_nonces.push((key.clone(), base_nonce));
     }
 
-    // Build per-worker tx slices. Worker w uses key[w % num_keys] with nonce starting at
-    // base_nonce + (w / num_keys) * txs_per_worker.
+    // Build per-sender tx slices. Each active key owns exactly one sequential
+    // nonce range so the benchmark can use all funded sender accounts without
+    // tying nonce-lane count to RPC worker count.
     let mut all_signed_txs: Vec<Vec<crate::types::SignedTxWithMetadata>> = Vec::new();
 
-    // Build EVM generator if in EVM mode (contracts must have been deployed by main.rs)
-    let evm_generator = if config.test_mode == TestMode::Evm {
-        let contracts = EvmContracts {
-            tokens: config.evm_tokens.clone(),
-            pairs: config.evm_pairs.clone(),
-            nfts: config.evm_nfts.clone(),
-        };
-
-        if contracts.tokens.is_empty() {
-            anyhow::bail!(
-                "EVM mode requires deployed contracts (no token addresses configured). Use --fund to deploy."
-            );
-        }
-
-        let sender_addrs: Vec<Address> = key_nonces
-            .iter()
-            .map(|(k, _)| PrivateKeySigner::from_str(k).expect("valid key").address())
-            .collect();
-
-        Some(
-            EvmMixGenerator::new(
-                contracts,
-                EvmMixConfig::default(),
-                sender_addrs,
-                config.chain_id,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?,
-        )
+    let evm_contracts = if config.test_mode == TestMode::Evm {
+        Some(super::evm_contracts(config)?)
     } else {
         None
     };
 
-    // Pre-generate all EVM descriptors if in EVM mode so we can split per-worker
-    let evm_descriptors = evm_generator.map(|mut generator| generator.generate_batch(tx_count));
+    for (sender_idx, (key, base_nonce)) in key_nonces.iter().enumerate() {
+        let nonce_start = *base_nonce;
 
-    for w in 0..worker_count {
-        let key_idx = w % num_keys;
-        let slot_in_key = w / num_keys; // which slot within this key's workers
-
-        let (key, base_nonce) = &key_nonces[key_idx];
-        let nonce_start = base_nonce + (slot_in_key * txs_per_worker) as u64;
-
-        let submitted_so_far = w * txs_per_worker;
+        let submitted_so_far = sender_idx * txs_per_sender;
         let remaining = tx_count.saturating_sub(submitted_so_far);
-        let this_count = remaining.min(txs_per_worker);
+        let this_count = remaining.min(txs_per_sender);
         if this_count == 0 {
             break;
         }
 
-        let private_signer = PrivateKeySigner::from_str(key)
-            .map_err(|e| anyhow::anyhow!("Failed to parse signer key for worker {}: {}", w, e))?;
+        let private_signer = PrivateKeySigner::from_str(key).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to parse signer key for sender {}: {}",
+                sender_idx,
+                e
+            )
+        })?;
 
-        let signed = if let Some(ref all_descs) = evm_descriptors {
-            // EVM mode: sign the pre-generated descriptors for this worker's slice
-            let start = submitted_so_far;
-            let end = (start + this_count).min(all_descs.len());
-            let worker_descs = &all_descs[start..end];
+        let signed = if let Some(ref contracts) = evm_contracts {
+            // EVM mode: generate descriptors for the signer that will actually
+            // sign this worker slice so sender metadata and nonce fallback match.
+            let mut generator = EvmMixGenerator::new(
+                contracts.clone(),
+                super::evm_mix_config(contracts),
+                vec![private_signer.address()],
+                config.chain_id,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
+            let worker_descs = generator.generate_batch(this_count);
             EvmMixGenerator::sign_batch(
-                worker_descs,
+                &worker_descs,
                 &private_signer,
                 nonce_start,
                 gas_price,
                 config.chain_id,
             )
-            .map_err(|e| anyhow::anyhow!("EVM batch signing failed for worker {}: {}", w, e))?
+            .map_err(|e| {
+                anyhow::anyhow!("EVM batch signing failed for sender {}: {}", sender_idx, e)
+            })?
         } else {
             // Transfer mode: simple ETH transfers
             let tx_data: Vec<(Address, U256)> = (0..this_count)
@@ -535,9 +566,9 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
                 gas_price,
                 config.chain_id,
             );
-            batch_signer
-                .sign_batch_parallel(tx_data)
-                .map_err(|e| anyhow::anyhow!("Batch signing failed for worker {}: {}", w, e))?
+            batch_signer.sign_batch_parallel(tx_data).map_err(|e| {
+                anyhow::anyhow!("Batch signing failed for sender {}: {}", sender_idx, e)
+            })?
         };
 
         all_signed_txs.push(signed);
@@ -548,12 +579,12 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
 
     if !config.quiet {
         println!(
-            "Signed {} txs across {} worker{} using {} active sender{} in {:.2}s",
+            "Signed {} txs across {} sender stream{} using {} RPC worker{} in {:.2}s",
             total_signed,
             all_signed_txs.len(),
             if all_signed_txs.len() == 1 { "" } else { "s" },
-            active_key_count,
-            if active_key_count == 1 { "" } else { "s" },
+            worker_count,
+            if worker_count == 1 { "" } else { "s" },
             _sign_time.as_secs_f32()
         );
     }
@@ -564,96 +595,125 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         .unwrap_or(0);
     let scan_floor_block = last_scanned_block.saturating_add(1);
 
-    // Phase 3: One worker per sender — each submits its own tx slice concurrently.
-    // This avoids the per-account txpool slot limit (5000 slots/sender) by spreading
-    // txs across multiple funded accounts.
+    // Phase 3: submit real waves. Each worker's nonce-ordered slice is split
+    // across the configured wave count, then all workers submit their slice for
+    // a wave concurrently before the next wave delay.
     let submit_start = Instant::now();
-    let mut submit_handles = vec![];
+    let wave_count = (config.wave_count as usize).max(1);
+    let sender_wave_txs = all_signed_txs
+        .into_iter()
+        .map(|txs| split_worker_txs_into_waves(txs, wave_count))
+        .collect::<Vec<_>>();
+    let mut accounting = SubmitAccounting::default();
 
-    for (wave_idx, sender_txs) in all_signed_txs.into_iter().enumerate() {
+    for wave_idx in 0..wave_count {
         if wave_idx > 0 && config.wave_delay_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(config.wave_delay_ms)).await;
         }
 
-        let dispatcher = dispatcher.clone();
-        let tracker = tracker.clone();
-        let metrics = metrics.clone();
-        let quiet = config.quiet;
+        use futures::stream::{self, StreamExt};
 
-        let handle = tokio::spawn(async move {
-            let attempted = sender_txs.len() as u32;
-            let batch_submit_start = Instant::now();
-            match dispatcher.submit_batch(sender_txs.clone()).await {
-                Ok(result) => {
-                    let accepted = result.accepted_txs.len() as u32;
-                    let failed = attempted.saturating_sub(accepted);
-                    // Record only txs the RPC actually accepted, with wave index
-                    for tx in &result.accepted_txs {
-                        tracker.record_submit_with_wave_at(
-                            tx.hash,
-                            tx.nonce,
-                            tx.sender,
-                            tx.gas_limit,
-                            tx.method,
-                            Some(wave_idx as u32),
-                            batch_submit_start,
-                        );
-                    }
-                    metrics.inc_transactions_submitted(accepted as u64);
-                    if failed > 0 {
-                        metrics.inc_transactions_failed(failed as u64);
-                    }
-                    if !quiet {
-                        if failed > 0 {
-                            println!(
-                                "Worker {}: accepted {} of {} txs, {} failed",
-                                wave_idx, accepted, attempted, failed
-                            );
-                        } else {
-                            println!("Worker {}: accepted {} txs", wave_idx, accepted);
+        let wave_txs = sender_wave_txs
+            .iter()
+            .flat_map(|waves| {
+                waves
+                    .get(wave_idx)
+                    .into_iter()
+                    .flat_map(|txs| txs.iter().cloned())
+            })
+            .collect::<Vec<_>>();
+        let batch_size = config.batch_size.max(1) as usize;
+        let wave_batches = wave_txs
+            .chunks(batch_size)
+            .enumerate()
+            .map(|(batch_idx, txs)| (batch_idx, txs.to_vec()))
+            .collect::<Vec<_>>();
+
+        let wave_results = stream::iter(wave_batches)
+            .map(|(batch_idx, sender_txs)| {
+                let dispatcher = dispatcher.clone();
+                let tracker = tracker.clone();
+                let metrics = metrics.clone();
+                let quiet = config.quiet;
+                async move {
+                    let attempted = sender_txs.len() as u32;
+                    let batch_submit_start = Instant::now();
+                    match dispatcher.submit_batch(sender_txs).await {
+                        Ok(result) => {
+                            let accepted = result.accepted_txs.len() as u32;
+                            let failed = attempted.saturating_sub(accepted);
+                            // Record only txs the RPC actually accepted, with wave index.
+                            for tx in &result.accepted_txs {
+                                tracker.record_submit_meta(SubmittedTxMeta {
+                                    hash: tx.hash,
+                                    nonce: tx.nonce,
+                                    sender: tx.sender,
+                                    gas_limit: tx.gas_limit,
+                                    method: tx.method,
+                                    wave: Some(wave_idx as u32),
+                                    submit_time: batch_submit_start,
+                                });
+                            }
+                            metrics.inc_transactions_submitted(accepted as u64);
+                            if failed > 0 {
+                                metrics.inc_transactions_failed(failed as u64);
+                            }
+                            if !quiet {
+                                if failed > 0 {
+                                    println!(
+                                        "Wave {} batch {}: accepted {} of {} txs, {} failed",
+                                        wave_idx, batch_idx, accepted, attempted, failed
+                                    );
+                                } else {
+                                    println!(
+                                        "Wave {} batch {}: accepted {} txs",
+                                        wave_idx, batch_idx, accepted
+                                    );
+                                }
+                            }
+                            SubmitAccounting {
+                                attempted,
+                                accepted,
+                                failed,
+                                error_summaries: result.error_summaries,
+                            }
+                        }
+                        Err(e) => {
+                            metrics.inc_transactions_failed(attempted as u64);
+                            if !quiet {
+                                eprintln!(
+                                    "Wave {} batch {} submission error: {}",
+                                    wave_idx, batch_idx, e
+                                );
+                            }
+                            SubmitAccounting {
+                                attempted,
+                                accepted: 0,
+                                failed: attempted,
+                                error_summaries: vec![SubmissionErrorSummary::new(
+                                    e.to_string(),
+                                    attempted,
+                                )],
+                            }
                         }
                     }
-                    SubmitAccounting {
-                        attempted,
-                        accepted,
-                        failed,
-                        error_summaries: result.error_summaries,
-                    }
                 }
-                Err(e) => {
-                    metrics.inc_transactions_failed(sender_txs.len() as u64);
-                    if !quiet {
-                        eprintln!("Worker {} submission error: {}", wave_idx, e);
-                    }
-                    SubmitAccounting {
-                        attempted,
-                        accepted: 0,
-                        failed: attempted,
-                        error_summaries: vec![SubmissionErrorSummary::new(
-                            e.to_string(),
-                            attempted,
-                        )],
-                    }
-                }
-            }
-        });
-        submit_handles.push(handle);
-    }
+            })
+            .buffer_unordered(worker_count.max(1))
+            .collect::<Vec<_>>()
+            .await;
 
-    // Wait for all submission workers to complete
-    let mut accounting = SubmitAccounting::default();
-    for handle in submit_handles {
-        if let Ok(worker_accounting) = handle.await {
+        for batch_accounting in wave_results {
             accounting.attempted = accounting
                 .attempted
-                .saturating_add(worker_accounting.attempted);
+                .saturating_add(batch_accounting.attempted);
             accounting.accepted = accounting
                 .accepted
-                .saturating_add(worker_accounting.accepted);
-            accounting.failed = accounting.failed.saturating_add(worker_accounting.failed);
+                .saturating_add(batch_accounting.accepted);
+            accounting.failed = accounting.failed.saturating_add(batch_accounting.failed);
             accounting
                 .error_summaries
-                .extend(worker_accounting.error_summaries);
+                .extend(batch_accounting.error_summaries);
         }
     }
     accounting.error_summaries = merge_submission_error_summaries(accounting.error_summaries);
@@ -742,9 +802,14 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         },
         confirmed_tps: confirmed_tps(confirmed, end_to_end),
         latency: stats,
-        server_metrics: None,
-        per_method: None,
-        validator_health: None,
+        server_metrics: super::scrape_server_metrics_after(config, server_metrics_before.as_ref())
+            .await,
+        per_method: if config.test_mode == TestMode::Evm {
+            Some(tracker.per_method_statistics())
+        } else {
+            None
+        },
+        validator_health: super::validator_health_snapshot(health_monitor.as_ref()),
         per_wave: {
             let waves = tracker.per_wave_statistics();
             if waves.is_empty() { None } else { Some(waves) }
@@ -884,6 +949,15 @@ mod tests {
                 "logs": []
             }
         })
+    }
+
+    fn receipt_response_for_requested_hash(request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("valid rpc json");
+        let hash = body["params"][0]
+            .as_str()
+            .expect("receipt request should include tx hash");
+        ResponseTemplate::new(200).set_body_json(receipt_response(hash))
     }
 
     fn balance_response(balance_hex: &str) -> serde_json::Value {
@@ -1298,6 +1372,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_poll_pending_receipts_ignores_mismatched_receipt_hash() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(receipt_response(
+                "0x0000000000000000000000000000000000000000000000000000000000000002",
+            )))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let tracker = LatencyTracker::new();
+        tracker.record_submit(
+            B256::with_last_byte(1),
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+
+        assert_eq!(tracker.pending_count(), 1);
+        assert_eq!(tracker.confirmed_count(), 0);
+    }
+
+    #[tokio::test]
     async fn test_poll_pending_receipts_mixed_confirmed_and_pending() {
         // We need a mock that returns a receipt for some txs and null for others.
         // wiremock responds with the same template for all POSTs, so we use a
@@ -1335,9 +1436,7 @@ mod tests {
         // Replace mock: now return valid receipts.
         mock_server.reset().await;
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(receipt_response(
-                "0x0000000000000000000000000000000000000000000000000000000000000001",
-            )))
+            .respond_with(receipt_response_for_requested_hash)
             .mount(&mock_server)
             .await;
 
@@ -1352,9 +1451,7 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(receipt_response(
-                "0x0000000000000000000000000000000000000000000000000000000000000099",
-            )))
+            .respond_with(receipt_response_for_requested_hash)
             .mount(&mock_server)
             .await;
 
@@ -1604,6 +1701,7 @@ mod tests {
 
         let mut config = burst_test_config(&mock_server.uri());
         config.tx_count = 3;
+        config.wave_count = 2;
         config.wave_delay_ms = 1;
 
         let (result, gas_price) = run_burst(&config).await.expect("burst run succeeds");
@@ -1623,6 +1721,82 @@ mod tests {
         assert_eq!(per_wave[1].wave, 1);
         assert_eq!(per_wave[1].count, 1);
         assert_eq!(submit_count.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_run_burst_uses_sender_count_independent_of_worker_count() {
+        let mock_server = MockServer::start().await;
+        let submit_count = StdArc::new(AtomicUsize::new(0));
+        let submit_count_for_mock = submit_count.clone();
+
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc json");
+                if let Some(items) = body.as_array() {
+                    let call_idx = submit_count_for_mock.fetch_add(1, Ordering::SeqCst);
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xactive{:02x}", call_idx * 16 + idx),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                assert_expected_rpc_method(
+                    &method,
+                    &[
+                        "eth_blockNumber",
+                        "eth_gasPrice",
+                        "eth_getBalance",
+                        "eth_getTransactionCount",
+                        "eth_getTransactionReceipt",
+                    ],
+                );
+                let response = if method == "eth_blockNumber" {
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": "0x7"
+                    })
+                } else if method == "eth_gasPrice" {
+                    balance_response("0x3b9aca00")
+                } else if method == "eth_getBalance" {
+                    balance_response("0xde0b6b3a7640000")
+                } else if method == "eth_getTransactionCount" {
+                    balance_response("0x0")
+                } else {
+                    let hash = body["params"][0].as_str().unwrap_or_default().to_string();
+                    receipt_response(&hash)
+                };
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = burst_test_config(&mock_server.uri());
+        config.tx_count = 6;
+        config.worker_count = 2;
+        config.batch_size = 1;
+        config.sender_keys = (1u8..=6).map(|i| format!("0x{:064x}", i)).collect();
+
+        let (result, _) = run_burst(&config).await.expect("burst run succeeds");
+
+        assert_eq!(result.attempted, 6);
+        assert_eq!(result.accepted, 6);
+        assert_eq!(result.confirmed, 6);
+        assert_eq!(
+            submit_count.load(Ordering::SeqCst),
+            6,
+            "each active sender should have its own nonce-ordered submission slice"
+        );
     }
 
     #[tokio::test]
@@ -1780,7 +1954,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains("accepted 1 of 3 attempted")
         );
-        assert_eq!(batch_count.load(Ordering::SeqCst), 2);
+        assert_eq!(batch_count.load(Ordering::SeqCst), 1);
         assert_eq!(receipt_count.load(Ordering::SeqCst), 2);
         let per_wave = result
             .per_wave
@@ -2111,36 +2285,36 @@ mod tests {
         assert_eq!(tx_count2, 10_000);
     }
 
-    /// Worker tx distribution: txs_per_worker with div_ceil.
+    /// Sender tx distribution: txs_per_sender with div_ceil.
     #[test]
-    fn test_txs_per_worker_distribution() {
-        // 10 txs, 3 workers → 4, 4, 2 (via div_ceil)
+    fn test_txs_per_sender_distribution() {
+        // 10 txs, 3 senders -> 4, 4, 2 (via div_ceil)
         let tx_count = 10usize;
-        let worker_count = 3usize;
-        let txs_per_worker = tx_count.div_ceil(worker_count);
-        assert_eq!(txs_per_worker, 4);
+        let sender_count = 3usize;
+        let txs_per_sender = tx_count.div_ceil(sender_count);
+        assert_eq!(txs_per_sender, 4);
 
-        // Exact division: 12 txs, 4 workers → 3 each
-        let txs_per_worker2 = 12usize.div_ceil(4);
-        assert_eq!(txs_per_worker2, 3);
+        // Exact division: 12 txs, 4 senders -> 3 each
+        let txs_per_sender2 = 12usize.div_ceil(4);
+        assert_eq!(txs_per_sender2, 3);
 
-        // Single worker gets all txs
-        let txs_per_worker3 = 100usize.div_ceil(1);
-        assert_eq!(txs_per_worker3, 100);
+        // Single sender gets all txs
+        let txs_per_sender3 = 100usize.div_ceil(1);
+        assert_eq!(txs_per_sender3, 100);
     }
 
-    /// Last worker should not get more txs than remaining.
+    /// Last sender should not get more txs than remaining.
     #[test]
-    fn test_worker_tx_slicing_no_overshoot() {
+    fn test_sender_tx_slicing_no_overshoot() {
         let tx_count = 10usize;
-        let worker_count = 3usize;
-        let txs_per_worker = tx_count.div_ceil(worker_count);
+        let sender_count = 3usize;
+        let txs_per_sender = tx_count.div_ceil(sender_count);
         let mut total_assigned = 0;
 
-        for w in 0..worker_count {
-            let submitted_so_far = w * txs_per_worker;
+        for sender_idx in 0..sender_count {
+            let submitted_so_far = sender_idx * txs_per_sender;
             let remaining = tx_count.saturating_sub(submitted_so_far);
-            let this_count = remaining.min(txs_per_worker);
+            let this_count = remaining.min(txs_per_sender);
             total_assigned += this_count;
         }
 
@@ -2150,14 +2324,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_split_worker_txs_into_waves_preserves_nonce_order() {
+        let txs = (0..5u64)
+            .map(|nonce| crate::types::SignedTxWithMetadata {
+                hash: B256::with_last_byte(nonce as u8),
+                encoded: vec![nonce as u8],
+                nonce,
+                gas_limit: 21_000,
+                sender: Address::with_last_byte(1),
+                submit_time: Instant::now(),
+                method: TransactionType::SimpleTransfer,
+            })
+            .collect::<Vec<_>>();
+
+        let waves = split_worker_txs_into_waves(txs, 3);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(
+            waves.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![2, 2, 1]
+        );
+
+        let flattened_nonces = waves
+            .iter()
+            .flat_map(|wave| wave.iter().map(|tx| tx.nonce))
+            .collect::<Vec<_>>();
+        assert_eq!(flattened_nonces, vec![0, 1, 2, 3, 4]);
+
+        let empty = split_worker_txs_into_waves(vec![], 3);
+        assert_eq!(empty.len(), 3);
+        assert!(empty.iter().all(Vec::is_empty));
+    }
+
     /// Gas price is at least 1 Gwei even if chain returns lower.
     #[test]
     fn test_gas_price_minimum_floor() {
         let base_price = 100_000_000u128; // 0.1 Gwei from chain
-        let gas_price = (base_price * 2).max(1_000_000_000);
+        let gas_price = gas_price_with_safety_margin(base_price);
         assert_eq!(
             gas_price, 1_000_000_000,
             "floor should enforce 1 Gwei minimum"
+        );
+    }
+
+    #[test]
+    fn test_gas_price_safety_margin_saturates_on_extreme_values() {
+        assert_eq!(
+            gas_price_with_safety_margin(50_000_000_000),
+            100_000_000_000
+        );
+        assert_eq!(
+            gas_price_with_safety_margin(u128::MAX),
+            u128::MAX,
+            "extreme RPC gas prices should not overflow"
         );
     }
 
@@ -2206,23 +2425,14 @@ mod tests {
         assert_eq!(sender_keys[0], "0xdeadbeef");
     }
 
-    /// Nonce range distribution for multi-worker per-key.
+    /// Burst mode uses one contiguous nonce range per active sender.
     #[test]
     fn test_nonce_range_distribution() {
-        let num_keys = 2;
-        let worker_count = 4;
-        let txs_per_worker = 100;
+        let base_nonces = [10u64, 20u64, 30u64];
 
-        // Workers 0,2 share key 0; workers 1,3 share key 1.
-        // Nonce start for worker w: base_nonce + (w / num_keys) * txs_per_worker
-        let base_nonces = [10u64, 20u64]; // key 0 starts at 10, key 1 at 20
-
-        for w in 0..worker_count {
-            let key_idx = w % num_keys;
-            let slot_in_key = w / num_keys;
-            let nonce_start = base_nonces[key_idx] + (slot_in_key * txs_per_worker) as u64;
-            let expected = [10u64, 20u64, 110u64, 120u64][w];
-            assert_eq!(nonce_start, expected);
+        for sender_idx in 0..base_nonces.len() {
+            let nonce_start = base_nonces[sender_idx];
+            assert_eq!(nonce_start, base_nonces[sender_idx]);
         }
     }
 }

@@ -110,13 +110,16 @@ impl BlockTracker {
             .ok_or_else(|| anyhow::anyhow!("WS stream ended before subscription confirmed"))?
             .map_err(|e| anyhow::anyhow!("WS error: {}", e))?;
 
-        // Verify we got a subscription ID
-        if let Message::Text(text) = sub_resp {
-            let resp: serde_json::Value = serde_json::from_str(&text.to_string())
-                .map_err(|e| anyhow::anyhow!("WS subscription response parse error: {}", e))?;
-            if resp.get("result").is_none() {
-                return Err(anyhow::anyhow!("WS subscription failed: {:?}", resp));
-            }
+        // Verify we got a JSON subscription ID before reporting readiness.
+        let Message::Text(text) = sub_resp else {
+            return Err(anyhow::anyhow!(
+                "WS subscription failed: non-text confirmation"
+            ));
+        };
+        let resp: serde_json::Value = serde_json::from_str(&text.to_string())
+            .map_err(|e| anyhow::anyhow!("WS subscription response parse error: {}", e))?;
+        if resp.get("result").is_none() {
+            return Err(anyhow::anyhow!("WS subscription failed: {:?}", resp));
         }
 
         // Signal ready — subscription is live.
@@ -226,7 +229,21 @@ impl BlockTracker {
                 if let Some(hash_str) = receipt.get("transactionHash").and_then(|h| h.as_str())
                     && let Ok(hash) = hash_str.parse()
                 {
-                    tracker.on_block_inclusion(hash, arrival);
+                    let gas_used = receipt
+                        .get("gasUsed")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_hex_u64);
+                    let status_success = receipt
+                        .get("status")
+                        .and_then(|v| v.as_str())
+                        .and_then(parse_hex_u64)
+                        .map(|status| status != 0);
+                    tracker.on_block_inclusion_with_receipt(
+                        hash,
+                        arrival,
+                        gas_used,
+                        status_success,
+                    );
                 }
             }
             return; // eth_getBlockReceipts succeeded
@@ -347,6 +364,10 @@ impl BlockTracker {
         let hex = result.get("result").and_then(|r| r.as_str())?;
         u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
     }
+}
+
+fn parse_hex_u64(hex: &str) -> Option<u64> {
+    u64::from_str_radix(hex.trim_start_matches("0x"), 16).ok()
 }
 
 #[cfg(test)]
@@ -766,7 +787,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_ws_raw_accepts_non_text_subscription_confirmation() {
+    async fn test_run_ws_raw_rejects_non_text_subscription_confirmation() {
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Ping(vec![7]),
             Vec::new(),
@@ -781,14 +802,11 @@ mod tests {
             tracker,
         );
 
-        let result = bt.run_ws_raw(Duration::from_millis(50), None).await;
-        match result {
-            Ok(()) => {}
-            Err(err) => assert!(
-                err.to_string().contains("WS stream error"),
-                "non-text subscription confirmation should be ignored before shutdown: {err:?}"
-            ),
-        }
+        let err = bt
+            .run_ws_raw(Duration::from_millis(50), None)
+            .await
+            .expect_err("non-text subscription confirmation should fail");
+        assert!(err.to_string().contains("non-text confirmation"));
 
         server_task
             .await
@@ -917,7 +935,7 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
                 })
                 .to_string(),
             )],
-            Duration::from_millis(125),
+            Duration::from_secs(1),
         )
         .await;
 

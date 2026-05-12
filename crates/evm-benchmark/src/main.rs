@@ -28,6 +28,8 @@ type DownloadTargetsFn =
     dyn for<'a> Fn(&'a Path, Option<&'a str>) -> BoxFuture<'a, ()> + Send + Sync;
 type FundSendersFn =
     dyn for<'a> Fn(&'a str, &'a str, &'a [Address], u64, bool) -> BoxFuture<'a, ()> + Send + Sync;
+type WaitFundedBalancesFn =
+    dyn for<'a> Fn(&'a [url::Url], &'a [Address], bool) -> BoxFuture<'a, ()> + Send + Sync;
 type DeployContractsFn = dyn for<'a> Fn(
         &'a str,
         &'a str,
@@ -59,6 +61,7 @@ type WriteReportFn = dyn for<'a> Fn(
 struct RuntimeDeps {
     download_targets: Box<DownloadTargetsFn>,
     fund_senders: Box<FundSendersFn>,
+    wait_funded_balances: Box<WaitFundedBalancesFn>,
     deploy_contracts: Box<DeployContractsFn>,
     run_burst: Box<RunBurstFn>,
     run_sustained: Box<RunSustainedFn>,
@@ -75,6 +78,11 @@ impl RuntimeDeps {
             fund_senders: Box::new(|rpc_url, funder_key, addresses, chain_id, quiet| {
                 Box::pin(async move {
                     funding::fund_senders(rpc_url, funder_key, addresses, chain_id, quiet).await
+                })
+            }),
+            wait_funded_balances: Box::new(|rpc_urls, addresses, quiet| {
+                Box::pin(async move {
+                    funding::wait_for_funded_balances(rpc_urls, addresses, quiet).await
                 })
             }),
             deploy_contracts: Box::new(
@@ -388,6 +396,7 @@ async fn async_main_with(mut config: config::Config, deps: &RuntimeDeps) -> anyh
             config.quiet,
         )
         .await?;
+        (deps.wait_funded_balances)(&config.rpc_urls, &addresses, config.quiet).await?;
         if !config.quiet {
             println!("Funding complete. Starting benchmark...\n");
         }
@@ -614,6 +623,9 @@ mod tests {
             actual_tps: 18.0,
             latency: sample_latency(),
             timeline: vec![],
+            server_metrics: None,
+            per_method: None,
+            validator_health: None,
         }
     }
 
@@ -650,6 +662,7 @@ mod tests {
         RuntimeDeps {
             download_targets: Box::new(|_, _| Box::pin(async { Ok(()) })),
             fund_senders: Box::new(|_, _, _, _, _| Box::pin(async { Ok(()) })),
+            wait_funded_balances: Box::new(|_, _, _| Box::pin(async { Ok(()) })),
             deploy_contracts: Box::new(|_, _, _, _, _, _, _| {
                 Box::pin(async {
                     Ok(generators::contract_deploy::EvmContracts {
@@ -1209,23 +1222,49 @@ mod tests {
         let ceiling_server = runtime.block_on(MockServer::start());
         runtime.block_on(mount_preflight_mocks(&ceiling_server, "0x4d5b", None));
 
+        let call_order = Arc::new(Mutex::new(Vec::<&'static str>::new()));
         let fund_calls = Arc::new(Mutex::new(0usize));
+        let wait_calls = Arc::new(Mutex::new(0usize));
         let deploy_calls = Arc::new(Mutex::new(0usize));
         let write_calls = Arc::new(Mutex::new(0usize));
+        let call_order_fund = call_order.clone();
         let fund_calls_clone = fund_calls.clone();
+        let call_order_wait = call_order.clone();
+        let wait_calls_clone = wait_calls.clone();
+        let call_order_deploy = call_order.clone();
         let deploy_calls_clone = deploy_calls.clone();
         let write_calls_clone = write_calls.clone();
         let ceiling_deps = RuntimeDeps {
             fund_senders: Box::new(move |_, _, _, _, _| {
+                let call_order_fund = call_order_fund.clone();
                 let fund_calls_clone = fund_calls_clone.clone();
                 Box::pin(async move {
+                    call_order_fund.lock().expect("lock poisoned").push("fund");
                     *fund_calls_clone.lock().expect("lock poisoned") += 1;
                     Ok(())
                 })
             }),
+            wait_funded_balances: Box::new(move |rpc_urls, addresses, _| {
+                let call_order_wait = call_order_wait.clone();
+                let wait_calls_clone = wait_calls_clone.clone();
+                let rpc_count = rpc_urls.len();
+                let address_count = addresses.len();
+                Box::pin(async move {
+                    assert_eq!(rpc_count, 1);
+                    assert_eq!(address_count, 1);
+                    call_order_wait.lock().expect("lock poisoned").push("wait");
+                    *wait_calls_clone.lock().expect("lock poisoned") += 1;
+                    Ok(())
+                })
+            }),
             deploy_contracts: Box::new(move |_, _, _, _, _, _, _| {
+                let call_order_deploy = call_order_deploy.clone();
                 let deploy_calls_clone = deploy_calls_clone.clone();
                 Box::pin(async move {
+                    call_order_deploy
+                        .lock()
+                        .expect("lock poisoned")
+                        .push("deploy");
                     *deploy_calls_clone.lock().expect("lock poisoned") += 1;
                     Ok(generators::contract_deploy::EvmContracts {
                         tokens: vec![Address::with_last_byte(1)],
@@ -1258,8 +1297,13 @@ mod tests {
             .expect("ceiling branch should succeed");
 
         assert_eq!(*fund_calls.lock().expect("lock poisoned"), 1);
+        assert_eq!(*wait_calls.lock().expect("lock poisoned"), 1);
         assert_eq!(*deploy_calls.lock().expect("lock poisoned"), 1);
         assert_eq!(*write_calls.lock().expect("lock poisoned"), 1);
+        assert_eq!(
+            call_order.lock().expect("lock poisoned").as_slice(),
+            &["fund", "wait", "deploy"]
+        );
     }
 
     #[test]

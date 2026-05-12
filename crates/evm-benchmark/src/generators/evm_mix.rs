@@ -85,6 +85,8 @@ pub struct EvmTxDescriptor {
     pub input: Bytes,
     /// Gas limit for this tx type.
     pub gas_limit: u64,
+    /// Native token value sent with the transaction.
+    pub value: U256,
     /// Sender address (must correspond to one of the funded accounts).
     pub sender: Address,
     /// Logical transaction type for per-method analytics.
@@ -264,6 +266,7 @@ impl EvmMixGenerator {
     ) -> anyhow::Result<Vec<SignedTxWithMetadata>> {
         use rayon::prelude::*;
 
+        let signer_address = signer.address();
         descriptors
             .par_iter()
             .enumerate()
@@ -276,7 +279,7 @@ impl EvmMixGenerator {
                     gas_price,
                     gas_limit: desc.gas_limit,
                     to: TxKind::Call(desc.to),
-                    value: U256::ZERO,
+                    value: desc.value,
                     input: desc.input.clone(),
                 };
 
@@ -294,7 +297,7 @@ impl EvmMixGenerator {
                     encoded,
                     nonce,
                     gas_limit: desc.gas_limit,
-                    sender: desc.sender,
+                    sender: signer_address,
                     submit_time: Instant::now(),
                     method: desc.method,
                 })
@@ -314,6 +317,7 @@ impl EvmMixGenerator {
             to: token_addr,
             input: calldata,
             gas_limit: GAS_ERC20_MINT,
+            value: U256::ZERO,
             sender,
             method: TransactionType::ERC20Mint,
         }
@@ -330,6 +334,7 @@ impl EvmMixGenerator {
             to: token_addr,
             input: calldata,
             gas_limit: GAS_ERC20_TRANSFER,
+            value: U256::ZERO,
             sender,
             method: TransactionType::ERC20Transfer,
         }
@@ -353,6 +358,7 @@ impl EvmMixGenerator {
             to: token_addr,
             input: calldata,
             gas_limit: GAS_ERC20_APPROVE,
+            value: U256::ZERO,
             sender,
             method: TransactionType::ERC20Approve,
         }
@@ -369,6 +375,7 @@ impl EvmMixGenerator {
             to: pair_addr,
             input: calldata,
             gas_limit: GAS_SWAP,
+            value: U256::ZERO,
             sender,
             method: TransactionType::Swap,
         }
@@ -383,6 +390,7 @@ impl EvmMixGenerator {
             to: nft_addr,
             input: calldata,
             gas_limit: GAS_NFT_MINT,
+            value: U256::ZERO,
             sender,
             method: TransactionType::NFTMint,
         }
@@ -396,6 +404,7 @@ impl EvmMixGenerator {
             to: recipient,
             input: Bytes::new(),
             gas_limit: GAS_ETH_TRANSFER,
+            value: U256::from(1u32),
             sender,
             method: TransactionType::ETHTransfer,
         }
@@ -410,7 +419,7 @@ impl TxGenerator for EvmMixGenerator {
             .with_from(desc.sender)
             .with_to(desc.to)
             .with_gas_limit(desc.gas_limit)
-            .with_value(U256::ZERO);
+            .with_value(desc.value);
 
         if !desc.input.is_empty() {
             req = req.with_input(desc.input);
@@ -576,6 +585,7 @@ mod tests {
         let desc = EvmMixGenerator::build_eth_transfer(Address::with_last_byte(1));
         assert!(desc.input.is_empty());
         assert_eq!(desc.gas_limit, GAS_ETH_TRANSFER);
+        assert_eq!(desc.value, U256::from(1u32));
         assert_eq!(desc.method, TransactionType::ETHTransfer);
     }
 
@@ -596,27 +606,52 @@ mod tests {
         let mint = generator.build_erc20_mint(sender);
         assert_eq!(mint.method, TransactionType::ERC20Mint);
         assert_eq!(mint.gas_limit, GAS_ERC20_MINT);
+        assert_eq!(mint.value, U256::ZERO);
         assert_eq!(&mint.input[..4], &SEL_ERC20_MINT);
 
         let transfer = generator.build_erc20_transfer(sender, 0);
         assert_eq!(transfer.method, TransactionType::ERC20Transfer);
         assert_eq!(transfer.gas_limit, GAS_ERC20_TRANSFER);
+        assert_eq!(transfer.value, U256::ZERO);
         assert_eq!(&transfer.input[..4], &SEL_ERC20_TRANSFER);
 
         let approve = generator.build_erc20_approve(sender, 0);
         assert_eq!(approve.method, TransactionType::ERC20Approve);
         assert_eq!(approve.gas_limit, GAS_ERC20_APPROVE);
+        assert_eq!(approve.value, U256::ZERO);
         assert_eq!(&approve.input[..4], &SEL_ERC20_APPROVE);
 
         let swap = generator.build_swap(sender, 0);
         assert_eq!(swap.method, TransactionType::Swap);
         assert_eq!(swap.gas_limit, GAS_SWAP);
+        assert_eq!(swap.value, U256::ZERO);
         assert_eq!(&swap.input[..4], &SEL_SWAP);
 
         let nft = generator.build_nft_mint(sender);
         assert_eq!(nft.method, TransactionType::NFTMint);
         assert_eq!(nft.gas_limit, GAS_NFT_MINT);
+        assert_eq!(nft.value, U256::ZERO);
         assert_eq!(&nft.input[..4], &SEL_NFT_MINT);
+    }
+
+    #[test]
+    fn test_sign_batch_uses_actual_signer_as_metadata_sender() {
+        let key = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let signer: PrivateKeySigner = key.parse().expect("valid key");
+        let descriptor = EvmTxDescriptor {
+            to: Address::with_last_byte(1),
+            input: Bytes::new(),
+            gas_limit: GAS_ETH_TRANSFER,
+            value: U256::from(1u32),
+            sender: Address::with_last_byte(0xee),
+            method: TransactionType::ETHTransfer,
+        };
+
+        let signed = EvmMixGenerator::sign_batch(&[descriptor], &signer, 7, 1_000_000_000, 1)
+            .expect("signing should succeed");
+
+        assert_eq!(signed[0].sender, signer.address());
+        assert_eq!(signed[0].nonce, 7);
     }
 
     #[test]

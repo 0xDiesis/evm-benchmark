@@ -15,6 +15,19 @@ struct ConfirmedEntry {
     gas_limit: u64,
     gas_used: Option<u64>,
     wave: Option<u32>,
+    reverted: bool,
+}
+
+/// Metadata captured when an accepted transaction enters confirmation tracking.
+#[derive(Clone, Debug)]
+pub struct SubmittedTxMeta {
+    pub hash: B256,
+    pub nonce: u64,
+    pub sender: Address,
+    pub gas_limit: u64,
+    pub method: TransactionType,
+    pub wave: Option<u32>,
+    pub submit_time: Instant,
 }
 
 /// Per-wave latency breakdown.
@@ -63,6 +76,7 @@ impl LatencyTracker {
     }
 
     /// Record a transaction submission with an optional wave index.
+    #[allow(dead_code)]
     pub fn record_submit(
         &self,
         hash: B256,
@@ -83,10 +97,19 @@ impl LatencyTracker {
         method: TransactionType,
         submit_time: Instant,
     ) {
-        self.record_submit_with_wave_at(hash, nonce, sender, gas_limit, method, None, submit_time);
+        self.record_submit_meta(SubmittedTxMeta {
+            hash,
+            nonce,
+            sender,
+            gas_limit,
+            method,
+            wave: None,
+            submit_time,
+        });
     }
 
     /// Record a transaction submission with a wave index for per-wave tracking.
+    #[allow(dead_code)]
     pub fn record_submit_with_wave(
         &self,
         hash: B256,
@@ -96,54 +119,60 @@ impl LatencyTracker {
         method: TransactionType,
         wave: Option<u32>,
     ) {
-        self.record_submit_with_wave_at(
+        self.record_submit_meta(SubmittedTxMeta {
             hash,
             nonce,
             sender,
             gas_limit,
             method,
             wave,
-            Instant::now(),
-        );
+            submit_time: Instant::now(),
+        });
     }
 
-    /// Record a transaction submission with an externally captured submit time.
-    pub fn record_submit_with_wave_at(
-        &self,
-        hash: B256,
-        nonce: u64,
-        sender: alloy_primitives::Address,
-        gas_limit: u64,
-        method: TransactionType,
-        wave: Option<u32>,
-        submit_time: Instant,
-    ) {
+    /// Record an accepted transaction submission.
+    pub fn record_submit_meta(&self, meta: SubmittedTxMeta) {
         let record = TxRecord {
-            hash,
-            nonce,
-            sender,
-            gas_limit,
+            hash: meta.hash,
+            nonce: meta.nonce,
+            sender: meta.sender,
+            gas_limit: meta.gas_limit,
             gas_used: None,
-            submit_time,
+            submit_time: meta.submit_time,
             block_time: None,
-            method,
+            method: meta.method,
             revert_status: None,
-            wave,
+            wave: meta.wave,
         };
-        self.pending.insert(hash, record);
+        self.pending.insert(meta.hash, record);
     }
 
     /// Mark a transaction as confirmed. Removes it from pending and moves
     /// latency data to the confirmed list.
     pub fn on_block_inclusion(&self, tx_hash: B256, block_time: Instant) -> bool {
+        self.on_block_inclusion_with_receipt(tx_hash, block_time, None, None)
+    }
+
+    /// Mark a transaction as confirmed and attach receipt-derived execution data
+    /// when available.
+    pub fn on_block_inclusion_with_receipt(
+        &self,
+        tx_hash: B256,
+        block_time: Instant,
+        gas_used: Option<u64>,
+        status_success: Option<bool>,
+    ) -> bool {
         if let Some((_, record)) = self.pending.remove(&tx_hash) {
-            let latency_ms = (block_time - record.submit_time).as_millis() as u64;
+            let latency_ms = block_time
+                .saturating_duration_since(record.submit_time)
+                .as_millis() as u64;
             let entry = ConfirmedEntry {
                 latency_ms,
                 method: record.method,
                 gas_limit: record.gas_limit,
-                gas_used: record.gas_used,
+                gas_used: gas_used.or(record.gas_used),
                 wave: record.wave,
+                reverted: status_success.is_some_and(|success| !success),
             };
             self.confirmed.lock().push(entry);
             self.confirmed_count.fetch_add(1, Ordering::Relaxed);
@@ -277,6 +306,7 @@ impl LatencyTracker {
 
         let mut method_latencies: BTreeMap<String, Vec<u64>> = BTreeMap::new();
         let mut method_gas: BTreeMap<String, (u64, u32)> = BTreeMap::new();
+        let mut method_reverted: BTreeMap<String, u32> = BTreeMap::new();
 
         for entry in confirmed.iter() {
             let method_name = format!("{:?}", entry.method);
@@ -285,15 +315,21 @@ impl LatencyTracker {
                 .or_default()
                 .push(entry.latency_ms);
 
-            if let Some(gas) = entry.gas_used {
-                let (total_gas, count) = method_gas.entry(method_name).or_insert((0, 0));
-                *total_gas += gas;
-                *count += 1;
+            let gas = entry.gas_used.unwrap_or(entry.gas_limit);
+            let (total_gas, count) = method_gas.entry(method_name.clone()).or_insert((0, 0));
+            *total_gas += gas;
+            *count += 1;
+            if entry.reverted {
+                *method_reverted.entry(method_name).or_insert(0) += 1;
             }
         }
 
-        let confirmed_count = confirmed.len() as u32;
-        let pending_count = self.pending.len() as u32;
+        let mut pending_by_method: BTreeMap<String, u32> = BTreeMap::new();
+        for entry in self.pending.iter() {
+            *pending_by_method
+                .entry(format!("{:?}", entry.method))
+                .or_insert(0) += 1;
+        }
 
         let mut result = BTreeMap::new();
         for (method, mut latencies) in method_latencies {
@@ -302,11 +338,11 @@ impl LatencyTracker {
             let (avg_gas, _) = method_gas.get(&method).copied().unwrap_or((0, 0));
 
             result.insert(
-                method,
+                method.clone(),
                 PerMethodStats {
-                    count: count + pending_count, // total submitted for this method
+                    count,
                     confirmed: count,
-                    reverted: 0,
+                    reverted: method_reverted.get(&method).copied().unwrap_or(0),
                     avg_gas: if count > 0 { avg_gas / count as u64 } else { 0 },
                     latency_p50: percentile(&latencies, 0.50),
                     latency_p95: percentile(&latencies, 0.95),
@@ -314,12 +350,18 @@ impl LatencyTracker {
             );
         }
 
-        // If only one method (SimpleTransfer), include total counts
-        if result.len() == 1
-            && let Some(stats) = result.values_mut().next()
-        {
-            stats.count = confirmed_count + pending_count;
-            stats.confirmed = confirmed_count;
+        for (method, pending_count) in pending_by_method {
+            result
+                .entry(method)
+                .and_modify(|stats| stats.count += pending_count)
+                .or_insert(PerMethodStats {
+                    count: pending_count,
+                    confirmed: 0,
+                    reverted: 0,
+                    avg_gas: 0,
+                    latency_p50: 0,
+                    latency_p95: 0,
+                });
         }
 
         result
@@ -524,9 +566,40 @@ mod tests {
         assert_eq!(stats.len(), 1, "Should have 1 method");
 
         let transfer_stats = stats.get("SimpleTransfer").expect("missing SimpleTransfer");
-        // Single-method path sets count = confirmed_count + pending_count
         assert_eq!(transfer_stats.count, 4);
         assert_eq!(transfer_stats.confirmed, 4);
+    }
+
+    #[test]
+    fn test_per_method_statistics_counts_pending_by_own_method() {
+        let tracker = LatencyTracker::new();
+
+        tracker.record_submit(
+            B256::with_last_byte(1),
+            1,
+            alloy_primitives::Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+        tracker.record_submit(
+            B256::with_last_byte(2),
+            2,
+            alloy_primitives::Address::default(),
+            80_000,
+            TransactionType::ERC20Mint,
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.on_block_inclusion(B256::with_last_byte(1), Instant::now());
+
+        let stats = tracker.per_method_statistics();
+        let transfer_stats = stats.get("SimpleTransfer").expect("missing SimpleTransfer");
+        let mint_stats = stats.get("ERC20Mint").expect("missing ERC20Mint");
+
+        assert_eq!(transfer_stats.count, 1);
+        assert_eq!(transfer_stats.confirmed, 1);
+        assert_eq!(mint_stats.count, 1);
+        assert_eq!(mint_stats.confirmed, 0);
     }
 
     #[test]
@@ -656,6 +729,27 @@ mod tests {
     }
 
     #[test]
+    fn test_confirmation_before_submit_time_saturates_latency() {
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(0xaa);
+        let submit_time = Instant::now() + std::time::Duration::from_millis(100);
+
+        tracker.record_submit_at(
+            hash,
+            0,
+            alloy_primitives::Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+            submit_time,
+        );
+
+        assert!(tracker.on_block_inclusion(hash, Instant::now()));
+        let stats = tracker.statistics();
+        assert_eq!(stats.p50, 0);
+        assert_eq!(stats.avg, 0);
+    }
+
+    #[test]
     fn test_per_method_statistics_uses_gas_used_average() {
         let tracker = LatencyTracker::new();
 
@@ -680,6 +774,38 @@ mod tests {
         let mint_stats = stats.get("ERC20Mint").expect("missing ERC20Mint");
         assert_eq!(mint_stats.confirmed, 2);
         assert_eq!(mint_stats.avg_gas, 60_000);
+    }
+
+    #[test]
+    fn test_per_method_statistics_uses_receipt_gas_and_status() {
+        let tracker = LatencyTracker::new();
+        let ok_hash = B256::with_last_byte(1);
+        let reverted_hash = B256::with_last_byte(2);
+
+        for (idx, hash) in [ok_hash, reverted_hash].into_iter().enumerate() {
+            tracker.record_submit(
+                hash,
+                idx as u64,
+                alloy_primitives::Address::default(),
+                90_000,
+                TransactionType::ERC20Mint,
+            );
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        tracker.on_block_inclusion_with_receipt(ok_hash, Instant::now(), Some(30_000), Some(true));
+        tracker.on_block_inclusion_with_receipt(
+            reverted_hash,
+            Instant::now(),
+            Some(50_000),
+            Some(false),
+        );
+
+        let stats = tracker.per_method_statistics();
+        let mint_stats = stats.get("ERC20Mint").expect("missing ERC20Mint");
+        assert_eq!(mint_stats.confirmed, 2);
+        assert_eq!(mint_stats.reverted, 1);
+        assert_eq!(mint_stats.avg_gas, 40_000);
     }
 
     #[test]

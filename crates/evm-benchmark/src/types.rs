@@ -287,6 +287,12 @@ pub struct SustainedResult {
     pub actual_tps: f32,
     pub latency: LatencyStats,
     pub timeline: Vec<WindowEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_metrics: Option<ServerMetrics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub per_method: Option<BTreeMap<String, PerMethodStats>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validator_health: Option<Vec<ValidatorHealthSnapshot>>,
 }
 
 impl SustainedResult {
@@ -316,9 +322,9 @@ impl SustainedResult {
             },
             confirmed_tps: self.actual_tps,
             latency: self.latency.clone(),
-            server_metrics: None,
-            per_method: None,
-            validator_health: None,
+            server_metrics: self.server_metrics.clone(),
+            per_method: self.per_method.clone(),
+            validator_health: self.validator_health.clone(),
             per_wave: None,
         }
     }
@@ -402,6 +408,12 @@ pub struct ConfigSnapshot {
 pub struct HarnessMetrics {
     pub tps_submitted: f32,
     pub tps_confirmed: f32,
+    #[serde(default)]
+    pub sign_ms: u64,
+    #[serde(default)]
+    pub submit_ms: u64,
+    #[serde(default)]
+    pub confirm_ms: u64,
     pub latency_p50: u64,
     pub latency_p95: u64,
     pub latency_p99: u64,
@@ -517,6 +529,9 @@ mod tests {
                 avg: 120,
             },
             timeline: vec![],
+            server_metrics: None,
+            per_method: None,
+            validator_health: None,
         };
 
         let burst = sustained.to_burst_result();
@@ -811,6 +826,9 @@ mod tests {
                 confirmed: 48,
                 latency_p50: 25,
             }],
+            server_metrics: None,
+            per_method: None,
+            validator_health: None,
         };
         let json = serde_json::to_string(&sr).unwrap();
         let deser: SustainedResult = serde_json::from_str(&json).unwrap();
@@ -862,6 +880,9 @@ mod tests {
         HarnessMetrics {
             tps_submitted: 100.0,
             tps_confirmed: 95.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 95,
             latency_p99: 99,

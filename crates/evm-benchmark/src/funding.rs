@@ -78,7 +78,15 @@ pub async fn fetch_gas_price(client: &reqwest::Client, rpc_url: &str) -> Result<
         .and_then(|r| r.as_str())
         .unwrap_or("0x3b9aca00");
     let base = u128::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap_or(1_000_000_000);
-    Ok((base * 2).max(1_000_000_000))
+    Ok(gas_price_with_safety_margin(base))
+}
+
+fn gas_price_with_safety_margin(base: u128) -> u128 {
+    base.saturating_mul(2).max(1_000_000_000)
+}
+
+fn minimum_sender_balance() -> U256 {
+    U256::from(100_000_000_000_000_000u128) // 0.1 ETH
 }
 
 /// Check which sender addresses need funding (balance < 0.1 ETH).
@@ -87,7 +95,7 @@ async fn check_balances(
     rpc_url: &str,
     addresses: &[Address],
 ) -> Result<Vec<(usize, Address)>> {
-    let min_balance = U256::from(100_000_000_000_000_000u128); // 0.1 ETH
+    let min_balance = minimum_sender_balance();
     let mut to_fund = Vec::new();
 
     // Batch balance checks
@@ -112,11 +120,135 @@ async fn check_balances(
     Ok(to_fund)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BalanceReadinessTimeouts {
+    propagation: Duration,
+    poll_interval: Duration,
+}
+
+impl BalanceReadinessTimeouts {
+    fn from_env() -> Self {
+        let propagation_secs = parse_env_u64("BENCH_FUND_BALANCE_PROPAGATION_TIMEOUT_SECS", 30);
+        let poll_interval_ms = parse_env_u64("BENCH_FUND_POLL_INTERVAL_MS", 500);
+
+        Self {
+            propagation: Duration::from_secs(propagation_secs),
+            poll_interval: Duration::from_millis(poll_interval_ms),
+        }
+    }
+}
+
+fn format_balance_readiness_issues(
+    issues: &[(String, Vec<(usize, Address)>)],
+    errors: &[(String, String)],
+) -> String {
+    let mut parts = Vec::new();
+    for (rpc_url, unfunded) in issues {
+        let sample = unfunded
+            .iter()
+            .take(3)
+            .map(|(index, addr)| format!("[{}] {:?}", index, addr))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if unfunded.len() > 3 { ", ..." } else { "" };
+        parts.push(format!(
+            "{} reports {} underfunded sender{}: {}{}",
+            rpc_url,
+            unfunded.len(),
+            if unfunded.len() == 1 { "" } else { "s" },
+            sample,
+            suffix
+        ));
+    }
+    for (rpc_url, error) in errors {
+        parts.push(format!("{} balance check failed: {}", rpc_url, error));
+    }
+    parts.join("; ")
+}
+
+async fn wait_for_funded_balances_with_timeouts(
+    client: &reqwest::Client,
+    rpc_urls: &[url::Url],
+    sender_addresses: &[Address],
+    quiet: bool,
+    timeouts: BalanceReadinessTimeouts,
+) -> Result<()> {
+    if rpc_urls.is_empty() || sender_addresses.is_empty() {
+        return Ok(());
+    }
+
+    if !quiet {
+        println!(
+            "Verifying funded balances across {} RPC endpoint{}...",
+            rpc_urls.len(),
+            if rpc_urls.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    let deadline = tokio::time::Instant::now() + timeouts.propagation;
+    let (last_issues, last_errors) = loop {
+        let mut issues = Vec::new();
+        let mut errors = Vec::new();
+        for rpc_url in rpc_urls {
+            match check_balances(client, rpc_url.as_str(), sender_addresses).await {
+                Ok(unfunded) if unfunded.is_empty() => {}
+                Ok(unfunded) => issues.push((rpc_url.to_string(), unfunded)),
+                Err(err) => errors.push((rpc_url.to_string(), err.to_string())),
+            }
+        }
+
+        if issues.is_empty() && errors.is_empty() {
+            if !quiet {
+                println!("  Funded balances visible on all RPC endpoints.");
+            }
+            return Ok(());
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            break (issues, errors);
+        }
+
+        let remaining = deadline.saturating_duration_since(now);
+        tokio::time::sleep(timeouts.poll_interval.min(remaining)).await;
+    };
+
+    anyhow::bail!(
+        "Funded balances were not visible on all RPC endpoints within {}s: {}",
+        timeouts.propagation.as_secs(),
+        format_balance_readiness_issues(&last_issues, &last_errors)
+    )
+}
+
+/// Wait until every configured RPC endpoint sees all sender balances as funded.
+///
+/// Funding transactions are submitted and confirmed through the primary RPC
+/// endpoint, but benchmark submission can round-robin across several endpoints.
+/// This readiness check prevents benchmark traffic from racing ahead of lagging
+/// RPC nodes and producing false `insufficient funds` submission failures.
+pub async fn wait_for_funded_balances(
+    rpc_urls: &[url::Url],
+    sender_addresses: &[Address],
+    quiet: bool,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(20)
+        .build()?;
+    wait_for_funded_balances_with_timeouts(
+        &client,
+        rpc_urls,
+        sender_addresses,
+        quiet,
+        BalanceReadinessTimeouts::from_env(),
+    )
+    .await
+}
+
 // ── MultiSend contract ─────────────────────────────────────────────────────
 // Minimal contract: function send(address[] calldata to) external payable
 // Splits msg.value equally among all recipients via low-level call.
 //
-// Solidity source (compiled with solc 0.8.x):
+// Solidity source (compiled with solc 0.8.x, evm-version=paris):
 // contract MultiSend {
 //   function send(address[] calldata to) external payable {
 //     uint256 amt = msg.value / to.length;
@@ -128,7 +260,7 @@ async fn check_balances(
 // }
 
 /// Pre-compiled bytecode for the MultiSend contract.
-const MULTISEND_BYTECODE: &str = "6080604052348015600e575f5ffd5b5061034e8061001c5f395ff3fe60806040526004361061001d575f3560e01c8063298c073314610021575b5f5ffd5b61003b60048036038101906100369190610174565b61003d565b005b5f828290503461004d91906101f5565b90505f5f90505b83839050811015610105575f84848381811061007357610072610225565b5b905060200201602081019061008891906102ac565b73ffffffffffffffffffffffffffffffffffffffff16836040516100ab90610304565b5f6040518083038185875af1925050503d805f81146100e5576040519150601f19603f3d011682016040523d82523d5f602084013e6100ea565b606091505b50509050806100f7575f5ffd5b508080600101915050610054565b50505050565b5f5ffd5b5f5ffd5b5f5ffd5b5f5ffd5b5f5ffd5b5f5f83601f84011261013457610133610113565b5b8235905067ffffffffffffffff81111561015157610150610117565b5b60208301915083602082028301111561016d5761016c61011b565b5b9250929050565b5f5f6020838503121561018a5761018961010b565b5b5f83013567ffffffffffffffff8111156101a7576101a661010f565b5b6101b38582860161011f565b92509250509250929050565b5f819050919050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52601260045260245ffd5b5f6101ff826101bf565b915061020a836101bf565b92508261021a576102196101c8565b5b828204905092915050565b7f4e487b71000000000000000000000000000000000000000000000000000000005f52603260045260245ffd5b5f73ffffffffffffffffffffffffffffffffffffffff82169050919050565b5f61027b82610252565b9050919050565b61028b81610271565b8114610295575f5ffd5b50565b5f813590506102a681610282565b92915050565b5f602082840312156102c1576102c061010b565b5b5f6102ce84828501610298565b91505092915050565b5f81905092915050565b50565b5f6102ef5f836102d7565b91506102fa826102e1565b5f82019050919050565b5f61030e826102e4565b915081905091905056fea2646970667358221220637bf60662fe0073c9d7744a2480e03ede6650ed6776139ceeefb9b7ad7a3e8c64736f6c63430008220033";
+const MULTISEND_BYTECODE: &str = "6080604052348015600f57600080fd5b506101fb8061001f6000396000f3fe60806040526004361061001e5760003560e01c8063298c073314610023575b600080fd5b6100366100313660046100e6565b610038565b005b6000610044823461015d565b905060005b828110156100e05760008484838181106100655761006561017f565b905060200201602081019061007a9190610195565b6001600160a01b03168360405160006040518083038185875af1925050503d80600081146100c4576040519150601f19603f3d011682016040523d82523d6000602084013e6100c9565b606091505b50509050806100d757600080fd5b50600101610049565b50505050565b600080602083850312156100f957600080fd5b823567ffffffffffffffff81111561011057600080fd5b8301601f8101851361012157600080fd5b803567ffffffffffffffff81111561013857600080fd5b8560208260051b840101111561014d57600080fd5b6020919091019590945092505050565b60008261017a57634e487b7160e01b600052601260045260246000fd5b500490565b634e487b7160e01b600052603260045260246000fd5b6000602082840312156101a757600080fd5b81356001600160a01b03811681146101be57600080fd5b939250505056fea264697066735822122098c2532f67441fdafc8986fab4a38c8554fd794c990ac3995771fdb49b48997964736f6c63430008220033";
 
 /// Maximum recipients per MultiSend call. Keeps gas usage within block limits.
 const MULTISEND_BATCH_SIZE: usize = 100;
@@ -206,11 +338,12 @@ async fn deploy_multisend(
     use alloy_primitives::TxKind;
 
     let bytecode = hex::decode(MULTISEND_BYTECODE)?;
+    let deploy_gas_limit = parse_env_u64("BENCH_FUND_DEPLOY_GAS_LIMIT", 3_000_000);
     let mut tx = TxLegacy {
         chain_id: Some(chain_id),
         nonce,
         gas_price,
-        gas_limit: 500_000,
+        gas_limit: deploy_gas_limit,
         to: TxKind::Create,
         value: U256::ZERO,
         input: Bytes::from(bytecode),
@@ -246,11 +379,18 @@ async fn deploy_multisend(
         });
         let resp = client.post(rpc_url).json(&receipt_payload).send().await?;
         let result: serde_json::Value = resp.json().await?;
-        if let Some(receipt) = result.get("result").and_then(|r| r.as_object())
-            && let Some(addr_str) = receipt.get("contractAddress").and_then(|a| a.as_str())
-        {
-            let addr = Address::from_str(addr_str)?;
-            return Ok(addr);
+        if let Some(receipt) = result.get("result").and_then(|r| r.as_object()) {
+            let status = receipt
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("0x1");
+            if status == "0x0" {
+                anyhow::bail!("MultiSend deploy tx {:?} reverted (status=0x0)", tx_hash);
+            }
+            if let Some(addr_str) = receipt.get("contractAddress").and_then(|a| a.as_str()) {
+                let addr = Address::from_str(addr_str)?;
+                return Ok(addr);
+            }
         }
     }
     anyhow::bail!(
@@ -538,14 +678,21 @@ pub async fn fund_senders(
                     }
                     tokio::time::sleep(timeouts.poll_interval).await;
                 }
-                let remaining_count = check_balances(&client, rpc_url, sender_addresses)
-                    .await?
-                    .len();
-                if !quiet && remaining_count > 0 {
-                    eprintln!(
-                        "  Warning: {} accounts still unfunded after retry. \
-                         Benchmark may have partial failures.",
-                        remaining_count
+                let remaining = check_balances(&client, rpc_url, sender_addresses).await?;
+                if !remaining.is_empty() {
+                    let details = remaining
+                        .iter()
+                        .take(5)
+                        .map(|(index, addr)| format!("[{}] {:?}", index, addr))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let suffix = if remaining.len() > 5 { ", ..." } else { "" };
+                    anyhow::bail!(
+                        "{} account{} still unfunded after retry: {}{}",
+                        remaining.len(),
+                        if remaining.len() == 1 { "" } else { "s" },
+                        details,
+                        suffix
                     );
                 }
             }
@@ -782,6 +929,70 @@ mod tests {
                 })),
             }
         }
+    }
+
+    struct BalanceReadinessResponder {
+        ready_after_call: usize,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BalanceReadinessResponder {
+        fn new(ready_after_call: usize) -> (Self, Arc<AtomicUsize>) {
+            let calls = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    ready_after_call,
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    impl Respond for BalanceReadinessResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let payload: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("request body should be JSON");
+            let method = payload
+                .get("method")
+                .and_then(|value| value.as_str())
+                .expect("json-rpc method should be present");
+
+            if method != "eth_getBalance" {
+                return ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": -32601,
+                        "message": format!("unexpected json-rpc method: {method}"),
+                    }
+                }));
+            }
+
+            let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let balance = if call >= self.ready_after_call {
+                "0xde0b6b3a7640000"
+            } else {
+                "0x0"
+            };
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": balance,
+            }))
+        }
+    }
+
+    async fn mount_balance_readiness_mock(
+        ready_after_call: usize,
+    ) -> (MockServer, Arc<AtomicUsize>) {
+        let mock_server = MockServer::start().await;
+        let (responder, calls) = BalanceReadinessResponder::new(ready_after_call);
+        Mock::given(method("POST"))
+            .respond_with(responder)
+            .mount(&mock_server)
+            .await;
+        (mock_server, calls)
     }
 
     async fn mount_fund_senders_mock(flow: FundSendsFlow) -> MockServer {
@@ -1117,6 +1328,16 @@ mod tests {
         assert_eq!(gas_price, 100_000_000_000);
     }
 
+    #[test]
+    fn test_gas_price_safety_margin_saturates_on_extreme_values() {
+        assert_eq!(gas_price_with_safety_margin(100), 1_000_000_000);
+        assert_eq!(
+            gas_price_with_safety_margin(u128::MAX),
+            u128::MAX,
+            "extreme RPC gas prices should not overflow"
+        );
+    }
+
     #[tokio::test]
     async fn test_fetch_gas_price_invalid_hex_uses_default() {
         let mock_server = MockServer::start().await;
@@ -1320,6 +1541,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_wait_for_funded_balances_waits_for_all_rpc_endpoints() {
+        let (ready_server, ready_calls) = mount_balance_readiness_mock(1).await;
+        let (lagging_server, lagging_calls) = mount_balance_readiness_mock(2).await;
+        let rpc_urls = vec![
+            url::Url::parse(&ready_server.uri()).unwrap(),
+            url::Url::parse(&lagging_server.uri()).unwrap(),
+        ];
+        let addrs = vec![Address::with_last_byte(0x01)];
+        let client = reqwest::Client::new();
+        let timeouts = BalanceReadinessTimeouts {
+            propagation: Duration::from_millis(250),
+            poll_interval: Duration::from_millis(1),
+        };
+
+        wait_for_funded_balances_with_timeouts(&client, &rpc_urls, &addrs, true, timeouts)
+            .await
+            .expect("should wait until the lagging endpoint reports funded balances");
+
+        assert!(ready_calls.load(Ordering::SeqCst) >= 1);
+        assert_eq!(lagging_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_funded_balances_times_out_with_endpoint_details() {
+        let (ready_server, _) = mount_balance_readiness_mock(1).await;
+        let (lagging_server, lagging_calls) = mount_balance_readiness_mock(usize::MAX).await;
+        let rpc_urls = vec![
+            url::Url::parse(&ready_server.uri()).unwrap(),
+            url::Url::parse(&lagging_server.uri()).unwrap(),
+        ];
+        let addrs = vec![Address::with_last_byte(0x02)];
+        let client = reqwest::Client::new();
+        let timeouts = BalanceReadinessTimeouts {
+            propagation: Duration::from_millis(25),
+            poll_interval: Duration::from_millis(1),
+        };
+
+        let err =
+            wait_for_funded_balances_with_timeouts(&client, &rpc_urls, &addrs, true, timeouts)
+                .await
+                .expect_err("permanently lagging endpoint should time out");
+        let message = err.to_string();
+        assert!(message.contains("Funded balances were not visible"));
+        assert!(message.contains(&lagging_server.uri()));
+        assert!(message.contains("underfunded sender"));
+        assert!(lagging_calls.load(Ordering::SeqCst) > 1);
+    }
+
+    #[tokio::test]
     async fn test_deploy_multisend_send_raw_transaction_error() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1392,6 +1662,50 @@ mod tests {
             .await
             .expect_err("missing receipt should time out");
         assert!(err.to_string().contains("receipt not found"));
+    }
+
+    #[tokio::test]
+    async fn test_deploy_multisend_reverted_receipt_errors_immediately() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_sendRawTransaction"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": "0x01"
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "eth_getTransactionReceipt"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "status": "0x0", "contractAddress": null }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let funder_key = generate_sender_keys(1).into_iter().next().unwrap();
+        let funder = PrivateKeySigner::from_str(&funder_key).unwrap();
+        let timeouts = FundingTimeouts {
+            chain_ready: Duration::from_millis(1),
+            deploy_receipt: Duration::from_millis(250),
+            funding_confirm: Duration::from_millis(25),
+            retry_confirm: Duration::from_millis(25),
+            poll_interval: Duration::from_millis(1),
+        };
+
+        let err = deploy_multisend(&client, &mock_server.uri(), &funder, 1, 0, 1, timeouts)
+            .await
+            .expect_err("reverted deploy receipt should fail");
+        assert!(err.to_string().contains("deploy tx"));
+        assert!(err.to_string().contains("reverted"));
     }
 
     #[tokio::test]
@@ -1470,18 +1784,17 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
-    async fn test_fund_senders_retry_timeout_returns_ok_with_warning() {
+    async fn test_fund_senders_retry_timeout_errors_when_accounts_remain_unfunded() {
         let _guard = env_lock().lock().unwrap();
         let _timeouts = funding_timeout_guards("2", "1", "1", "1", "1");
         let mock_server = mount_fund_senders_mock(FundSendsFlow::RetryTimeoutWithRetryError).await;
 
         let funder_key = &generate_sender_keys(1)[0];
         let addrs = vec![Address::with_last_byte(0x01)];
-        let result = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, false).await;
-        assert!(
-            result.is_ok(),
-            "function currently returns Ok even if retry funding leaves accounts unfunded"
-        );
+        let err = fund_senders(&mock_server.uri(), funder_key, &addrs, 1, false)
+            .await
+            .expect_err("remaining underfunded accounts should fail funding");
+        assert!(err.to_string().contains("still unfunded after retry"));
     }
 
     #[tokio::test]

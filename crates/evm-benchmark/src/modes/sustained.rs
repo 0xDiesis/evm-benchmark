@@ -1,9 +1,10 @@
 use crate::config::Config;
+use crate::generators::evm_mix::EvmMixGenerator;
 use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
 use crate::submission::{BlockTracker, LatencyTracker, Submitter};
 use crate::types::{
-    SubmissionErrorSummary, SustainedResult, WindowEntry, benchmark_validity,
+    SubmissionErrorSummary, SustainedResult, TestMode, WindowEntry, benchmark_validity,
     merge_submission_error_summaries,
 };
 use alloy_primitives::{Address, U256};
@@ -89,6 +90,8 @@ async fn run_block_tracker_task(
 /// - BlockTracker is kept alive through the post-run confirmation wait.
 /// - Timeline task captures per-second metrics.
 pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
+    let server_metrics_before = super::scrape_server_metrics_before(config).await;
+    let health_monitor = super::start_health_monitor(config)?;
     let dispatcher = Arc::new(Submitter::with_retry_profile(
         config.rpc_urls.clone(),
         &config.ws,
@@ -103,7 +106,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     dispatcher.warm_up(10).await?;
 
     // Resolve sender keys — supports multiple comma-separated keys in BENCH_KEY
-    let sender_keys = crate::funding::resolve_sender_keys(config.sender_count);
+    let sender_keys = if config.sender_keys.is_empty() {
+        crate::funding::resolve_sender_keys(config.sender_count)
+    } else {
+        config.sender_keys.clone()
+    };
     let num_keys = sender_keys.len();
 
     let client = reqwest::Client::builder()
@@ -137,6 +144,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
 
     let recipient = Address::with_last_byte(0x42);
     let mut all_pre_signed = Vec::new();
+    let evm_contracts = if config.test_mode == TestMode::Evm {
+        Some(super::evm_contracts(config)?)
+    } else {
+        None
+    };
 
     for (i, key) in sender_keys.iter().enumerate() {
         let count = signer_transaction_count(total_txs, num_keys, i);
@@ -166,13 +178,26 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
             .ok_or_else(|| anyhow::anyhow!("Failed to get nonce for sender {}", i))?;
         let nonce = u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16)?;
 
-        let tx_data: Vec<(Address, U256)> =
-            (0..count).map(|_| (recipient, U256::from(1u32))).collect();
-        let batch_signer =
-            BatchSigner::new_with_gas_price(signer, nonce, gas_price, config.chain_id);
-        let signed = batch_signer
-            .sign_batch_parallel(tx_data)
-            .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?;
+        let signed = if let Some(ref contracts) = evm_contracts {
+            let mut generator = EvmMixGenerator::new(
+                contracts.clone(),
+                super::evm_mix_config(contracts),
+                vec![account],
+                config.chain_id,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
+            let descs = generator.generate_batch(count);
+            EvmMixGenerator::sign_batch(&descs, &signer, nonce, gas_price, config.chain_id)
+                .map_err(|e| anyhow::anyhow!("EVM pre-signing failed for sender {}: {}", i, e))?
+        } else {
+            let tx_data: Vec<(Address, U256)> =
+                (0..count).map(|_| (recipient, U256::from(1u32))).collect();
+            let batch_signer =
+                BatchSigner::new_with_gas_price(signer, nonce, gas_price, config.chain_id);
+            batch_signer
+                .sign_batch_parallel(tx_data)
+                .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?
+        };
         all_pre_signed.extend(signed);
     }
 
@@ -352,6 +377,14 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         actual_tps,
         latency: stats,
         timeline: timeline_vec,
+        server_metrics: super::scrape_server_metrics_after(config, server_metrics_before.as_ref())
+            .await,
+        per_method: if config.test_mode == TestMode::Evm {
+            Some(tracker.per_method_statistics())
+        } else {
+            None
+        },
+        validator_health: super::validator_health_snapshot(health_monitor.as_ref()),
     };
 
     // Run analytics pipeline on benchmark results
@@ -804,6 +837,9 @@ mod tests {
                 avg: 35,
             },
             timeline: vec![],
+            server_metrics: None,
+            per_method: None,
+            validator_health: None,
         };
 
         let burst = sustained.to_burst_result();
@@ -992,6 +1028,9 @@ mod tests {
                 avg: 25,
             },
             timeline: vec![],
+            server_metrics: None,
+            per_method: None,
+            validator_health: None,
         };
         // sent tracks accepted submissions; attempted includes accepted + errors.
         assert_eq!(result.sent, result.confirmed + result.pending);
@@ -1024,6 +1063,9 @@ mod tests {
                 avg: 55,
             },
             timeline: vec![],
+            server_metrics: None,
+            per_method: None,
+            validator_health: None,
         };
         let burst = result.to_burst_result();
         assert_eq!(burst.latency.p50, 42);
@@ -1289,6 +1331,60 @@ mod tests {
         assert!(
             !result.timeline.is_empty(),
             "timeline should capture at least one snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_sustained_evm_mode_uses_per_method_tracking() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("valid rpc body");
+
+                if let Some(items) = body.as_array() {
+                    let results: Vec<_> = items
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, _)| {
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": idx,
+                                "result": format!("0xevmsustained{idx:02x}"),
+                            })
+                        })
+                        .collect();
+                    return ResponseTemplate::new(200).set_body_json(results);
+                }
+
+                let method = rpc_method(request).expect("rpc method");
+                let response = sustained_success_rpc_response(method.as_str(), &body);
+                ResponseTemplate::new(200).set_body_json(response)
+            })
+            .mount(&mock_server)
+            .await;
+
+        let mut config = sustained_test_config(&mock_server.uri());
+        config.test_mode = TestMode::Evm;
+        config.target_tps = 1;
+        config.duration_secs = 1;
+        config.sender_keys = vec![format!("0x{:064x}", 1)];
+        config.evm_tokens = vec![Address::with_last_byte(1)];
+        config.evm_nfts = vec![Address::with_last_byte(2)];
+
+        let (result, _) = run_sustained(&config)
+            .await
+            .expect("sustained EVM run should succeed");
+
+        assert!(result.sent >= 1);
+        assert_eq!(result.confirmed, result.sent);
+        let per_method = result.per_method.expect("EVM run should report methods");
+        let counted = per_method.values().map(|stats| stats.count).sum::<u32>();
+        assert_eq!(counted, result.sent);
+        assert!(
+            per_method.keys().any(|method| method != "SimpleTransfer"),
+            "expected EVM method mix, got {per_method:?}"
         );
     }
 
