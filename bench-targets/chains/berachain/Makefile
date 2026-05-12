@@ -21,10 +21,9 @@ up: deps build-image
 	@echo "Starting Berachain Kurtosis devnet (enclave: $(ENCLAVE))..."
 	@# Remove stale enclave if it exists
 	@kurtosis enclave rm -f $(ENCLAVE) 2>/dev/null || true
-	@# kurtosis-start.sh handles the Docker credential workaround:
-	@# Kurtosis engine uses printf to copy credentials into a container volume,
-	@# which fails when credentials contain shell metacharacters. The script
-	@# temporarily clears ~/.docker/config.json and restores it on exit.
+	@# kurtosis-start.sh handles Docker/Kurtosis startup quirks:
+	@# it runs Kurtosis with a temporary no-auth Docker config and retries once
+	@# if the engine starts without its centralized logs aggregator.
 	@bash ./kurtosis-start.sh $(ENCLAVE)
 	@echo ""
 	@echo "Berachain devnet ready. Discovering RPC ports..."

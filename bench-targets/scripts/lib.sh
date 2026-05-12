@@ -318,7 +318,7 @@ chain_config_scroll() {
     CHAIN_RPC="http://127.0.0.1:48545"
     CHAIN_WS="ws://127.0.0.1:48546"
     CHAIN_CHAIN_ID=53077
-    CHAIN_KEYS="0xc0c85dc29d5c58039e502db807b6217cbb633ccd5f574d2449097e321abb89bc"
+    CHAIN_KEYS="0x1cedaf504d32694297b16216761a469e9b43cd04789b084fa04c165cd4bc9d87"
     CHAIN_UP_CMD="make -C ${scroll_dir} up"
     CHAIN_DOWN_CMD="make -C ${scroll_dir} down"
     CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"

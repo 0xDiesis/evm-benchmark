@@ -20,6 +20,8 @@ source "${SCRIPT_DIR}/lib.sh"
 CHAIN="diesis" MODE="burst" ENV="clean" TAG=""
 TXS=2000 TPS=200 DURATION=30 SENDERS=200 BATCH_SIZE=200 WORKERS=8
 OUT="" QUIET="true" FUND="true" TEST_MODE="transfer" REBUILD="false" DEV="false"
+TXS_SET="false" SENDERS_SET="false" BATCH_SIZE_SET="false" WORKERS_SET="false"
+FUND_SET="false"
 
 # ── Argument parsing ─────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -28,16 +30,16 @@ while [[ $# -gt 0 ]]; do
         --mode)        MODE="$2";       shift 2 ;;
         --env)         ENV="$2";        shift 2 ;;
         --tag)         TAG="$2";        shift 2 ;;
-        --txs)         TXS="$2";        shift 2 ;;
+        --txs)         TXS="$2";        TXS_SET="true"; shift 2 ;;
         --tps)         TPS="$2";        shift 2 ;;
         --duration)    DURATION="$2";   shift 2 ;;
-        --senders)     SENDERS="$2";    shift 2 ;;
-        --batch-size)  BATCH_SIZE="$2"; shift 2 ;;
-        --workers)     WORKERS="$2";    shift 2 ;;
+        --senders)     SENDERS="$2";    SENDERS_SET="true"; shift 2 ;;
+        --batch-size)  BATCH_SIZE="$2"; BATCH_SIZE_SET="true"; shift 2 ;;
+        --workers)     WORKERS="$2";    WORKERS_SET="true"; shift 2 ;;
         --out)         OUT="$2";        shift 2 ;;
         --quiet)       QUIET="true";    shift ;;
         --no-quiet)    QUIET="false";   shift ;;
-        --no-fund)     FUND="false";    shift ;;
+        --no-fund)     FUND="false";    FUND_SET="true"; shift ;;
         --rebuild)     REBUILD="true";  shift ;;
         --dev)         DEV="true";       shift ;;
         --test-mode)   TEST_MODE="$2";  shift 2 ;;
@@ -64,6 +66,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "${CHAIN}" == "sei" && "${MODE}" == "burst" ]]; then
+    # Sei's local mock-balance devnet is RPC/consensus-limited in this setup.
+    # The global burst defaults overload it and create invalid partial runs; keep
+    # the implicit target smoke profile conservative, while preserving explicit
+    # CLI values for stress runs.
+    [[ "${TXS_SET}" == "false" ]] && TXS="${BENCH_SEI_BURST_TXS:-100}"
+    [[ "${SENDERS_SET}" == "false" ]] && SENDERS="${BENCH_SEI_SENDERS:-20}"
+    [[ "${BATCH_SIZE_SET}" == "false" ]] && BATCH_SIZE="${BENCH_SEI_BATCH_SIZE:-5}"
+    [[ "${WORKERS_SET}" == "false" ]] && WORKERS="${BENCH_SEI_WORKERS:-1}"
+fi
+
+if [[ "${CHAIN}" == "scroll" || "${CHAIN}" == "arbitrum" ]]; then
+    # These local L2 targets ship with one pre-funded benchmark account. Their
+    # default path should validate node startup/submission without invoking the
+    # generic funding contract, which is not reliable on these devnets.
+    [[ "${SENDERS_SET}" == "false" ]] && SENDERS=1
+    [[ "${FUND_SET}" == "false" ]] && FUND="false"
+fi
+
 RUN_TAG="${TAG:-${ENV}}"
 
 # ── Load chain config ────────────────────────────────────────────────────
@@ -75,7 +96,12 @@ if ! load_chain_config "${CHAIN}"; then
 fi
 
 # ── Create run directory ─────────────────────────────────────────────────
-if [[ -n "${OUT}" ]]; then RUN_DIR="${OUT}"
+if [[ -n "${OUT}" ]]; then
+    if [[ "${OUT}" = /* ]]; then
+        RUN_DIR="${OUT}"
+    else
+        RUN_DIR="${BENCH_REPO_DIR}/${OUT}"
+    fi
 else RUN_DIR="$(make_run_dir "${CHAIN}" "${MODE}" "${RUN_TAG}")"; fi
 mkdir -p "${RUN_DIR}"
 
@@ -118,7 +144,7 @@ default_chain_overrides() {
             local tx_source_lookahead="${BENCH_DIESIS_E2E_TX_SOURCE_LOOKAHEAD_MULTIPLIER:-${E2E_TX_SOURCE_LOOKAHEAD_MULTIPLIER:-8}}"
             local tx_source_max_scan="${BENCH_DIESIS_E2E_TX_SOURCE_MAX_SCAN:-${E2E_TX_SOURCE_MAX_SCAN:-32768}}"
             local tx_partition_fallback_fill="${BENCH_DIESIS_E2E_TX_PARTITION_FALLBACK_FILL:-${E2E_TX_PARTITION_FALLBACK_FILL:-true}}"
-            local fec_enabled="${BENCH_DIESIS_E2E_FEC_ENABLED:-${E2E_FEC_ENABLED:-true}}"
+            local fec_enabled="${BENCH_DIESIS_E2E_FEC_ENABLED:-${E2E_FEC_ENABLED:-false}}"
             local burst_drain="${BENCH_DIESIS_E2E_DAG_INBOUND_BURST_DRAIN_LIMIT:-${E2E_DAG_INBOUND_BURST_DRAIN_LIMIT:-128}}"
             local validator_capacity="${BENCH_DIESIS_E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY:-${E2E_DAG_VALIDATOR_INBOUND_CHANNEL_CAPACITY:-2048}}"
             local nonvalidator_capacity="${BENCH_DIESIS_E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY:-${E2E_DAG_NONVALIDATOR_INBOUND_CHANNEL_CAPACITY:-8192}}"
@@ -312,6 +338,10 @@ PROMETHEUS_URL="${BENCH_PROMETHEUS_URL:-}"
 if [[ -z "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
     PROMETHEUS_URL="http://localhost:9090"
 fi
+HARNESS_METRICS_URL="${BENCH_HARNESS_METRICS_URL:-}"
+if [[ -z "${HARNESS_METRICS_URL}" && -n "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
+    HARNESS_METRICS_URL="${PROMETHEUS_URL}"
+fi
 BENCH_PROMETHEUS_AFTER_SETTLE_SECS="${BENCH_PROMETHEUS_AFTER_SETTLE_SECS:-5}"
 export BENCH_PROMETHEUS_AFTER_SETTLE_SECS
 PROMETHEUS_CAPTURED="false"
@@ -356,6 +386,7 @@ HARNESS_ARGS=(
 )
 [[ "${FUND}" == "true" ]]  && HARNESS_ARGS+=(--fund)
 [[ "${QUIET}" == "true" ]] && HARNESS_ARGS+=(--quiet)
+[[ -n "${HARNESS_METRICS_URL}" ]] && HARNESS_ARGS+=(--metrics "${HARNESS_METRICS_URL}")
 
 case "${MODE}" in
     burst)
@@ -381,6 +412,7 @@ esac
 echo ""
 echo "Running ${CHAIN} ${MODE} benchmark (env=${ENV})..."
 echo "  RPC:     ${CHAIN_RPC}"
+[[ -n "${HARNESS_METRICS_URL}" ]] && echo "  Metrics: ${HARNESS_METRICS_URL}"
 echo "  Senders: ${SENDERS}"
 echo "  Workers: ${WORKERS}"
 echo "  Output:  ${RUN_DIR}/report.json"
@@ -433,8 +465,10 @@ update_latest_symlink "${RUN_DIR}"  # mode-level latest
 MODE_DIR="$(dirname "${RUN_DIR}")"
 CHAIN_DIR="$(dirname "${MODE_DIR}")"
 RUNS_DIR="$(dirname "${CHAIN_DIR}")"
-ln -sfn "${MODE_DIR}" "${CHAIN_DIR}/latest"
-ln -sfn "${CHAIN_DIR}" "${RUNS_DIR}/latest"
+if [[ "${RUNS_DIR}" == "${RESULTS_BASE}/runs" ]]; then
+    ln -sfn "$(basename "${MODE_DIR}")" "${CHAIN_DIR}/latest"
+    ln -sfn "$(basename "${CHAIN_DIR}")" "${RUNS_DIR}/latest"
+fi
 
 # ── Extract and print key metrics ────────────────────────────────────────
 if [[ -f "${RUN_DIR}/report.json" ]]; then

@@ -12,6 +12,7 @@ name: scroll-bench
 services:
   scroll-l2geth:
     image: scrolltech/l2geth:scroll-v5.7.25
+    platform: linux/amd64
     container_name: scroll-l2geth
     entrypoint: ["/entrypoint.sh"]
     environment:

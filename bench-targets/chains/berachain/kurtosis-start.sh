@@ -6,10 +6,10 @@
 # 1. Docker credential metacharacters: Kurtosis engine copies credentials into
 #    a container volume using `printf`, which fails when credentials contain
 #    shell metacharacters (&, |, ^, %, etc.). Private-registry credentials
-#    (e.g. ECR tokens) almost always contain these characters. The fix is to
-#    strip all `auths` entries whose auth/password fields contain metacharacters,
-#    keeping only safe entries (typically credHelpers/credsStore which Kurtosis
-#    doesn't need inside the container anyway).
+#    (e.g. ECR tokens) almost always contain these characters. The fix is to run
+#    Kurtosis with a temporary Docker config that has no auths or credential
+#    helpers. This target only needs local/public images after the local beacond
+#    image is built, so registry credentials are unnecessary and risky here.
 #
 # 2. Docker Desktop socket transient: On macOS, Docker Desktop's Unix socket
 #    briefly returns EOF for the very first container start after a cold start
@@ -22,51 +22,16 @@ ENCLAVE="${1:-bera-bench}"
 BEACON_KIT_DIR="${SCRIPT_DIR}/.beacon-kit"
 MAX_ENGINE_RETRIES=4
 
-DOCKER_CFG="${HOME}/.docker/config.json"
-DOCKER_CFG_BAK="${HOME}/.docker/config.json.kurtosis-bak"
-
-restore_docker_config() {
-    if [[ -f "${DOCKER_CFG_BAK}" ]]; then
-        cp "${DOCKER_CFG_BAK}" "${DOCKER_CFG}"
-        rm -f "${DOCKER_CFG_BAK}"
-    fi
+KURTOSIS_DOCKER_CONFIG="$(mktemp -d "${TMPDIR:-/tmp}/bera-kurtosis-docker-config.XXXXXX")"
+cleanup() {
+    rm -rf "${KURTOSIS_DOCKER_CONFIG}"
+    [[ -n "${KURTOSIS_RUN_LOG:-}" ]] && rm -f "${KURTOSIS_RUN_LOG}"
 }
-trap restore_docker_config EXIT INT TERM
+trap cleanup EXIT INT TERM
 
-# Build a sanitized Docker config that strips any auth entries whose credentials
-# contain shell metacharacters that break Kurtosis's printf-into-container approach.
-# ECR tokens (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY encoded in auth) almost
-# always contain &, +, =, /, ^ etc. We keep credHelpers and credsStore intact
-# since Kurtosis doesn't try to embed those — only `auths` entries are copied.
-if [[ -f "${DOCKER_CFG}" ]]; then
-    cp "${DOCKER_CFG}" "${DOCKER_CFG_BAK}"
-    python3 - "${DOCKER_CFG}" <<'PYEOF'
-import json, sys, re
-
-METACHAR_RE = re.compile(r'[&|^%!<>(){}$`\\]')
-
-with open(sys.argv[1]) as f:
-    cfg = json.load(f)
-
-auths = cfg.get("auths", {})
-safe_auths = {}
-for registry, creds in auths.items():
-    auth_val = creds.get("auth", "")
-    password = creds.get("password", "")
-    if METACHAR_RE.search(auth_val) or METACHAR_RE.search(password):
-        print(f"  Stripping auth entry for {registry} (contains shell metacharacters)", file=sys.stderr)
-        continue
-    safe_auths[registry] = creds
-
-cfg["auths"] = safe_auths
-
-with open(sys.argv[1], "w") as f:
-    json.dump(cfg, f, indent=2)
-
-print(f"  Sanitized Docker config: kept {len(safe_auths)}/{len(auths)} auth entries", file=sys.stderr)
-PYEOF
-    echo "Temporarily sanitized Docker config (will restore on exit)"
-fi
+printf '{"auths":{}}\n' > "${KURTOSIS_DOCKER_CONFIG}/config.json"
+export DOCKER_CONFIG="${KURTOSIS_DOCKER_CONFIG}"
+echo "Using temporary Docker config for Kurtosis: ${DOCKER_CONFIG}"
 
 # Ensure Kurtosis engine is running (with retry for Docker socket transients)
 engine_started=false
@@ -98,5 +63,20 @@ if [[ "${engine_started}" != "true" ]]; then
     exit 1
 fi
 
-kurtosis run "${BEACON_KIT_DIR}/kurtosis" --args-file "${SCRIPT_DIR}/kurtosis-config.yaml" \
-    --enclave "${ENCLAVE}" --parallelism 200
+run_kurtosis() {
+    kurtosis run "${BEACON_KIT_DIR}/kurtosis" --args-file "${SCRIPT_DIR}/kurtosis-config.yaml" \
+        --enclave "${ENCLAVE}" --parallelism 200
+}
+
+KURTOSIS_RUN_LOG="$(mktemp "${TMPDIR:-/tmp}/bera-kurtosis-run.XXXXXX")"
+if ! run_kurtosis 2>&1 | tee "${KURTOSIS_RUN_LOG}"; then
+    if grep -q "No logs aggregator container exists" "${KURTOSIS_RUN_LOG}"; then
+        echo "Kurtosis engine is missing its logs aggregator; restarting engine and retrying once..." >&2
+        kurtosis engine stop >/dev/null 2>&1 || true
+        sleep 2
+        kurtosis engine start
+        run_kurtosis
+    else
+        exit 1
+    fi
+fi

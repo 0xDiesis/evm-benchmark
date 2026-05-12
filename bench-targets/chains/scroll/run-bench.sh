@@ -14,9 +14,9 @@ SCROLL_RPC="http://localhost:48545"
 SCROLL_WS="ws://localhost:48546"
 SCROLL_CHAIN_ID=53077
 
-# Benchmark account private key (pre-funded in genesis)
-# Bench 1: 0x11950BC14473845bb68c0a6C6B5c468854aedCBf  (sha256("scroll-bench-1"))
-SCROLL_KEY="0xc0c85dc29d5c58039e502db807b6217cbb633ccd5f574d2449097e321abb89bc"
+# Benchmark account private key (pre-funded in genesis and used as the clique signer)
+# Signer: 0xE276ae9338be48AA89bD59eD9dCEB0826e863505
+SCROLL_KEY="0x1cedaf504d32694297b16216761a469e9b43cd04789b084fa04c165cd4bc9d87"
 SCROLL_PREFUNDED_SENDERS=1
 
 # Auto-detect chain ID from running node
@@ -42,8 +42,9 @@ echo ""
 echo "Running bench against Scroll l2geth (chain_id=${SCROLL_CHAIN_ID})..."
 echo ""
 
-# Default args
-DEFAULT_ARGS=(--execution burst --txs 10000 --batch-size 500 --wave-delay-ms 0 --senders "$SCROLL_PREFUNDED_SENDERS" --fund)
+# Default args: the standalone Scroll devnet pre-funds one benchmark account.
+# Contract-based auto-funding can be rejected by l2geth's zktrie/circuit checker.
+DEFAULT_ARGS=(--execution burst --txs 1000 --batch-size 100 --wave-delay-ms 0 --senders "$SCROLL_PREFUNDED_SENDERS")
 
 CLI_ARGS=("$@")
 if [[ $# -eq 0 ]]; then

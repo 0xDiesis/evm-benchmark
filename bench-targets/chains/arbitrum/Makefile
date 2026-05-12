@@ -17,6 +17,9 @@ up:
 		echo "Cloning nitro-testnode..."; \
 		git clone --depth 1 https://github.com/OffchainLabs/nitro-testnode.git $(NITRO_DIR); \
 	fi
+	@redis_port="$${ARB_REDIS_PORT:-16379}"; \
+		perl -0pi -e 's/"127\.0\.0\.1:\d+:6379"/"127.0.0.1:'"$$redis_port"':6379"/g' "$(NITRO_DIR)/docker-compose.yaml"; \
+		rm -f "$(NITRO_DIR)/docker-compose.override.yaml"
 	@echo "Starting Arbitrum Nitro testnode..."
 	cd $(NITRO_DIR) && ./test-node.bash --init --detach
 	@echo ""

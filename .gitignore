@@ -17,6 +17,8 @@
 # Chain-local generated state and secrets
 /bench-targets/chains/berachain/.env
 /bench-targets/chains/berachain/.beacon-kit/
+/bench-targets/chains/berachain/bench-targets/
+/bench-targets/chains/arbitrum/nitro-testnode/
 /bench-targets/chains/bsc/bsc-docker/
 /bench-targets/chains/cosmos/evmos/
 /bench-targets/chains/**/sender-keys.txt

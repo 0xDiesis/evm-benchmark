@@ -14,6 +14,6 @@ cargo run -p evm-benchmark --release --manifest-path "${REPO_ROOT}/Cargo.toml" -
     --ws "$SEI_WS" \
     --chain-id "$SEI_CHAIN_ID" \
     --bench-name "sei_localnet" \
-    --senders 200 \
+    --senders "${SEI_SENDERS:-20}" \
     --out "${SCRIPT_DIR}/report.json" \
-    ${@:---execution burst --txs 10000 --batch-size 500 --wave-delay-ms 0}
+    ${@:---execution burst --txs "${SEI_TXS:-100}" --batch-size "${SEI_BATCH_SIZE:-5}" --wave-delay-ms 0}
