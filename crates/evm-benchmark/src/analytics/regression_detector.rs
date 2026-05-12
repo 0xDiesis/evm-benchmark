@@ -121,6 +121,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 3050.0,
             tps_confirmed: 3010.0, // 0.33% change - within noise
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 102,
@@ -145,6 +148,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 3500.0,
             tps_confirmed: 3300.0, // 10% improvement
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 90,
@@ -170,6 +176,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 2700.0,
             tps_confirmed: 2550.0, // 15% regression
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 80,
             latency_p95: 120,
             latency_p99: 150,
@@ -196,6 +205,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 3000.0,
             tps_confirmed: 3000.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 150,
@@ -222,6 +234,9 @@ mod tests {
         let metrics = HarnessMetrics {
             tps_submitted: 3100.0,
             tps_confirmed: 3000.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 100,
@@ -246,6 +261,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 3000.0,
             tps_confirmed: 3000.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 100,
@@ -274,6 +292,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 3000.0,
             tps_confirmed: 3000.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 100,
@@ -300,6 +321,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 3000.0,
             tps_confirmed: 3000.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 30,
             latency_p95: 60,
             latency_p99: 100,
@@ -343,6 +367,9 @@ mod tests {
         let current = HarnessMetrics {
             tps_submitted: 1010.0,
             tps_confirmed: 1010.0, // 1% change
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 50,
             latency_p95: 80,
             latency_p99: 100,

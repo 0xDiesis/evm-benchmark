@@ -6,7 +6,8 @@
 use crate::analytics::{
     bottleneck_detector::detect_bottlenecks,
     metrics_collector::{
-        create_performance_snapshot, extract_harness_metrics, extract_server_metrics,
+        create_performance_snapshot, extract_embedded_server_metrics, extract_harness_metrics,
+        extract_server_metrics,
     },
     prometheus_integration::MetricsMap,
     recommendations::generate_recommendations,
@@ -50,9 +51,14 @@ pub async fn run_analysis(
     // Extract harness metrics from benchmark result
     let harness_metrics = extract_harness_metrics(harness_result);
 
-    // Scrape server metrics if Prometheus URL provided
-    // For now, use empty metrics as default (would require actual Prometheus integration)
-    let server_metrics = extract_server_metrics(&MetricsMap::default(), &MetricsMap::default());
+    let server_metrics = if harness_result.server_metrics.is_some() {
+        extract_embedded_server_metrics(harness_result.server_metrics.as_ref())
+    } else {
+        // Prometheus scraping for analysis requires a before/after pair. The
+        // runners attach that delta to `BurstResult.server_metrics` when a
+        // metrics endpoint is configured.
+        extract_server_metrics(&MetricsMap::default(), &MetricsMap::default())
+    };
 
     // Create performance snapshot
     let snapshot = create_performance_snapshot(harness_metrics.clone(), server_metrics);
@@ -166,7 +172,7 @@ pub async fn run_analysis(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::LatencyStats;
+    use crate::types::{HistogramDelta, LatencyStats, ServerMetrics};
 
     #[tokio::test]
     async fn test_run_analysis_basic() {
@@ -209,6 +215,67 @@ mod tests {
         assert!(!report.reports.ascii.is_empty());
         assert!(!report.reports.markdown.is_empty());
         assert!(!report.reports.html.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_run_analysis_uses_embedded_server_metrics() {
+        let result = BurstResult {
+            attempted: 1000,
+            submitted: 1000,
+            accepted: 1000,
+            failed: 0,
+            confirmed: 1000,
+            pending: 0,
+            valid: true,
+            invalid_reason: None,
+            submission_errors: vec![],
+            sign_ms: 10,
+            submit_ms: 20,
+            confirm_ms: 30,
+            submitted_tps: 5000.0,
+            confirmed_tps: 5000.0,
+            latency: LatencyStats {
+                p50: 40,
+                p95: 80,
+                p99: 100,
+                min: 10,
+                max: 120,
+                avg: 50,
+            },
+            server_metrics: Some(ServerMetrics {
+                execution_ms: Some(HistogramDelta {
+                    start: 0.0,
+                    end: 60.0,
+                    count: 6,
+                    sum: 60.0,
+                }),
+                state_root_ms: Some(HistogramDelta {
+                    start: 0.0,
+                    end: 180.0,
+                    count: 6,
+                    sum: 180.0,
+                }),
+                parent_handoff_ms: None,
+                publication_ms: Some(HistogramDelta {
+                    start: 0.0,
+                    end: 42.0,
+                    count: 6,
+                    sum: 42.0,
+                }),
+                queue_wait_ms: None,
+            }),
+            per_method: None,
+            validator_health: None,
+            per_wave: None,
+        };
+
+        let report = run_analysis("test", "burst", &result, None, None)
+            .await
+            .expect("analysis should succeed");
+
+        assert_eq!(report.snapshot.server_metrics.block_execution_ms, 10);
+        assert_eq!(report.snapshot.server_metrics.state_root_ms, 30);
+        assert_eq!(report.snapshot.server_metrics.publication_ms, 7);
     }
 
     #[tokio::test]

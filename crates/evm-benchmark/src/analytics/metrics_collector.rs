@@ -1,7 +1,10 @@
 //! Unified metrics collection from harness and Prometheus server metrics.
 
 use crate::analytics::prometheus_integration::MetricsMap;
-use crate::types::{BurstResult, HarnessMetrics, PerformanceSnapshot, UnifiedServerMetrics};
+use crate::types::{
+    BurstResult, HarnessMetrics, HistogramDelta, PerformanceSnapshot, ServerMetrics,
+    UnifiedServerMetrics,
+};
 use chrono::Utc;
 
 /// Extract harness metrics from a benchmark result
@@ -38,6 +41,9 @@ pub fn extract_harness_metrics(result: &BurstResult) -> HarnessMetrics {
     HarnessMetrics {
         tps_submitted,
         tps_confirmed,
+        sign_ms: result.sign_ms,
+        submit_ms: result.submit_ms,
+        confirm_ms: result.confirm_ms,
         latency_p50: result.latency.p50,
         latency_p95: result.latency.p95,
         latency_p99: result.latency.p99,
@@ -73,6 +79,43 @@ pub fn extract_server_metrics(before: &MetricsMap, after: &MetricsMap) -> Unifie
         gas_per_block: get_delta("reth_node_gas_per_block"),
         transactions_per_block: get_delta_u32("reth_diesis_transactions_per_block"),
         memory_usage_mb: get_delta("reth_node_memory_usage_mb"),
+    }
+}
+
+fn average_histogram_ms(delta: Option<&HistogramDelta>) -> u64 {
+    let Some(delta) = delta else {
+        return 0;
+    };
+    if delta.count == 0 {
+        return delta.sum.max(0.0).round() as u64;
+    }
+    (delta.sum.max(0.0) / delta.count as f64).round() as u64
+}
+
+/// Convert server metrics embedded in a benchmark result into analytics fields.
+pub fn extract_embedded_server_metrics(metrics: Option<&ServerMetrics>) -> UnifiedServerMetrics {
+    let Some(metrics) = metrics else {
+        return UnifiedServerMetrics {
+            block_execution_ms: 0,
+            state_root_ms: 0,
+            parent_handoff_ms: 0,
+            publication_ms: 0,
+            queue_wait_ms: 0,
+            gas_per_block: 0,
+            transactions_per_block: 0,
+            memory_usage_mb: 0,
+        };
+    };
+
+    UnifiedServerMetrics {
+        block_execution_ms: average_histogram_ms(metrics.execution_ms.as_ref()),
+        state_root_ms: average_histogram_ms(metrics.state_root_ms.as_ref()),
+        parent_handoff_ms: average_histogram_ms(metrics.parent_handoff_ms.as_ref()),
+        publication_ms: average_histogram_ms(metrics.publication_ms.as_ref()),
+        queue_wait_ms: average_histogram_ms(metrics.queue_wait_ms.as_ref()),
+        gas_per_block: 0,
+        transactions_per_block: 0,
+        memory_usage_mb: 0,
     }
 }
 
@@ -127,6 +170,9 @@ mod tests {
         };
 
         let metrics = extract_harness_metrics(&result);
+        assert_eq!(metrics.sign_ms, 50);
+        assert_eq!(metrics.submit_ms, 100);
+        assert_eq!(metrics.confirm_ms, 200);
         assert_eq!(metrics.latency_p50, 50);
         assert_eq!(metrics.latency_p95, 150);
         assert_eq!(metrics.latency_p99, 200);
@@ -152,10 +198,51 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_embedded_server_metrics_uses_histogram_averages() {
+        let metrics = ServerMetrics {
+            execution_ms: Some(HistogramDelta {
+                start: 0.0,
+                end: 20.0,
+                count: 4,
+                sum: 20.0,
+            }),
+            state_root_ms: Some(HistogramDelta {
+                start: 0.0,
+                end: 90.0,
+                count: 3,
+                sum: 90.0,
+            }),
+            parent_handoff_ms: None,
+            publication_ms: Some(HistogramDelta {
+                start: 0.0,
+                end: 13.0,
+                count: 2,
+                sum: 13.0,
+            }),
+            queue_wait_ms: Some(HistogramDelta {
+                start: 0.0,
+                end: 7.0,
+                count: 0,
+                sum: 7.0,
+            }),
+        };
+
+        let unified = extract_embedded_server_metrics(Some(&metrics));
+        assert_eq!(unified.block_execution_ms, 5);
+        assert_eq!(unified.state_root_ms, 30);
+        assert_eq!(unified.parent_handoff_ms, 0);
+        assert_eq!(unified.publication_ms, 7);
+        assert_eq!(unified.queue_wait_ms, 7);
+    }
+
+    #[test]
     fn test_create_performance_snapshot() {
         let harness = HarnessMetrics {
             tps_submitted: 3000.0,
             tps_confirmed: 2950.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 10,
             latency_p95: 50,
             latency_p99: 100,
@@ -288,6 +375,9 @@ mod tests {
         let harness = HarnessMetrics {
             tps_submitted: 5000.0,
             tps_confirmed: 4900.0,
+            sign_ms: 0,
+            submit_ms: 0,
+            confirm_ms: 0,
             latency_p50: 20,
             latency_p95: 60,
             latency_p99: 120,

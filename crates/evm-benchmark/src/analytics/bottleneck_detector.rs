@@ -99,14 +99,16 @@ fn detect_client_signing_bottleneck(
     snapshot: &PerformanceSnapshot,
     total_latency_ms: f32,
 ) -> Option<BottleneckFinding> {
-    let harness_latency_p99 = snapshot.harness_metrics.latency_p99 as f32;
-    let server_latency = (snapshot.server_metrics.block_execution_ms
-        + snapshot.server_metrics.state_root_ms
-        + snapshot.server_metrics.publication_ms) as f32;
+    let sign_ms = snapshot.harness_metrics.sign_ms as f32;
+    let total_phase_ms = (snapshot.harness_metrics.sign_ms
+        + snapshot.harness_metrics.submit_ms
+        + snapshot.harness_metrics.confirm_ms) as f32;
 
-    // Client signing overhead = harness latency - server latency
-    let client_overhead_ms = (harness_latency_p99 - server_latency).max(0.0);
-    let pct_of_total = (client_overhead_ms / total_latency_ms) * 100.0;
+    if sign_ms <= 0.0 || total_phase_ms <= 0.0 {
+        return None;
+    }
+
+    let pct_of_total = (sign_ms / total_phase_ms) * 100.0;
 
     if pct_of_total > 25.0 {
         let severity = ((pct_of_total - 25.0) / 75.0).min(1.0);
@@ -119,9 +121,9 @@ fn detect_client_signing_bottleneck(
         return Some(BottleneckFinding {
             bottleneck_type: "ClientSigning".to_string(),
             severity,
-            pct_of_total,
+            pct_of_total: (sign_ms / total_latency_ms.max(1.0)) * 100.0,
             details: format!(
-                "Client-side signing overhead is {:.1}% of total latency. Consider batch signing or hardware acceleration.",
+                "Client-side signing takes {:.1}% of measured client phase time. Consider batch signing or hardware acceleration.",
                 pct_of_total
             ),
             stack_attribution: attribution,
@@ -299,6 +301,9 @@ mod tests {
             harness_metrics: HarnessMetrics {
                 tps_submitted: 3000.0,
                 tps_confirmed: 2950.0,
+                sign_ms: 0,
+                submit_ms: 0,
+                confirm_ms: 0,
                 latency_p50,
                 latency_p95,
                 latency_p99,
@@ -343,7 +348,7 @@ mod tests {
 
     #[test]
     fn test_detect_client_signing_bottleneck() {
-        let snapshot = make_snapshot(
+        let mut snapshot = make_snapshot(
             10,  // state_root_ms
             50,  // block_exec_ms
             150, // latency_p99: high latency (signing overhead)
@@ -351,10 +356,35 @@ mod tests {
             80,  // latency_p50
             50_000_000, 500,
         );
+        snapshot.harness_metrics.sign_ms = 600;
+        snapshot.harness_metrics.submit_ms = 100;
+        snapshot.harness_metrics.confirm_ms = 300;
 
         let bottlenecks = detect_bottlenecks(&snapshot);
         assert!(
             bottlenecks
+                .iter()
+                .any(|b| b.bottleneck_type == "ClientSigning")
+        );
+    }
+
+    #[test]
+    fn test_does_not_label_rpc_wait_as_client_signing() {
+        let mut snapshot = make_snapshot(
+            10,   // state_root_ms
+            50,   // block_exec_ms
+            2000, // latency_p99: high end-to-end wait
+            1800, // latency_p95
+            1500, // latency_p50
+            50_000_000, 500,
+        );
+        snapshot.harness_metrics.sign_ms = 50;
+        snapshot.harness_metrics.submit_ms = 1200;
+        snapshot.harness_metrics.confirm_ms = 700;
+
+        let bottlenecks = detect_bottlenecks(&snapshot);
+        assert!(
+            !bottlenecks
                 .iter()
                 .any(|b| b.bottleneck_type == "ClientSigning")
         );

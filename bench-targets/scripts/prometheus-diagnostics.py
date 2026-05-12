@@ -90,8 +90,14 @@ COUNTERS: dict[str, str] = {
     "fec_reassembly_evicted": "sum(reth_diesis_fec_reassembly_evicted)",
     "fec_reassembly_hash_mismatch": "sum(reth_diesis_fec_reassembly_hash_mismatch)",
     "quic_connect_failures": "sum(reth_diesis_quic_connect_failures)",
-    "quic_send_succeeded": "sum(reth_diesis_quic_send_succeeded_total)",
-    "quic_send_failed": "sum(reth_diesis_quic_send_failed_total)",
+    "quic_send_succeeded": (
+        "sum(reth_diesis_quic_send_succeeded) "
+        "or sum(reth_diesis_quic_send_succeeded_total)"
+    ),
+    "quic_send_failed": (
+        "sum(reth_diesis_quic_send_failed) "
+        "or sum(reth_diesis_quic_send_failed_total)"
+    ),
     "quic_reconnect_attempts": "sum(reth_diesis_quic_reconnect_attempts)",
     "quic_reconnect_successes": "sum(reth_diesis_quic_reconnect_successes)",
     "quic_rlpx_disconnect_retained": "sum(reth_diesis_quic_rlpx_disconnect_retained_total)",
@@ -116,10 +122,12 @@ SERIES_COUNTERS: dict[str, str] = {
         "(reth_diesis_consensus_payload_batch_response_rebroadcast_skipped_recent_total)"
     ),
     "quic_send_succeeded_by_op_msg": (
-        "sum by (op,msg_id) (reth_diesis_quic_send_succeeded_total)"
+        "sum by (op,msg_id) (reth_diesis_quic_send_succeeded) "
+        "or sum by (op,msg_id) (reth_diesis_quic_send_succeeded_total)"
     ),
     "quic_send_failed_by_op_msg": (
-        "sum by (op,msg_id) (reth_diesis_quic_send_failed_total)"
+        "sum by (op,msg_id) (reth_diesis_quic_send_failed) "
+        "or sum by (op,msg_id) (reth_diesis_quic_send_failed_total)"
     ),
     "quic_hedged_rlpx_by_msg_id": (
         "sum by (msg_id) (reth_diesis_quic_hedged_rlpx_total)"
@@ -203,8 +211,23 @@ for name, metric in HISTOGRAMS.items():
 ALL_QUERIES = {**COUNTERS, **GAUGES, **HISTOGRAM_QUERIES}
 
 
+def prometheus_query_url(base_url: str, query: str) -> str:
+    parsed = urllib.parse.urlsplit(base_url)
+    path = parsed.path.rstrip("/")
+    if not path:
+        query_path = "/api/v1/query"
+    elif path.endswith("/api/v1/query"):
+        query_path = path
+    else:
+        query_path = f"{path}/api/v1/query"
+    endpoint = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, query_path, "", "")
+    )
+    return endpoint + "?" + urllib.parse.urlencode({"query": query})
+
+
 def query_prometheus(base_url: str, query: str, timeout: float) -> float | None:
-    url = base_url.rstrip("/") + "/api/v1/query?" + urllib.parse.urlencode({"query": query})
+    url = prometheus_query_url(base_url, query)
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))
@@ -223,7 +246,7 @@ def query_prometheus(base_url: str, query: str, timeout: float) -> float | None:
 
 
 def query_prometheus_vector(base_url: str, query: str, timeout: float) -> list[dict[str, Any]]:
-    url = base_url.rstrip("/") + "/api/v1/query?" + urllib.parse.urlencode({"query": query})
+    url = prometheus_query_url(base_url, query)
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         payload = json.loads(response.read().decode("utf-8"))

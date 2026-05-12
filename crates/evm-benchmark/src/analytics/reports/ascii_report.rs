@@ -124,6 +124,9 @@ mod tests {
                 harness_metrics: HarnessMetrics {
                     tps_submitted: 3000.0,
                     tps_confirmed: 2950.0,
+                    sign_ms: 0,
+                    submit_ms: 0,
+                    confirm_ms: 0,
                     latency_p50: 50,
                     latency_p95: 100,
                     latency_p99: 150,

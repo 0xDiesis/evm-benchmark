@@ -14,6 +14,15 @@ use url::Url;
 /// Raw metrics map from Prometheus
 pub type MetricsMap = HashMap<String, f64>;
 
+const PROMETHEUS_HISTOGRAM_BASES: &[&str] = &[
+    "reth_diesis_pipeline_execution_ms",
+    "reth_diesis_pipeline_state_root_ms",
+    "reth_diesis_handoff_queue_latency_ms",
+    "reth_diesis_pipeline_publication_total_ms",
+    "reth_diesis_pipeline_ordered_queue_wait_ms",
+    "reth_diesis_pipeline_executed_queue_wait_ms",
+];
+
 /// Manages Prometheus metrics for benchmark execution.
 ///
 /// This struct wraps Prometheus metric collectors and provides methods
@@ -338,6 +347,13 @@ impl Default for MetricsExporter {
 #[allow(dead_code)]
 pub async fn scrape_prometheus(url: &Url) -> Result<MetricsMap> {
     let client = reqwest::Client::new();
+    if !url.path().ends_with("/metrics")
+        && let Ok(metrics) = scrape_prometheus_api(&client, url).await
+        && !metrics.is_empty()
+    {
+        return Ok(metrics);
+    }
+
     let response = client
         .get(url.as_str())
         .send()
@@ -348,6 +364,66 @@ pub async fn scrape_prometheus(url: &Url) -> Result<MetricsMap> {
         .await
         .context("failed to read Prometheus response body")?;
     parse_prometheus_text(&text)
+}
+
+async fn scrape_prometheus_api(client: &reqwest::Client, base_url: &Url) -> Result<MetricsMap> {
+    let mut metrics = MetricsMap::new();
+
+    for base in PROMETHEUS_HISTOGRAM_BASES {
+        for suffix in ["_sum", "_count"] {
+            let metric = format!("{base}{suffix}");
+            let query = format!("sum({metric})");
+            if let Some(value) = query_prometheus_instant(client, base_url, &query).await? {
+                metrics.insert(metric, value);
+            }
+        }
+    }
+
+    Ok(metrics)
+}
+
+async fn query_prometheus_instant(
+    client: &reqwest::Client,
+    base_url: &Url,
+    query: &str,
+) -> Result<Option<f64>> {
+    let mut url = base_url.clone();
+    let base_path = base_url.path().trim_end_matches('/');
+    if base_path.is_empty() {
+        url.set_path("/api/v1/query");
+    } else if base_path.ends_with("/api/v1/query") {
+        url.set_path(base_path);
+    } else {
+        url.set_path(&format!("{base_path}/api/v1/query"));
+    }
+    {
+        let mut query_pairs = url.query_pairs_mut();
+        query_pairs.clear();
+        query_pairs.append_pair("query", query);
+    }
+
+    let response = client.get(url).send().await?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let payload: serde_json::Value = response.json().await?;
+    if payload.get("status").and_then(|status| status.as_str()) != Some("success") {
+        return Ok(None);
+    }
+
+    let value = payload
+        .get("data")
+        .and_then(|data| data.get("result"))
+        .and_then(|result| result.as_array())
+        .and_then(|result| result.first())
+        .and_then(|row| row.get("value"))
+        .and_then(|value| value.as_array())
+        .and_then(|value| value.get(1))
+        .and_then(|value| value.as_str())
+        .and_then(|value| value.parse::<f64>().ok());
+
+    Ok(value)
 }
 
 /// Parse Prometheus text exposition format into a `MetricsMap`.
@@ -392,7 +468,10 @@ fn parse_prometheus_text(text: &str) -> Result<MetricsMap> {
         };
 
         if let Ok(value) = value_str.parse::<f64>() {
-            metrics.insert(metric_name.to_string(), value);
+            metrics
+                .entry(metric_name.to_string())
+                .and_modify(|total| *total += value)
+                .or_insert(value);
         }
     }
 
@@ -433,12 +512,66 @@ pub fn compute_server_metrics(before: &MetricsMap, after: &MetricsMap) -> Option
         })
     }
 
+    fn histogram_delta_any(
+        before: &MetricsMap,
+        after: &MetricsMap,
+        bases: &[&str],
+    ) -> Option<HistogramDelta> {
+        bases
+            .iter()
+            .find_map(|base| histogram_delta(before, after, base))
+    }
+
+    fn histogram_delta_sum(
+        before: &MetricsMap,
+        after: &MetricsMap,
+        bases: &[&str],
+    ) -> Option<HistogramDelta> {
+        let deltas: Vec<_> = bases
+            .iter()
+            .filter_map(|base| histogram_delta(before, after, base))
+            .collect();
+        if deltas.is_empty() {
+            return None;
+        }
+
+        Some(HistogramDelta {
+            start: deltas.iter().map(|delta| delta.start).sum(),
+            end: deltas.iter().map(|delta| delta.end).sum(),
+            count: deltas.iter().map(|delta| delta.count).max().unwrap_or(0),
+            sum: deltas.iter().map(|delta| delta.sum).sum(),
+        })
+    }
+
     let execution_ms = histogram_delta(before, after, "reth_diesis_pipeline_execution_ms");
     let state_root_ms = histogram_delta(before, after, "reth_diesis_pipeline_state_root_ms");
-    let parent_handoff_ms =
-        histogram_delta(before, after, "reth_diesis_pipeline_parent_handoff_wait_ms");
-    let publication_ms = histogram_delta(before, after, "reth_diesis_pipeline_publication_ms");
-    let queue_wait_ms = histogram_delta(before, after, "reth_diesis_pipeline_queue_wait_ms");
+    let parent_handoff_ms = histogram_delta_any(
+        before,
+        after,
+        &[
+            "reth_diesis_pipeline_parent_handoff_wait_ms",
+            "reth_diesis_handoff_queue_latency_ms",
+        ],
+    );
+    let publication_ms = histogram_delta_any(
+        before,
+        after,
+        &[
+            "reth_diesis_pipeline_publication_ms",
+            "reth_diesis_pipeline_publication_total_ms",
+        ],
+    );
+    let queue_wait_ms = histogram_delta(before, after, "reth_diesis_pipeline_queue_wait_ms")
+        .or_else(|| {
+            histogram_delta_sum(
+                before,
+                after,
+                &[
+                    "reth_diesis_pipeline_ordered_queue_wait_ms",
+                    "reth_diesis_pipeline_executed_queue_wait_ms",
+                ],
+            )
+        });
 
     // Return None only when every field is None (no server metrics available).
     if execution_ms.is_none()
@@ -463,7 +596,7 @@ pub fn compute_server_metrics(before: &MetricsMap, after: &MetricsMap) -> Option
 mod tests {
     use super::*;
     use crate::types::HistogramDelta;
-    use wiremock::matchers::method;
+    use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -670,6 +803,17 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prometheus_sums_duplicate_labeled_series() {
+        let text = "\
+http_requests{method=\"GET\",instance=\"a\"} 100
+http_requests{method=\"POST\",instance=\"b\"} 25
+http_requests{method=\"GET\",instance=\"c\"} 75
+";
+        let map = parse_prometheus_text(text).expect("parse should succeed");
+        assert_eq!(map.get("http_requests"), Some(&200.0));
+    }
+
+    #[test]
     fn test_parse_prometheus_with_timestamp() {
         let text = "my_counter 1234 1711526400000\n";
         let map = parse_prometheus_text(text).expect("parse should succeed");
@@ -711,6 +855,70 @@ mod tests {
         assert_eq!(metrics.get("demo_metric"), Some(&7.5));
     }
 
+    #[tokio::test]
+    async fn test_scrape_prometheus_supports_api_base_url() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "metric": {},
+                            "value": [1711526400.0, "7"]
+                        }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let url = Url::parse(&server.uri()).expect("invalid mock server url");
+        let metrics = scrape_prometheus(&url)
+            .await
+            .expect("scrape should query Prometheus API");
+
+        assert_eq!(
+            metrics.get("reth_diesis_pipeline_execution_ms_sum"),
+            Some(&7.0)
+        );
+        assert_eq!(
+            metrics.get("reth_diesis_pipeline_publication_total_ms_count"),
+            Some(&7.0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scrape_prometheus_preserves_api_query_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success",
+                "data": {
+                    "result": [
+                        {
+                            "metric": {},
+                            "value": [1711526400.0, "11"]
+                        }
+                    ]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let url =
+            Url::parse(&format!("{}/api/v1/query", server.uri())).expect("invalid mock server url");
+        let metrics = scrape_prometheus(&url)
+            .await
+            .expect("scrape should query the given Prometheus API path");
+
+        assert_eq!(
+            metrics.get("reth_diesis_pipeline_execution_ms_sum"),
+            Some(&11.0)
+        );
+    }
+
     #[test]
     fn test_compute_server_metrics_returns_none_when_empty() {
         let before: MetricsMap = HashMap::new();
@@ -748,6 +956,68 @@ mod tests {
         assert!(sm.parent_handoff_ms.is_none());
         assert!(sm.publication_ms.is_none());
         assert!(sm.queue_wait_ms.is_none());
+    }
+
+    #[test]
+    fn test_compute_server_metrics_uses_current_diesis_metric_names() {
+        let mut before: MetricsMap = HashMap::new();
+        before.insert("reth_diesis_pipeline_publication_total_ms_sum".into(), 10.0);
+        before.insert(
+            "reth_diesis_pipeline_publication_total_ms_count".into(),
+            2.0,
+        );
+        before.insert("reth_diesis_handoff_queue_latency_ms_sum".into(), 2.0);
+        before.insert("reth_diesis_handoff_queue_latency_ms_count".into(), 2.0);
+        before.insert("reth_diesis_pipeline_ordered_queue_wait_ms_sum".into(), 1.0);
+        before.insert(
+            "reth_diesis_pipeline_ordered_queue_wait_ms_count".into(),
+            2.0,
+        );
+        before.insert(
+            "reth_diesis_pipeline_executed_queue_wait_ms_sum".into(),
+            3.0,
+        );
+        before.insert(
+            "reth_diesis_pipeline_executed_queue_wait_ms_count".into(),
+            2.0,
+        );
+
+        let mut after: MetricsMap = HashMap::new();
+        after.insert("reth_diesis_pipeline_publication_total_ms_sum".into(), 40.0);
+        after.insert(
+            "reth_diesis_pipeline_publication_total_ms_count".into(),
+            5.0,
+        );
+        after.insert("reth_diesis_handoff_queue_latency_ms_sum".into(), 8.0);
+        after.insert("reth_diesis_handoff_queue_latency_ms_count".into(), 5.0);
+        after.insert("reth_diesis_pipeline_ordered_queue_wait_ms_sum".into(), 5.0);
+        after.insert(
+            "reth_diesis_pipeline_ordered_queue_wait_ms_count".into(),
+            5.0,
+        );
+        after.insert(
+            "reth_diesis_pipeline_executed_queue_wait_ms_sum".into(),
+            13.0,
+        );
+        after.insert(
+            "reth_diesis_pipeline_executed_queue_wait_ms_count".into(),
+            5.0,
+        );
+
+        let sm = compute_server_metrics(&before, &after).expect("should produce ServerMetrics");
+        let publication = sm.publication_ms.expect("publication should be present");
+        assert_eq!(publication.count, 3);
+        assert_eq!(publication.sum, 30.0);
+
+        let parent_handoff = sm
+            .parent_handoff_ms
+            .expect("parent handoff should be present");
+        assert_eq!(parent_handoff.count, 3);
+        assert_eq!(parent_handoff.sum, 6.0);
+
+        let queue = sm.queue_wait_ms.expect("queue wait should be present");
+        assert_eq!(queue.count, 3);
+        assert_eq!(queue.sum, 14.0);
     }
 
     #[test]
