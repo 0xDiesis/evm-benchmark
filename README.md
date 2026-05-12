@@ -100,7 +100,7 @@ All targets accept override variables on the command line. Defaults are shown in
 | `DURATION` | `30` | Duration in seconds (sustained mode) |
 | `SENDERS` | `200` | Number of sender accounts |
 | `BATCH_SIZE` | `200` | RPC batch submission size |
-| `WORKERS` | `8` | Number of async worker tasks. In burst mode this is the actual submission concurrency; use a value close to `SENDERS` when testing high fanout. |
+| `WORKERS` | `8` | Number of concurrent RPC batch submissions in burst mode. Sender fanout comes from `SENDERS`, not `WORKERS`. |
 | `TAG` | *(auto)* | Custom tag for the run directory |
 | `TEST_MODE` | `transfer` | Test mode: `transfer` or `evm` |
 
@@ -261,12 +261,18 @@ Override controls (optional):
 - `BENCH_PROMETHEUS_CAPTURE=true|false`
 - `BENCH_PROMETHEUS_URL=http://localhost:9090`
 - `BENCH_PROMETHEUS_AFTER_SETTLE_SECS=5`
+- `BENCH_HARNESS_METRICS_URL=<url>` (defaults to the Prometheus URL for Diesis)
+- `BENCH_SERVER_METRICS_AFTER_SETTLE_MS=5000`
 
 ## Environment Modes
 
 ### Clean (`ENV=clean`)
 
 Stops the chain, removes volumes, and restarts from genesis. Ensures no prior state affects results. This is the default.
+Diesis clean/local runs disable FEC by default because the local no-loss profile
+measured higher throughput without FEC stream fanout. Override with
+`BENCH_DIESIS_E2E_FEC_ENABLED=true` when comparing against geo-style transport
+settings.
 
 ### Geographic Latency (`ENV=geo-*`)
 
@@ -298,11 +304,12 @@ FEC shred sends are bounded per peer by
 `E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER` or
 `BENCH_GEO_E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER`; sweep this when
 `prometheus_diagnostics` shows `fec_broadcast` QUIC send failures.
-Clean/local and geo FEC payload batches target `16` data shreds by default via
+Geo FEC payload batches target `16` data shreds by default via
 `E2E_FEC_TARGET_DATA_SHREDS` or `BENCH_GEO_E2E_FEC_TARGET_DATA_SHREDS`.
 This keeps QUIC stream fanout lower before decode recovery becomes the limit.
 Raising the target creates smaller shreds and more streams; lowering it creates
-larger shreds and fewer streams.
+larger shreds and fewer streams. Clean/local runs only use this setting when
+FEC is explicitly re-enabled.
 For ceiling probes above the low-latency geo profile, sweep
 `BENCH_GEO_E2E_FEC_REDUNDANCY_RATIO`; `0.5` can recover more missing FEC groups
 at the cost of higher confirmation latency.
@@ -378,12 +385,15 @@ Every run captures `meta.json` with:
 - Benchmark parameters (txs, senders, batch size, workers, TPS, duration)
 - System information (OS, architecture, CPU count, memory)
 
-Diesis runs with Prometheus available also capture before/after snapshots, write
-deltas to `prometheus-delta.json`, and embed the same data under
+Diesis runs with Prometheus available also pass the Prometheus URL into the
+harness, capture before/after snapshots, write deltas to `prometheus-delta.json`,
+and embed the same data under
 `prometheus_diagnostics` in `report.json`. The deltas include aggregate
 consensus, payload, tx-source selection, commit uniqueness, QUIC, FEC, txpool,
 and pipeline metrics plus labeled breakdowns for decode failures, QUIC send
-failures, and transport hedging.
+failures, and transport hedging. The harness waits
+`BENCH_SERVER_METRICS_AFTER_SETTLE_MS` before collecting its after snapshot so
+async pipeline/finalization metrics have time to land.
 Use `make results-ledger` or `bench-targets/scripts/results.sh ledger` to turn
 those per-run reports into CSV, Markdown, JSON, or a console table. The ledger
 joins `meta.json` and `report.json` so each row includes the tested knobs
@@ -427,14 +437,14 @@ cargo run -p evm-benchmark --release -- \
 |------|---------|-------------|
 | `--rpc-endpoints` | `http://localhost:8545` | Comma-separated RPC URLs (round-robin failover) |
 | `--ws` | `ws://localhost:8546` | WebSocket endpoint for block tracking |
-| `--chain-id` | `19803` (auto-detects from RPC if available) | EVM chain ID |
+| `--chain-id` | `19803` | EVM chain ID used for signing |
 | `--execution` | `burst` | Mode: `burst`, `sustained`, `ceiling` |
 | `--test` | `transfer` | Test type: `transfer` or `evm` |
 | `--txs` | `10000` | Transaction count (burst) |
 | `--tps` | `100` | Target TPS (sustained/ceiling) |
 | `--duration` | `60` | Duration in seconds (sustained) |
 | `--senders` | `200` | Sender account count |
-| `--waves` | `8` | Submission waves (burst) |
+| `--waves` | `8` | Submission waves (burst); each active sender's nonce-ordered slice is partitioned across waves, then packed into RPC batches |
 | `--wave-delay-ms` | `0` | Delay between waves in ms (burst) |
 | `--workers` | `8` | Async worker count. Burst mode uses this directly instead of deriving concurrency from sender count. |
 | `--batch-size` | `100` | RPC batch size |
@@ -443,13 +453,13 @@ cargo run -p evm-benchmark --release -- \
 | `--bench-name` | `evm_bench_v1` | Label for results |
 | `--quiet` | off | Suppress console output |
 | `--submission-method` | `http` | `http` or `websocket` |
-| `--retry-profile` | `moderate` | Retry profile: `off`, `light`, `moderate`, `aggressive` |
+| `--retry-profile` | `light` | Retry profile: `off`, `light`, `moderate`, `aggressive` |
 | `--finality-confirmations` | `0` | Blocks deep before tx counts as confirmed |
 | `--setup` | off | Download bench-targets from GitHub and exit |
 | `--update-targets` | off | Re-download bench-targets before running |
 | `--targets-branch` | `main` | GitHub branch to download bench-targets from |
 
-Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CACHE_DIR` (pre-signed tx cache), `BENCH_EVM_TOKENS` / `BENCH_EVM_PAIRS` / `BENCH_EVM_NFTS` (contract addresses for EVM mode).
+Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CACHE_DIR` (cache API directory), `BENCH_EVM_TOKENS` / `BENCH_EVM_PAIRS` / `BENCH_EVM_NFTS` (comma-separated contract addresses for EVM mode).
 
 ## Repository Layout
 

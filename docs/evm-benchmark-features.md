@@ -82,7 +82,8 @@ confirmed TPS.
 For isolated e2e runs started from a clean chain, `BENCH_ASSUME_ISOLATED_BLOCKS`
 can be set to `true` so the harness also counts unmatched transactions in blocks
 after the benchmark start block as confirmed benchmark traffic. The bench target
-scripts enable this by default after pre-funding and before the measured run.
+scripts leave this disabled by default so public benchmark claims use strict
+hash/receipt matching.
 
 ### Confirmation Tracking
 
@@ -97,14 +98,16 @@ Latency is measured as `poll_start - submit_time` using monotonic `Instant` time
 
 ### Per-Wave Latency Tracking
 
-Burst mode tracks latency per sender wave:
-- Each sender's batch gets a wave index
+Burst mode tracks latency per configured submission wave:
+- Each active sender's nonce-ordered transaction slice is partitioned across `--waves`
+- Each wave is packed into RPC batches and submitted with `--workers` concurrency before the next wave delay
 - `per_wave` in report output contains `{wave, count, p50, p95, p99, max}` per wave
 - Enables diagnosing whether later waves see higher latency (txpool pressure)
 
 ### Transaction Caching
 
-Pre-signed transactions can be cached to disk for reproducible benchmarks:
+Pre-signed transaction caching is available as a library API for reproducible
+benchmark tooling:
 
 ```bash
 # Cache is stored in BENCH_TX_CACHE_DIR (default: $TMPDIR/.tx-cache/)
@@ -114,29 +117,33 @@ export BENCH_TX_CACHE_DIR=/tmp/bench-cache
 - **Fingerprint**: FNV-1a hash of `(chain_id, mode, sender_count, tx_count, gas_price)`
 - **Format**: JSON with version, fingerprint validation, hex-encoded raw txs
 - **API**: `cache::save()`, `cache::try_load()`, `cache::restore_txs()`
-- Eliminates signing overhead on repeated runs with identical parameters
+- The built-in burst/sustained runners still pre-sign fresh transactions for each run
 
 ### EVM Workload Generator
 
-Mixed EVM transaction workloads matching the Node.js benchmark contracts:
+Mixed EVM transaction workloads matching the benchmark contracts. EVM mode
+requires token and NFT contract addresses from `--fund` deployment or
+`BENCH_EVM_TOKENS` / `BENCH_EVM_NFTS`; AMM pairs are optional unless swap weight
+is non-zero.
 
 | Transaction Type | Method Selector | Gas Limit | Description |
 |-----------------|----------------|-----------|-------------|
 | ERC20 Transfer | `0xa9059cbb` | 65,000 | `transfer(address,uint256)` |
-| ERC20 Mint | `0x40c10f19` | 65,000 | `mint(address,uint256)` |
-| ERC20 Approve | `0x095ea7b3` | 65,000 | `approve(address,uint256)` |
+| ERC20 Mint | `0x40c10f19` | 80,000 | `mint(address,uint256)` |
+| ERC20 Approve | `0x095ea7b3` | 60,000 | `approve(address,uint256)` |
 | Swap | `0x89c0fb5d` | 120,000 | `swap(uint256,bool)` |
-| NFT Mint | `0xa0712d68` | 150,000 | `mint(uint256)` |
+| NFT Mint | `0x6a627842` | 150,000 | `mint(address)` |
 | ETH Transfer | — | 21,000 | Plain value transfer |
 
 Configurable mix ratios via `EvmMixConfig`:
 ```rust
 EvmMixConfig {
-    erc20_transfer: 40,  // 40% ERC20 transfers
-    swap: 25,            // 25% swaps
-    nft_mint: 15,        // 15% NFT mints
-    erc20_mint: 10,      // 10% ERC20 mints
-    eth_transfer: 10,    // 10% plain transfers
+    erc20_mint_pct: 30.0,
+    erc20_transfer_pct: 0.0, // requires pre-existing token balances
+    erc20_approve_pct: 15.0,
+    swap_pct: 0.0,           // requires pre-existing liquidity
+    nft_mint_pct: 30.0,
+    eth_transfer_pct: 25.0,
     ..Default::default()
 }
 ```
@@ -306,8 +313,8 @@ Configurable exponential backoff + random jitter for transaction submission. Cho
 | Profile | Max Attempts | Base Delay | Jitter | Use Case |
 |---------|-------------|-----------|--------|----------|
 | `off` | 1 | — | — | Fire-and-forget (no retry) |
-| `light` | 3 | 10ms | 10ms | Stable chain, Ethereum mainnet |
-| `moderate` (default) | 4 | 20ms | 20ms | Most public chains |
+| `light` (default) | 3 | 10ms | 10ms | Stable chain, Ethereum mainnet |
+| `moderate` | 4 | 20ms | 20ms | Most public chains |
 | `aggressive` | 5 | 30ms | 30ms | High-congestion or unstable chains |
 
 **Backoff Formula:** `delay = base_delay × 2^(attempt−2) + random(0, jitter_ms)`

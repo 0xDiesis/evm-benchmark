@@ -95,18 +95,20 @@ crates/evm-benchmark/
 
 ### Per-Wave Latency Tracking
 
-Each sender wave gets a wave index. Report includes `per_wave` array with
-`{wave, count, p50, p95, p99, max}` per wave for diagnosing txpool pressure.
+Burst mode partitions each active sender's nonce-ordered transaction slice
+across the configured `--waves`, then packs each wave back into RPC batches.
+Report includes `per_wave` array with `{wave, count, p50, p95, p99, max}` per
+wave for diagnosing txpool pressure.
 
 ### Transaction Caching
 
-Pre-signed txs cached to disk as JSON with FNV-1a fingerprinting. Eliminates
-signing overhead on repeated runs. API: `cache::save()`, `cache::try_load()`,
-`cache::restore_txs()`.
+Pre-signed txs can be cached to disk as JSON with FNV-1a fingerprinting through
+the library API: `cache::save()`, `cache::try_load()`, `cache::restore_txs()`.
+The built-in runners still pre-sign fresh transactions for each run.
 
 ### EVM Workload Generator
 
-Mixed workloads with 7 method selectors matching benchmark contracts:
+Mixed workloads with benchmark contract selectors:
 ERC20 transfer/mint/approve, swap, NFT mint, ETH transfer. Configurable
 mix ratios via `EvmMixConfig` with Zipf-like distribution.
 
