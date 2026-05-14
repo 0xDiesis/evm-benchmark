@@ -149,6 +149,13 @@ pub struct Args {
     /// Git branch to download bench-targets from (used with --setup or --update-targets).
     #[arg(long, default_value = "main")]
     pub targets_branch: String,
+
+    /// Directory containing bench-targets (chain configs, Docker compose files,
+    /// scripts). Overrides the default, which looks alongside the binary or
+    /// falls back to ./bench-targets in the current working directory.
+    /// Can also be set via the EVM_BENCHMARK_TARGETS_DIR environment variable.
+    #[arg(long, env = "EVM_BENCHMARK_TARGETS_DIR")]
+    pub targets_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -392,6 +399,7 @@ mod tests {
             setup: false,
             update_targets: false,
             targets_branch: "main".to_string(),
+            targets_dir: None,
         }
     }
 

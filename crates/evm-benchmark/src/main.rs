@@ -323,17 +323,20 @@ fn prepare_run<R: BufRead>(
     stdin: &mut R,
     deps: &RuntimeDeps,
 ) -> anyhow::Result<Option<config::Config>> {
+    let targets_dir = args
+        .targets_dir
+        .clone()
+        .unwrap_or_else(setup::default_targets_dir);
+
     if args.setup || args.update_targets {
-        let dest = setup::default_targets_dir();
         let branch = args.targets_branch.clone();
         let runtime = tokio::runtime::Runtime::new()?;
-        runtime.block_on((deps.download_targets)(&dest, Some(&branch)))?;
+        runtime.block_on((deps.download_targets)(&targets_dir, Some(&branch)))?;
         if args.setup {
             return Ok(None);
         }
     }
 
-    let targets_dir = setup::default_targets_dir();
     if !setup::targets_exist(&targets_dir) {
         eprintln!("Bench-targets not found at {}", targets_dir.display());
         eprint!("Download the latest bench-targets from GitHub? [Y/n] ");
@@ -562,6 +565,7 @@ mod tests {
             setup: false,
             update_targets: false,
             targets_branch: "main".to_string(),
+            targets_dir: None,
         }
     }
 
@@ -1103,6 +1107,42 @@ mod tests {
             .expect("update-targets path should still build config");
         assert!(result.is_some());
         assert_eq!(downloads.lock().expect("lock poisoned").len(), 1);
+    }
+
+    #[test]
+    fn test_prepare_run_honors_explicit_targets_dir() {
+        let _guard = test_lock().lock().expect("lock poisoned");
+        let cwd_temp = temp_dir("evm-bench-explicit-cwd");
+        let _cwd = CurrentDirGuard::set(&cwd_temp);
+        let explicit = temp_dir("evm-bench-explicit-targets");
+
+        let downloads = Arc::new(Mutex::new(Vec::new()));
+        let download_calls = downloads.clone();
+        let deps = RuntimeDeps {
+            download_targets: Box::new(move |dest, branch| {
+                let download_calls = download_calls.clone();
+                let dest = dest.to_path_buf();
+                let branch = branch.map(str::to_owned);
+                Box::pin(async move {
+                    download_calls
+                        .lock()
+                        .expect("lock poisoned")
+                        .push((dest, branch));
+                    Ok(())
+                })
+            }),
+            ..default_test_deps()
+        };
+
+        let mut args = sample_args("http://localhost:8545");
+        args.setup = true;
+        args.targets_dir = Some(explicit.clone());
+        let mut empty_input = std::io::Cursor::new(Vec::<u8>::new());
+        prepare_run(args, &mut empty_input, &deps).expect("setup with explicit dir should succeed");
+
+        let calls = downloads.lock().expect("lock poisoned");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, explicit);
     }
 
     #[test]
