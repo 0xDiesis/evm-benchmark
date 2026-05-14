@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.95.0
@@ -43,7 +43,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Cache Foundry build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             contracts/cache
@@ -58,7 +58,7 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Restore Rust Doublcov history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .doublcov/history.json
           key: doublcov-rust-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -80,13 +80,13 @@ jobs:
 
       - name: Save Rust Doublcov history
         if: always() && hashFiles('.doublcov/history.json') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .doublcov/history.json
           key: doublcov-rust-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Restore contracts Doublcov history
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: contracts/.doublcov/history.json
           key: doublcov-contracts-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -112,14 +112,14 @@ jobs:
 
       - name: Save contracts Doublcov history
         if: always() && hashFiles('contracts/.doublcov/history.json') != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: contracts/.doublcov/history.json
           key: doublcov-contracts-history-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload Doublcov report
         if: always() && hashFiles('coverage/report/index.html', 'contracts/coverage/report/index.html') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: doublcov-report
           path: |
@@ -129,7 +129,7 @@ jobs:
 
       - name: Upload coverage data
         if: always() && hashFiles('coverage/lcov.info', 'contracts/coverage/lcov.info') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: doublcov-data
           path: |
@@ -159,7 +159,7 @@ jobs:
 
       - name: Upload Pages artifact
         if: vars.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && hashFiles('pages/coverage/rust/index.html', 'pages/coverage/contracts/index.html') != ''
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: pages
 
@@ -188,7 +188,7 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}coverage/
     steps:
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Deploy to GitHub Pages
         id: deployment
