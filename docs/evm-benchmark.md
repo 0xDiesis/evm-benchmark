@@ -3,22 +3,19 @@
 ## Overview
 
 High-performance Rust load testing harness for EVM network benchmarking,
-with chain-agnostic presets and debugging workflows. It replaces the older
-Node.js benchmarking system and achieves 60-120x faster signing and
-10-17x faster submission with production-ready code quality, comprehensive test
-coverage, and validated E2E performance.
+with chain-agnostic presets and debugging workflows.
 
 For detailed feature documentation and usage, see
 [evm-benchmark-features.md](evm-benchmark-features.md).
 
-### Key Results
+### Performance Envelope
 
-| Metric           | Node.js       | Rust           | Speedup     |
-|------------------|---------------|----------------|-------------|
-| Signing Rate     | 1-3k txs/sec  | 33k-150k/sec   | 60-120x     |
-| Max TPS          | 100-150       | 3,740+         | 25-37x      |
-| Memory           | 200-500 MB    | <100 MB        | 2-5x lower  |
-| GC Pauses        | Yes           | None           | -           |
+| Metric       | Value         |
+|--------------|---------------|
+| Signing Rate | 33k-150k/sec  |
+| Max TPS      | 3,740+        |
+| Memory       | <100 MB       |
+| GC Pauses    | None          |
 
 ---
 
