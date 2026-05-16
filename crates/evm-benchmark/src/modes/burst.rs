@@ -2430,9 +2430,9 @@ mod tests {
     fn test_nonce_range_distribution() {
         let base_nonces = [10u64, 20u64, 30u64];
 
-        for sender_idx in 0..base_nonces.len() {
-            let nonce_start = base_nonces[sender_idx];
-            assert_eq!(nonce_start, base_nonces[sender_idx]);
+        for &base_nonce in &base_nonces {
+            let nonce_start = base_nonce;
+            assert_eq!(nonce_start, base_nonce);
         }
     }
 }
