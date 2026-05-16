@@ -64,7 +64,8 @@ contract BenchmarkTokenTest is Test {
 
         vm.prank(bob);
         vm.expectRevert(BenchmarkToken.InsufficientBalance.selector);
-        token.transferFrom(alice, bob, 200e18);
+        bool success = token.transferFrom(alice, bob, 200e18);
+        assertFalse(success);
     }
 
     function test_transferFrom_reverts_insufficient_allowance() public {
@@ -74,6 +75,7 @@ contract BenchmarkTokenTest is Test {
 
         vm.prank(bob);
         vm.expectRevert(BenchmarkToken.InsufficientAllowance.selector);
-        token.transferFrom(alice, bob, 100e18);
+        bool success = token.transferFrom(alice, bob, 100e18);
+        assertFalse(success);
     }
 }
