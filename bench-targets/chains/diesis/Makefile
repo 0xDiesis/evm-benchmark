@@ -32,7 +32,7 @@ bench-ceiling: ## Run a ceiling benchmark against Diesis
 	@bash ./run-bench.sh --execution ceiling --tps 200
 
 status: ## Check block heights on the Diesis e2e validators
-	@for port in 8545 8555 8565 8575; do \
+	@for port in 18545 18555 18565 18575; do \
 		height=$$(curl -sf http://localhost:$$port \
 			-X POST -H "Content-Type: application/json" \
 			-d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' 2>/dev/null | \

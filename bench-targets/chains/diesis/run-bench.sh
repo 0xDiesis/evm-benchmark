@@ -6,8 +6,8 @@ BENCH_REPO_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-${BENCH_REPO_DIR}/../diesis}"
 HARNESS_MANIFEST="${BENCH_REPO_DIR}/crates/evm-benchmark/Cargo.toml"
 
-DIESIS_RPC="${DIESIS_RPC:-http://localhost:8545,http://localhost:8555,http://localhost:8565,http://localhost:8575}"
-DIESIS_WS="${DIESIS_WS:-ws://localhost:8546}"
+DIESIS_RPC="${DIESIS_RPC:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
+DIESIS_WS="${DIESIS_WS:-ws://localhost:18546}"
 DIESIS_CHAIN_ID="${DIESIS_CHAIN_ID:-19803}"
 BENCH_NAME="${BENCH_NAME:-diesis_local}"
 BENCH_OUT="${BENCH_OUT:-${SCRIPT_DIR}/report.json}"
@@ -44,10 +44,10 @@ if [[ "$has_sender_override" == "true" && "$has_funding" != "true" ]] &&
     exit 1
 fi
 
-if ! curl -sf http://localhost:8545 \
+if ! curl -sf "${DIESIS_RPC%%,*}" \
     -X POST -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' >/dev/null 2>&1; then
-    echo "Diesis node is not reachable on :8545"
+    echo "Diesis node is not reachable at ${DIESIS_RPC%%,*}"
     echo "Start it with: make -C \"${DIESIS_REPO_DIR}\" e2e-up-release"
     exit 1
 fi
