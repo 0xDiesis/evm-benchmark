@@ -38,8 +38,15 @@ Container eth0
 └─────────────────────────────────┘
 ```
 
-Each side applies half the RTT. Jitter is 15% of the one-way delay with a normal
-distribution, closely matching real-world WAN variance.
+Each side applies half the RTT, so the measured round trip equals the matrix
+RTT. Beyond propagation delay, each layout also models real link quality:
+normal-distributed jitter that is **decoupled from distance and capped** (a few
+ms on stable backbone links, large and uncapped only on congested layouts), and
+**correlated/bursty per-direction packet loss**. Loss matters: long-haul links
+are never lossless, and it is loss — not delay — that exercises the retransmit
+and FEC shred-repair paths, so loss/FEC sweeps run under these layouts reflect
+real-world conditions. Per-layout jitter and loss values are listed by
+`./network-topology.sh layouts`.
 
 ## Quick Start
 
@@ -178,8 +185,15 @@ This script:
 5. **Split RTT** — Each side applies half the round-trip delay. Node A adds 30ms
    toward node B, and node B adds 30ms toward node A = 60ms RTT.
 
-6. **Normal distribution jitter** — 15% of the one-way delay. So 30ms ± 4.5ms
-   means ~68% of packets arrive within 25.5-34.5ms, ~95% within 21-39ms.
+6. **Normal-distribution jitter** — a per-layout percentage of the one-way delay
+   with an absolute cap, so a stable 120ms-one-way backbone link jitters by only
+   a few ms (cap) rather than tens of ms. Congested layouts raise the percentage
+   and drop the cap for heavy variance.
+
+7. **Correlated packet loss** — each delayed link also drops a per-layout
+   percentage of packets per direction, with a loss correlation that makes losses
+   bursty (Gilbert-Elliott-style) rather than independent — closer to how real
+   links fail, and the condition FEC shred repair is designed to survive.
 
 ## Commands
 
