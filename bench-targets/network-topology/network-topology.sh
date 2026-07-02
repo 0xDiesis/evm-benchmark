@@ -18,6 +18,9 @@ set -euo pipefail
 #   global-spread:  US-East, US-West, EU-Frankfurt, Asia-Tokyo
 #   us-distributed: US-East, US-West, US-Central, US-South
 #   eu-cluster:     EU-Frankfurt x3 + US-East outlier
+#   se-asia-regional: Singapore, Jakarta, Bangkok, Manila
+#   europe-regional:  London, Frankfurt, Dublin, Paris
+#   south-america-regional: São Paulo, Santiago, Buenos Aires, Bogotá
 #   degraded-wan:   All links congested with high jitter
 #
 # Requirements:
@@ -126,6 +129,51 @@ define_layout_eu_cluster() {
     LAYOUT[3:0]=90; LAYOUT[3:1]=90;  LAYOUT[3:2]=90;  LAYOUT[3:3]=0
 }
 
+define_layout_se_asia_regional() {
+    # Simulates a Southeast Asia validator set with all nodes in-region.
+    # node-1=Singapore, node-2=Jakarta, node-3=Bangkok, node-4=Manila.
+    LAYOUT_NAME="se-asia-regional"
+    LAYOUT_DESC="Singapore, Jakarta, Bangkok, Manila"
+    LAYOUT_LOCATIONS=("Asia/Singapore" "Asia/Jakarta" "Asia/Bangkok" "Asia/Manila")
+    # Regional submarine and metro links: moderate jitter, low bursty loss.
+    LAYOUT_JITTER_PCT=5; LAYOUT_JITTER_CAP_MS=4
+    LAYOUT_LOSS_PCT=0.08; LAYOUT_LOSS_CORR_PCT=25
+    LAYOUT[0:0]=0;  LAYOUT[0:1]=25; LAYOUT[0:2]=30; LAYOUT[0:3]=40
+    LAYOUT[1:0]=25; LAYOUT[1:1]=0;  LAYOUT[1:2]=45; LAYOUT[1:3]=55
+    LAYOUT[2:0]=30; LAYOUT[2:1]=45; LAYOUT[2:2]=0;  LAYOUT[2:3]=65
+    LAYOUT[3:0]=40; LAYOUT[3:1]=55; LAYOUT[3:2]=65; LAYOUT[3:3]=0
+}
+
+define_layout_europe_regional() {
+    # Simulates a Europe-only validator set across common western EU hubs.
+    # node-1=London, node-2=Frankfurt, node-3=Dublin, node-4=Paris.
+    LAYOUT_NAME="europe-regional"
+    LAYOUT_DESC="London, Frankfurt, Dublin, Paris"
+    LAYOUT_LOCATIONS=("EU/London" "EU/Frankfurt" "EU/Dublin" "EU/Paris")
+    # Dense European backbone: low jitter and near-zero loss.
+    LAYOUT_JITTER_PCT=3; LAYOUT_JITTER_CAP_MS=3
+    LAYOUT_LOSS_PCT=0.03; LAYOUT_LOSS_CORR_PCT=25
+    LAYOUT[0:0]=0;  LAYOUT[0:1]=20; LAYOUT[0:2]=12; LAYOUT[0:3]=10
+    LAYOUT[1:0]=20; LAYOUT[1:1]=0;  LAYOUT[1:2]=25; LAYOUT[1:3]=12
+    LAYOUT[2:0]=12; LAYOUT[2:1]=25; LAYOUT[2:2]=0;  LAYOUT[2:3]=18
+    LAYOUT[3:0]=10; LAYOUT[3:1]=12; LAYOUT[3:2]=18; LAYOUT[3:3]=0
+}
+
+define_layout_south_america_regional() {
+    # Simulates a South America validator set across major regional hubs.
+    # node-1=São Paulo, node-2=Santiago, node-3=Buenos Aires, node-4=Bogotá.
+    LAYOUT_NAME="south-america-regional"
+    LAYOUT_DESC="São Paulo, Santiago, Buenos Aires, Bogotá"
+    LAYOUT_LOCATIONS=("SA/São Paulo" "SA/Santiago" "SA/Buenos Aires" "SA/Bogotá")
+    # Regional paths are longer and peering is less uniform than US/EU.
+    LAYOUT_JITTER_PCT=6; LAYOUT_JITTER_CAP_MS=6
+    LAYOUT_LOSS_PCT=0.12; LAYOUT_LOSS_CORR_PCT=25
+    LAYOUT[0:0]=0;   LAYOUT[0:1]=60;  LAYOUT[0:2]=35; LAYOUT[0:3]=100
+    LAYOUT[1:0]=60;  LAYOUT[1:1]=0;   LAYOUT[1:2]=45; LAYOUT[1:3]=90
+    LAYOUT[2:0]=35;  LAYOUT[2:1]=45;  LAYOUT[2:2]=0;  LAYOUT[2:3]=105
+    LAYOUT[3:0]=100; LAYOUT[3:1]=90;  LAYOUT[3:2]=105; LAYOUT[3:3]=0
+}
+
 define_layout_degraded_wan() {
     # All links have high baseline latency + heavy jitter. Simulates congested/
     # unreliable network conditions (peak traffic, DDoS mitigation, poor peering).
@@ -171,11 +219,14 @@ load_layout() {
         global-spread)      define_layout_global_spread ;;
         us-distributed)     define_layout_us_distributed ;;
         eu-cluster)         define_layout_eu_cluster ;;
+        se-asia-regional)   define_layout_se_asia_regional ;;
+        europe-regional)    define_layout_europe_regional ;;
+        south-america-regional) define_layout_south_america_regional ;;
         degraded-wan)       define_layout_degraded_wan ;;
         intercontinental)   define_layout_intercontinental ;;
         *)
             echo "ERROR: Unknown layout '${name}'." >&2
-            echo "Available layouts: global-spread, us-distributed, eu-cluster, degraded-wan, intercontinental" >&2
+            echo "Available layouts: global-spread, us-distributed, eu-cluster, se-asia-regional, europe-regional, south-america-regional, degraded-wan, intercontinental" >&2
             exit 1
             ;;
     esac
@@ -484,7 +535,7 @@ cmd_layouts() {
     echo "Available network topology layouts:"
     echo ""
 
-    for layout in global-spread us-distributed eu-cluster degraded-wan intercontinental; do
+    for layout in global-spread us-distributed eu-cluster se-asia-regional europe-regional south-america-regional degraded-wan intercontinental; do
         load_layout "$layout"
         echo "  ${LAYOUT_NAME}"
         echo "    ${LAYOUT_DESC}"

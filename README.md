@@ -94,7 +94,7 @@ All targets accept override variables on the command line. Defaults are shown in
 |----------|---------|-------------|
 | `CHAIN` | `diesis` | Target chain (see `make chains` for options) |
 | `MODE` | `burst` | Execution mode: `burst`, `sustained`, `ceiling` |
-| `ENV` | `clean` | Environment: `clean`, `geo-global`, `geo-us`, `geo-eu`, `geo-degraded`, `geo-intercontinental` |
+| `ENV` | `clean` | Environment: `clean`, `geo-global`, `geo-us`, `geo-eu`, `geo-se-asia`, `geo-europe`, `geo-south-america`, `geo-degraded`, `geo-intercontinental` |
 | `TXS` | `10000` | Transaction count (burst mode) |
 | `TPS` | `200` | Target TPS (sustained/ceiling modes) |
 | `DURATION` | `30` | Duration in seconds (sustained mode) |
@@ -283,6 +283,9 @@ Applies network topology simulation before benchmarking using Linux TC (traffic 
 | `geo-global` | `global-spread` | 60-240ms | 4%, cap 5ms | 0.1% bursty | US-East / US-West / EU-Frankfurt / Asia-Tokyo |
 | `geo-us` | `us-distributed` | 20-60ms | 3%, cap 3ms | 0.02% bursty | Four US regions |
 | `geo-eu` | `eu-cluster` | 2-90ms | 4%, cap 4ms | 0.05% bursty | 3 EU co-located + 1 US outlier |
+| `geo-se-asia` | `se-asia-regional` | 25-65ms | 5%, cap 4ms | 0.08% bursty | Singapore / Jakarta / Bangkok / Manila |
+| `geo-europe` | `europe-regional` | 10-25ms | 3%, cap 3ms | 0.03% bursty | London / Frankfurt / Dublin / Paris |
+| `geo-south-america` | `south-america-regional` | 35-105ms | 6%, cap 6ms | 0.12% bursty | São Paulo / Santiago / Buenos Aires / Bogotá |
 | `geo-degraded` | `degraded-wan` | 80-200ms | 30%, uncapped | 1.5% bursty | Congested network, high jitter |
 | `geo-intercontinental` | `intercontinental` | 75-340ms | 5%, cap 6ms | 0.3% bursty | US / EU / Asia / South America |
 

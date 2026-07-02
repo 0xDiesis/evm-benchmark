@@ -1,4 +1,4 @@
-.PHONY: build test clippy fmt check quality quality-fix help \
+.PHONY: build test clippy fmt check quality quality-fix clean-rust help \
        bench bench-all compare compare-all \
        sweep sweep-all sweep-list \
        results results-latest results-compare results-ledger results-summary \
@@ -57,6 +57,9 @@ quality: ## Run static quality checks
 quality-fix: ## Apply automatic quality fixes where available
 	$(CARGO) fmt --all
 	$(CARGO) clippy --fix --manifest-path $(HARNESS_MANIFEST) --allow-dirty --allow-staged -- -D warnings
+
+clean-rust: ## Remove generated Rust build artifacts
+	rm -rf target
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Benchmark contract bytecode
