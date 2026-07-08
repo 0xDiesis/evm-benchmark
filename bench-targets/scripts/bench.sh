@@ -48,7 +48,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [options]"
             echo "  --chain <name>       Chain (default: diesis)"
             echo "  --mode <mode>        burst|sustained|ceiling (default: burst)"
-            echo "  --env <env>          clean|geo-global|geo-us|geo-eu|geo-degraded|geo-intercontinental (default: clean)"
+            echo "  --env <env>          clean|geo-global|geo-us|geo-eu|geo-se-asia|geo-europe|geo-south-america|geo-degraded|geo-intercontinental (default: clean)"
             echo "  --tag <tag>          Custom run tag (default: value of --env)"
             echo "  --txs <n>            Burst tx count (default: 2000)"
             echo "  --tps <n>            Target TPS for sustained/ceiling (default: 200)"
@@ -121,6 +121,9 @@ env_to_layout() {
         geo-global)           echo "global-spread" ;;
         geo-us)               echo "us-distributed" ;;
         geo-eu)               echo "eu-cluster" ;;
+        geo-se-asia)          echo "se-asia-regional" ;;
+        geo-europe)           echo "europe-regional" ;;
+        geo-south-america)    echo "south-america-regional" ;;
         geo-degraded)         echo "degraded-wan" ;;
         geo-intercontinental) echo "intercontinental" ;;
         *)                    echo "" ;;
@@ -177,7 +180,7 @@ geo_chain_overrides() {
     # full confirmation. 650ms blocks overran the safe envelope under the same
     # workload, so keep the block period above 3x the worst directed RTT.
     case "${env_name}" in
-        geo-eu|geo-us|geo-global|geo-degraded)
+        geo-eu|geo-us|geo-se-asia|geo-europe|geo-south-america|geo-global|geo-degraded)
             block_period="750ms"; ordering_window="240ms"; min_round_delay="100ms"
             leader_timeout="480"
             prop_threshold="40" ;;

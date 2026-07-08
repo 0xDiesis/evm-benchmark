@@ -25,6 +25,9 @@ RUNS_DIR = RESULTS_DIR / "runs"
 GEO_MAX_RTT_MS = {
     "geo-eu": 90.0,
     "geo-us": 60.0,
+    "geo-se-asia": 65.0,
+    "geo-europe": 25.0,
+    "geo-south-america": 105.0,
     "geo-global": 240.0,
     "geo-degraded": 200.0,
     "geo-intercontinental": 340.0,

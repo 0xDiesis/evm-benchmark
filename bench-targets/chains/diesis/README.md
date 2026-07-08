@@ -7,7 +7,7 @@ Operational playbooks for the Diesis chain (cluster bring-up, sweeps, geo profil
 ## Assumptions
 
 - If you have a checkout of the Diesis source repository, place it at `../diesis/` (or set `DIESIS_REPO_DIR` to its path). Without it, only the chain-targeting scripts that talk to an already-running cluster will work.
-- Diesis e2e validators expose RPC on `8545, 8555, 8565, 8575`
+- Diesis e2e validators expose RPC on `18545, 18555, 18565, 18575`
 - The default benchmark keys are the deterministic validator keys from Diesis genesis
 
 ## Quick Start
@@ -22,8 +22,8 @@ make down
 ## Defaults
 
 - Chain ID: `19803`
-- RPC endpoints: `http://localhost:8545,http://localhost:8555,http://localhost:8565,http://localhost:8575`
-- WS endpoint: `ws://localhost:8546`
+- RPC endpoints: `http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575`
+- WS endpoint: `ws://localhost:18546`
 - Benchmark keys: deterministic validator keys `1-4`
 
 Override `DIESIS_REPO_DIR`, `DIESIS_RPC`, `DIESIS_WS`, `DIESIS_CHAIN_ID`, `BENCH_KEY`, `BENCH_NAME`, or `BENCH_OUT` as needed.

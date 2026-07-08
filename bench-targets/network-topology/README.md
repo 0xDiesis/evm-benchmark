@@ -38,8 +38,15 @@ Container eth0
 └─────────────────────────────────┘
 ```
 
-Each side applies half the RTT. Jitter is 15% of the one-way delay with a normal
-distribution, closely matching real-world WAN variance.
+Each side applies half the RTT, so the measured round trip equals the matrix
+RTT. Beyond propagation delay, each layout also models real link quality:
+normal-distributed jitter that is **decoupled from distance and capped** (a few
+ms on stable backbone links, large and uncapped only on congested layouts), and
+**correlated/bursty per-direction packet loss**. Loss matters: long-haul links
+are never lossless, and it is loss — not delay — that exercises the retransmit
+and FEC shred-repair paths, so loss/FEC sweeps run under these layouts reflect
+real-world conditions. Per-layout jitter and loss values are listed by
+`./network-topology.sh layouts`.
 
 ## Quick Start
 
@@ -62,7 +69,7 @@ NODE4_CONTAINER=sonic-node-4 NODE4_IP=10.101.0.14 \
 
 ## Geographic Layouts
 
-Five layouts based on real-world submarine cable and terrestrial backbone
+Eight layouts based on real-world submarine cable and terrestrial backbone
 measurements. Each defines a full pairwise RTT matrix.
 
 ### `global-spread` — Worldwide (60-240ms)
@@ -103,6 +110,45 @@ EU-Frank-1    —       2ms     2ms     90ms
 EU-Frank-2    2ms     —       2ms     90ms
 EU-Frank-3    2ms     2ms     —       90ms
 US-East       90ms    90ms    90ms    —
+```
+
+### `se-asia-regional` — Southeast Asia Regional (25-65ms)
+
+Four validators in Southeast Asia. This models a regional deployment that avoids
+full intercontinental paths while still crossing national and island links.
+
+```
+              Singapore Jakarta  Bangkok  Manila
+Singapore     —         25ms     30ms     40ms
+Jakarta       25ms      —        45ms     55ms
+Bangkok       30ms      45ms     —        65ms
+Manila        40ms      55ms     65ms     —
+```
+
+### `europe-regional` — Europe Regional (10-25ms)
+
+Four validators across common western European infrastructure hubs. This is a
+low-latency regional profile without the US-East outlier used by `eu-cluster`.
+
+```
+              London  Frankfurt Dublin  Paris
+London        —       20ms      12ms    10ms
+Frankfurt     20ms    —         25ms    12ms
+Dublin        12ms    25ms      —       18ms
+Paris         10ms    12ms      18ms    —
+```
+
+### `south-america-regional` — South America Regional (35-105ms)
+
+Four validators across major South American hubs. This captures a wider
+regional spread where peering paths are less uniform than US or western Europe.
+
+```
+              Sao Paulo Santiago Buenos Aires Bogota
+Sao Paulo     —         60ms     35ms         100ms
+Santiago      60ms      —        45ms         90ms
+Buenos Aires  35ms      45ms     —            105ms
+Bogota        100ms     90ms     105ms        —
 ```
 
 ### `intercontinental` — 4 Continents (75-340ms)
@@ -178,8 +224,15 @@ This script:
 5. **Split RTT** — Each side applies half the round-trip delay. Node A adds 30ms
    toward node B, and node B adds 30ms toward node A = 60ms RTT.
 
-6. **Normal distribution jitter** — 15% of the one-way delay. So 30ms ± 4.5ms
-   means ~68% of packets arrive within 25.5-34.5ms, ~95% within 21-39ms.
+6. **Normal-distribution jitter** — a per-layout percentage of the one-way delay
+   with an absolute cap, so a stable 120ms-one-way backbone link jitters by only
+   a few ms (cap) rather than tens of ms. Congested layouts raise the percentage
+   and drop the cap for heavy variance.
+
+7. **Correlated packet loss** — each delayed link also drops a per-layout
+   percentage of packets per direction, with a loss correlation that makes losses
+   bursty (Gilbert-Elliott-style) rather than independent — closer to how real
+   links fail, and the condition FEC shred repair is designed to survive.
 
 ## Commands
 

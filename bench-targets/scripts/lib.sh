@@ -141,8 +141,8 @@ wait_for_block_advance() {
 _REGISTERED_CHAINS="diesis sonic sei avalanche anvil geth reth berachain bsc cosmos optimism arbitrum scroll"
 
 chain_config_diesis() {
-    CHAIN_RPC="http://localhost:8545,http://localhost:8555,http://localhost:8565,http://localhost:8575"
-    CHAIN_WS="ws://localhost:8546"
+    CHAIN_RPC="${DIESIS_RPC:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
+    CHAIN_WS="${DIESIS_WS:-ws://localhost:18546}"
     CHAIN_CHAIN_ID=19803
     CHAIN_KEYS="0x0000000000000000000000000000000000000000000000000000000000000001,0x0000000000000000000000000000000000000000000000000000000000000002,0x0000000000000000000000000000000000000000000000000000000000000003,0x0000000000000000000000000000000000000000000000000000000000000004"
     local _tag
@@ -155,7 +155,7 @@ chain_config_diesis() {
     CHAIN_REBUILD_CMD="make -C ${DIESIS_REPO_DIR} e2e-rebuild E2E_IMAGE_TAG=${_tag}"
     CHAIN_REBUILD_DEV_CMD="make -C ${DIESIS_REPO_DIR} e2e-rebuild-dev E2E_IMAGE_TAG=${_tag}-dev"
     CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
-    CHAIN_STATUS_CMD="curl -sf http://localhost:8545 -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
+    CHAIN_STATUS_CMD="curl -sf ${CHAIN_RPC%%,*} -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
     CHAIN_TYPE="L1 (Mysticeti BFT, 4 validators)"
     # Topology overrides — container names and static IPs for network-topology.sh
     CHAIN_TOPOLOGY_ENV="NODE1_CONTAINER=diesis-e2e-node-1 NODE1_IP=10.100.0.11 NODE2_CONTAINER=diesis-e2e-node-2 NODE2_IP=10.100.0.12 NODE3_CONTAINER=diesis-e2e-node-3 NODE3_IP=10.100.0.13 NODE4_CONTAINER=diesis-e2e-node-4 NODE4_IP=10.100.0.14"

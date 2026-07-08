@@ -18,6 +18,9 @@ set -euo pipefail
 #   global-spread:  US-East, US-West, EU-Frankfurt, Asia-Tokyo
 #   us-distributed: US-East, US-West, US-Central, US-South
 #   eu-cluster:     EU-Frankfurt x3 + US-East outlier
+#   se-asia-regional: Singapore, Jakarta, Bangkok, Manila
+#   europe-regional:  London, Frankfurt, Dublin, Paris
+#   south-america-regional: São Paulo, Santiago, Buenos Aires, Bogotá
 #   degraded-wan:   All links congested with high jitter
 #
 # Requirements:
@@ -58,8 +61,23 @@ LABELS=("node-1" "node-2" "node-3" "node-4")
 # Each layout is a 4x4 RTT matrix (ms). Diagonal is 0 (self).
 # Format: LAYOUT_name[i:j] = RTT in ms between node-i and node-j
 #
-# The script splits RTT in half and applies delay+jitter to each direction.
-# Jitter defaults to 15% of the one-way delay with normal distribution.
+# The script splits each RTT in half and applies one netem qdisc per directed
+# link. Both endpoints apply their half, so the measured round trip equals the
+# matrix RTT (delay rtt/2 on A->B egress + delay rtt/2 on B->A egress = rtt).
+#
+# Each layout also defines realistic link quality, not just propagation delay:
+#   * LAYOUT_JITTER_PCT / LAYOUT_JITTER_CAP_MS — one-way jitter as a fraction of
+#     the one-way delay, capped in absolute terms. Backbone/submarine links are
+#     timing-stable (a few ms of jitter regardless of distance), so jitter is
+#     decoupled from delay rather than scaling with it; congested layouts leave
+#     it uncapped for heavy variance.
+#   * LAYOUT_LOSS_PCT / LAYOUT_LOSS_CORR_PCT — per-direction packet loss with a
+#     correlation (Gilbert-Elliott-style burstiness). Real long-haul links are
+#     never lossless; modelling loss is what actually exercises the protocol's
+#     retransmit and FEC shred-repair paths, so loss tuning measured here
+#     reflects real-world conditions instead of an idealised lossless fabric.
+# (Bandwidth/rate limiting is intentionally not modelled here; enable netem
+#  `rate` per link if shred-propagation bandwidth becomes the variable of study.)
 # ============================================================================
 
 declare -A LAYOUT
@@ -70,6 +88,10 @@ define_layout_global_spread() {
     LAYOUT_NAME="global-spread"
     LAYOUT_DESC="US-East, US-West, EU-Frankfurt, Asia-Tokyo"
     LAYOUT_LOCATIONS=("US-East/Virginia" "US-West/Oregon" "EU/Frankfurt" "Asia/Tokyo")
+    # Backbone/submarine links: very stable timing (low absolute jitter) with a
+    # small, slightly bursty baseline loss that exercises FEC shred repair.
+    LAYOUT_JITTER_PCT=4; LAYOUT_JITTER_CAP_MS=5
+    LAYOUT_LOSS_PCT=0.1; LAYOUT_LOSS_CORR_PCT=25
     #           node-1  node-2  node-3  node-4
     LAYOUT[0:0]=0;   LAYOUT[0:1]=60;  LAYOUT[0:2]=90;  LAYOUT[0:3]=180
     LAYOUT[1:0]=60;  LAYOUT[1:1]=0;   LAYOUT[1:2]=140; LAYOUT[1:3]=120
@@ -83,6 +105,9 @@ define_layout_us_distributed() {
     LAYOUT_NAME="us-distributed"
     LAYOUT_DESC="US-East, US-West, US-Central, US-South"
     LAYOUT_LOCATIONS=("US-East/Virginia" "US-West/Oregon" "US-Central/Iowa" "US-South/Texas")
+    # Terrestrial US backbone: very clean — minimal jitter and near-zero loss.
+    LAYOUT_JITTER_PCT=3; LAYOUT_JITTER_CAP_MS=3
+    LAYOUT_LOSS_PCT=0.02; LAYOUT_LOSS_CORR_PCT=25
     LAYOUT[0:0]=0;   LAYOUT[0:1]=60;  LAYOUT[0:2]=30;  LAYOUT[0:3]=35
     LAYOUT[1:0]=60;  LAYOUT[1:1]=0;   LAYOUT[1:2]=40;  LAYOUT[1:3]=45
     LAYOUT[2:0]=30;  LAYOUT[2:1]=40;  LAYOUT[2:2]=0;   LAYOUT[2:3]=20
@@ -95,10 +120,58 @@ define_layout_eu_cluster() {
     LAYOUT_NAME="eu-cluster"
     LAYOUT_DESC="EU-Frankfurt x3 + US-East outlier"
     LAYOUT_LOCATIONS=("EU/Frankfurt-1" "EU/Frankfurt-2" "EU/Frankfurt-3" "US-East/Virginia")
+    # Datacenter cluster + one transatlantic outlier: low jitter, low loss.
+    LAYOUT_JITTER_PCT=4; LAYOUT_JITTER_CAP_MS=4
+    LAYOUT_LOSS_PCT=0.05; LAYOUT_LOSS_CORR_PCT=25
     LAYOUT[0:0]=0;  LAYOUT[0:1]=2;   LAYOUT[0:2]=2;   LAYOUT[0:3]=90
     LAYOUT[1:0]=2;  LAYOUT[1:1]=0;   LAYOUT[1:2]=2;   LAYOUT[1:3]=90
     LAYOUT[2:0]=2;  LAYOUT[2:1]=2;   LAYOUT[2:2]=0;   LAYOUT[2:3]=90
     LAYOUT[3:0]=90; LAYOUT[3:1]=90;  LAYOUT[3:2]=90;  LAYOUT[3:3]=0
+}
+
+define_layout_se_asia_regional() {
+    # Simulates a Southeast Asia validator set with all nodes in-region.
+    # node-1=Singapore, node-2=Jakarta, node-3=Bangkok, node-4=Manila.
+    LAYOUT_NAME="se-asia-regional"
+    LAYOUT_DESC="Singapore, Jakarta, Bangkok, Manila"
+    LAYOUT_LOCATIONS=("Asia/Singapore" "Asia/Jakarta" "Asia/Bangkok" "Asia/Manila")
+    # Regional submarine and metro links: moderate jitter, low bursty loss.
+    LAYOUT_JITTER_PCT=5; LAYOUT_JITTER_CAP_MS=4
+    LAYOUT_LOSS_PCT=0.08; LAYOUT_LOSS_CORR_PCT=25
+    LAYOUT[0:0]=0;  LAYOUT[0:1]=25; LAYOUT[0:2]=30; LAYOUT[0:3]=40
+    LAYOUT[1:0]=25; LAYOUT[1:1]=0;  LAYOUT[1:2]=45; LAYOUT[1:3]=55
+    LAYOUT[2:0]=30; LAYOUT[2:1]=45; LAYOUT[2:2]=0;  LAYOUT[2:3]=65
+    LAYOUT[3:0]=40; LAYOUT[3:1]=55; LAYOUT[3:2]=65; LAYOUT[3:3]=0
+}
+
+define_layout_europe_regional() {
+    # Simulates a Europe-only validator set across common western EU hubs.
+    # node-1=London, node-2=Frankfurt, node-3=Dublin, node-4=Paris.
+    LAYOUT_NAME="europe-regional"
+    LAYOUT_DESC="London, Frankfurt, Dublin, Paris"
+    LAYOUT_LOCATIONS=("EU/London" "EU/Frankfurt" "EU/Dublin" "EU/Paris")
+    # Dense European backbone: low jitter and near-zero loss.
+    LAYOUT_JITTER_PCT=3; LAYOUT_JITTER_CAP_MS=3
+    LAYOUT_LOSS_PCT=0.03; LAYOUT_LOSS_CORR_PCT=25
+    LAYOUT[0:0]=0;  LAYOUT[0:1]=20; LAYOUT[0:2]=12; LAYOUT[0:3]=10
+    LAYOUT[1:0]=20; LAYOUT[1:1]=0;  LAYOUT[1:2]=25; LAYOUT[1:3]=12
+    LAYOUT[2:0]=12; LAYOUT[2:1]=25; LAYOUT[2:2]=0;  LAYOUT[2:3]=18
+    LAYOUT[3:0]=10; LAYOUT[3:1]=12; LAYOUT[3:2]=18; LAYOUT[3:3]=0
+}
+
+define_layout_south_america_regional() {
+    # Simulates a South America validator set across major regional hubs.
+    # node-1=São Paulo, node-2=Santiago, node-3=Buenos Aires, node-4=Bogotá.
+    LAYOUT_NAME="south-america-regional"
+    LAYOUT_DESC="São Paulo, Santiago, Buenos Aires, Bogotá"
+    LAYOUT_LOCATIONS=("SA/São Paulo" "SA/Santiago" "SA/Buenos Aires" "SA/Bogotá")
+    # Regional paths are longer and peering is less uniform than US/EU.
+    LAYOUT_JITTER_PCT=6; LAYOUT_JITTER_CAP_MS=6
+    LAYOUT_LOSS_PCT=0.12; LAYOUT_LOSS_CORR_PCT=25
+    LAYOUT[0:0]=0;   LAYOUT[0:1]=60;  LAYOUT[0:2]=35; LAYOUT[0:3]=100
+    LAYOUT[1:0]=60;  LAYOUT[1:1]=0;   LAYOUT[1:2]=45; LAYOUT[1:3]=90
+    LAYOUT[2:0]=35;  LAYOUT[2:1]=45;  LAYOUT[2:2]=0;  LAYOUT[2:3]=105
+    LAYOUT[3:0]=100; LAYOUT[3:1]=90;  LAYOUT[3:2]=105; LAYOUT[3:3]=0
 }
 
 define_layout_degraded_wan() {
@@ -107,6 +180,10 @@ define_layout_degraded_wan() {
     LAYOUT_NAME="degraded-wan"
     LAYOUT_DESC="All links congested with high jitter (stress test)"
     LAYOUT_LOCATIONS=("Degraded-A" "Degraded-B" "Degraded-C" "Degraded-D")
+    # Congested/unreliable: heavy jitter (uncapped) and meaningful bursty loss so
+    # the protocol's retransmit/FEC-repair behaviour is genuinely exercised.
+    LAYOUT_JITTER_PCT=30; LAYOUT_JITTER_CAP_MS=0
+    LAYOUT_LOSS_PCT=1.5; LAYOUT_LOSS_CORR_PCT=35
     LAYOUT[0:0]=0;    LAYOUT[0:1]=80;  LAYOUT[0:2]=120; LAYOUT[0:3]=200
     LAYOUT[1:0]=80;   LAYOUT[1:1]=0;   LAYOUT[1:2]=100; LAYOUT[1:3]=180
     LAYOUT[2:0]=120;  LAYOUT[2:1]=100; LAYOUT[2:2]=0;   LAYOUT[2:3]=150
@@ -119,6 +196,10 @@ define_layout_intercontinental() {
     LAYOUT_NAME="intercontinental"
     LAYOUT_DESC="US-East, EU-London, Asia-Singapore, SA-São Paulo"
     LAYOUT_LOCATIONS=("US-East/Virginia" "EU/London" "Asia/Singapore" "SA/São Paulo")
+    # Longest submarine paths: stable but with a slightly higher bursty loss
+    # baseline than the global-spread backbone (more hops, more repeaters).
+    LAYOUT_JITTER_PCT=5; LAYOUT_JITTER_CAP_MS=6
+    LAYOUT_LOSS_PCT=0.3; LAYOUT_LOSS_CORR_PCT=25
     LAYOUT[0:0]=0;    LAYOUT[0:1]=75;  LAYOUT[0:2]=230; LAYOUT[0:3]=130
     LAYOUT[1:0]=75;   LAYOUT[1:1]=0;   LAYOUT[1:2]=180; LAYOUT[1:3]=190
     LAYOUT[2:0]=230;  LAYOUT[2:1]=180; LAYOUT[2:2]=0;   LAYOUT[2:3]=340
@@ -128,15 +209,24 @@ define_layout_intercontinental() {
 load_layout() {
     local name="${1}"
     LAYOUT=()
+    # Reset per-layout link characteristics to conservative defaults so a layout
+    # that omits one of them never inherits the previous layout's value.
+    LAYOUT_JITTER_PCT=5      # one-way jitter as a percentage of one-way delay
+    LAYOUT_JITTER_CAP_MS=5   # absolute cap on one-way jitter (0 = uncapped)
+    LAYOUT_LOSS_PCT=0        # per-direction packet loss percent (fractional ok)
+    LAYOUT_LOSS_CORR_PCT=0   # loss correlation percent (burstiness; 0 = i.i.d.)
     case "${name}" in
         global-spread)      define_layout_global_spread ;;
         us-distributed)     define_layout_us_distributed ;;
         eu-cluster)         define_layout_eu_cluster ;;
+        se-asia-regional)   define_layout_se_asia_regional ;;
+        europe-regional)    define_layout_europe_regional ;;
+        south-america-regional) define_layout_south_america_regional ;;
         degraded-wan)       define_layout_degraded_wan ;;
         intercontinental)   define_layout_intercontinental ;;
         *)
             echo "ERROR: Unknown layout '${name}'." >&2
-            echo "Available layouts: global-spread, us-distributed, eu-cluster, degraded-wan, intercontinental" >&2
+            echo "Available layouts: global-spread, us-distributed, eu-cluster, se-asia-regional, europe-regional, south-america-regional, degraded-wan, intercontinental" >&2
             exit 1
             ;;
     esac
@@ -194,18 +284,39 @@ apply_tc_rules() {
     priomap=$(printf '0 %.0s' {1..16})
     tc_exec "$container" qdisc add dev eth0 root handle 1: prio bands "$bands" priomap $priomap
 
+    # Per-layout link quality (with conservative fallbacks).
+    local jitter_pct="${LAYOUT_JITTER_PCT:-5}"
+    local jitter_cap="${LAYOUT_JITTER_CAP_MS:-5}"
+    local loss_pct="${LAYOUT_LOSS_PCT:-0}"
+    local loss_corr="${LAYOUT_LOSS_CORR_PCT:-0}"
+
     local band=2
     for dst_idx in "${peer_indices[@]}"; do
         local rtt_ms="${LAYOUT[$src_idx:$dst_idx]}"
         local one_way_ms=$(( rtt_ms / 2 ))
-        # Jitter = 15% of one-way delay (minimum 1ms)
-        local jitter_ms=$(( one_way_ms * 15 / 100 ))
+
+        # One-way jitter scales with the one-way delay but is capped so stable
+        # backbone links don't get unrealistically large absolute jitter.
+        local jitter_ms=$(( one_way_ms * jitter_pct / 100 ))
+        [[ "$jitter_cap" -gt 0 && "$jitter_ms" -gt "$jitter_cap" ]] && jitter_ms="$jitter_cap"
         [[ "$jitter_ms" -lt 1 ]] && jitter_ms=1
+
         local dst_ip="${IPS[$dst_idx]}"
+
+        # Build the netem rule: Gaussian-distributed delay, plus correlated
+        # (bursty) per-direction packet loss when the layout defines any.
+        local -a netem_args=(delay "${one_way_ms}ms" "${jitter_ms}ms" distribution normal)
+        if awk "BEGIN{exit !(${loss_pct} > 0)}"; then
+            if [[ "$loss_corr" -gt 0 ]]; then
+                netem_args+=(loss "${loss_pct}%" "${loss_corr}%")
+            else
+                netem_args+=(loss "${loss_pct}%")
+            fi
+        fi
 
         # Add netem qdisc on this band
         tc_exec "$container" qdisc add dev eth0 parent "1:${band}" handle "${band}0:" \
-            netem delay "${one_way_ms}ms" "${jitter_ms}ms" distribution normal
+            netem "${netem_args[@]}"
 
         # Filter: match destination IP → this band
         tc_exec "$container" filter add dev eth0 parent 1:0 protocol ip u32 \
@@ -245,6 +356,11 @@ cmd_apply() {
         done
         echo ""
     done
+    echo ""
+    printf "  Link quality: jitter %s%% of one-way (cap %sms), loss %s%%/dir" \
+        "${LAYOUT_JITTER_PCT}" "${LAYOUT_JITTER_CAP_MS}" "${LAYOUT_LOSS_PCT}"
+    [[ "${LAYOUT_LOSS_CORR_PCT}" -gt 0 ]] && printf " (%s%% correlated/bursty)" "${LAYOUT_LOSS_CORR_PCT}"
+    echo ""
     echo ""
 
     # Check containers are running
@@ -419,7 +535,7 @@ cmd_layouts() {
     echo "Available network topology layouts:"
     echo ""
 
-    for layout in global-spread us-distributed eu-cluster degraded-wan intercontinental; do
+    for layout in global-spread us-distributed eu-cluster se-asia-regional europe-regional south-america-regional degraded-wan intercontinental; do
         load_layout "$layout"
         echo "  ${LAYOUT_NAME}"
         echo "    ${LAYOUT_DESC}"
@@ -436,6 +552,10 @@ cmd_layouts() {
             done
         done
         echo "    RTT range: ${min}ms - ${max}ms"
+        printf "    Link quality: jitter %s%% (cap %sms), loss %s%%/dir" \
+            "${LAYOUT_JITTER_PCT}" "${LAYOUT_JITTER_CAP_MS}" "${LAYOUT_LOSS_PCT}"
+        [[ "${LAYOUT_LOSS_CORR_PCT}" -gt 0 ]] && printf " (%s%% bursty)" "${LAYOUT_LOSS_CORR_PCT}"
+        echo ""
         echo ""
     done
 }
