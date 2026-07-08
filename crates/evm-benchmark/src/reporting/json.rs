@@ -32,6 +32,14 @@ fn build_replay_pack_path(output_path: &Path) -> PathBuf {
     output_path.with_file_name(replay_name)
 }
 
+fn latency_basis(finality_confirmations: u32) -> String {
+    if finality_confirmations == 0 {
+        "submit_to_first_receipt".to_string()
+    } else {
+        format!("submit_to_receipt_with_{finality_confirmations}_confirmation_depth")
+    }
+}
+
 pub async fn write_report(
     config: &Config,
     result: &BurstResult,
@@ -50,6 +58,8 @@ pub async fn write_report(
         wave_count: config.wave_count,
         wave_delay_ms: config.wave_delay_ms,
         worker_count: config.worker_count,
+        finality_confirmations: config.finality_confirmations,
+        latency_basis: latency_basis(config.finality_confirmations),
     };
 
     let ceiling_analysis = ceiling_result.map(|c| CeilingAnalysis {
@@ -99,6 +109,7 @@ pub async fn write_report(
             "BENCH_KEY": if config.sender_keys.is_empty() { None } else { Some("<redacted>") },
             "BENCH_RETRY_PROFILE": Some(&config.retry_profile),
             "BENCH_FINALITY_CONFIRMATIONS": Some(config.finality_confirmations.to_string()),
+            "BENCH_LATENCY_BASIS": Some(latency_basis(config.finality_confirmations)),
             "BENCH_CONFIRM_WAIT_SECS": std::env::var("BENCH_CONFIRM_WAIT_SECS").ok(),
             "BENCH_ASSUME_ISOLATED_BLOCKS": std::env::var("BENCH_ASSUME_ISOLATED_BLOCKS").ok(),
             "BENCH_PREFLIGHT_STRICT": std::env::var("BENCH_PREFLIGHT_STRICT").ok(),
@@ -250,6 +261,8 @@ mod tests {
         assert_eq!(parsed["config"]["sender_count"], 4);
         assert_eq!(parsed["config"]["wave_count"], 2);
         assert_eq!(parsed["config"]["worker_count"], 8);
+        assert_eq!(parsed["config"]["finality_confirmations"], 0);
+        assert_eq!(parsed["config"]["latency_basis"], "submit_to_first_receipt");
         assert_eq!(parsed["results"]["submitted"], 100);
         assert_eq!(parsed["results"]["confirmed"], 95);
         assert!(parsed["captured_at"].as_str().is_some());
@@ -322,6 +335,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let mut config = make_test_config();
         config.sender_keys = vec!["0xabc".to_string()];
+        config.finality_confirmations = 2;
 
         let mut result = make_test_result();
         result.confirmed = 4;
@@ -397,7 +411,11 @@ mod tests {
         assert_eq!(replay["env"]["BENCH_KEY"], "<redacted>");
         assert_eq!(replay["env"]["BENCH_PREFLIGHT_STRICT"], "1");
         assert_eq!(replay["env"]["BENCH_RETRY_PROFILE"], "light");
-        assert_eq!(replay["env"]["BENCH_FINALITY_CONFIRMATIONS"], "0");
+        assert_eq!(replay["env"]["BENCH_FINALITY_CONFIRMATIONS"], "2");
+        assert_eq!(
+            replay["env"]["BENCH_LATENCY_BASIS"],
+            "submit_to_receipt_with_2_confirmation_depth"
+        );
 
         unsafe {
             std::env::remove_var("BENCH_GAS_PRICE_WEI");

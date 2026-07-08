@@ -87,6 +87,25 @@ fi
 
 RUN_TAG="${TAG:-${ENV}}"
 
+default_finality_confirmations_for_env() {
+    case "$1" in
+        geo-*) echo "${BENCH_GEO_FINALITY_CONFIRMATIONS:-1}" ;;
+        *)     echo "${BENCH_CLEAN_FINALITY_CONFIRMATIONS:-0}" ;;
+    esac
+}
+
+latency_basis_for_finality() {
+    local confirmations="$1"
+    if [[ "${confirmations}" == "0" ]]; then
+        echo "submit_to_first_receipt"
+    else
+        echo "submit_to_receipt_with_${confirmations}_confirmation_depth"
+    fi
+}
+
+FINALITY_CONFIRMATIONS="${BENCH_FINALITY_CONFIRMATIONS:-$(default_finality_confirmations_for_env "${ENV}")}"
+LATENCY_BASIS="$(latency_basis_for_finality "${FINALITY_CONFIRMATIONS}")"
+
 # ── Load chain config ────────────────────────────────────────────────────
 if ! load_chain_config "${CHAIN}"; then
     echo "ERROR: Unknown or misconfigured chain '${CHAIN}'" >&2
@@ -302,6 +321,11 @@ if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
     fi
 fi
 
+if [[ -n "${TOPOLOGY_LAYOUT}" ]]; then
+    export BENCH_FUND_CONFIRM_TIMEOUT_SECS="${BENCH_FUND_CONFIRM_TIMEOUT_SECS:-180}"
+    export BENCH_FUND_BALANCE_PROPAGATION_TIMEOUT_SECS="${BENCH_FUND_BALANCE_PROPAGATION_TIMEOUT_SECS:-60}"
+fi
+
 if [[ "${FUND}" == "true" && "${TEST_MODE}" == "transfer" && -n "${TOPOLOGY_LAYOUT}" ]]; then
     echo "Pre-funding sender accounts before applying network topology..."
     PREFUND_ARGS=(
@@ -373,6 +397,7 @@ if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
     source "${SCRIPT_DIR}/meta.sh"
     export BENCH_TXS="${TXS}" BENCH_SENDERS="${SENDERS}" BENCH_BATCH_SIZE="${BATCH_SIZE}"
     export BENCH_WORKERS="${WORKERS}" BENCH_TPS="${TPS}" BENCH_DURATION="${DURATION}"
+    export BENCH_FINALITY_CONFIRMATIONS="${FINALITY_CONFIRMATIONS}" BENCH_LATENCY_BASIS="${LATENCY_BASIS}"
     if [[ -n "${CHAIN_OVERRIDES}" ]]; then
         eval "export ${CHAIN_OVERRIDES}"
     fi
@@ -385,6 +410,7 @@ HARNESS_ARGS=(
     --chain-id "${CHAIN_CHAIN_ID}" --bench-name "${CHAIN}_${MODE}"
     --senders "${SENDERS}" --workers "${WORKERS}"
     --batch-size "${BATCH_SIZE}" --test "${TEST_MODE}"
+    --finality-confirmations "${FINALITY_CONFIRMATIONS}"
     --out "${RUN_DIR}/report.json"
 )
 [[ "${FUND}" == "true" ]]  && HARNESS_ARGS+=(--fund)
@@ -418,6 +444,7 @@ echo "  RPC:     ${CHAIN_RPC}"
 [[ -n "${HARNESS_METRICS_URL}" ]] && echo "  Metrics: ${HARNESS_METRICS_URL}"
 echo "  Senders: ${SENDERS}"
 echo "  Workers: ${WORKERS}"
+echo "  Latency: ${LATENCY_BASIS}"
 echo "  Output:  ${RUN_DIR}/report.json"
 echo ""
 

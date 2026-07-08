@@ -397,6 +397,14 @@ pub struct ConfigSnapshot {
     pub wave_count: u32,
     pub wave_delay_ms: u64,
     pub worker_count: u32,
+    #[serde(default)]
+    pub finality_confirmations: u32,
+    #[serde(default = "default_latency_basis")]
+    pub latency_basis: String,
+}
+
+fn default_latency_basis() -> String {
+    "submit_to_first_receipt".to_string()
 }
 
 // Analytics types for unified metrics collection
@@ -623,11 +631,25 @@ mod tests {
             wave_count: 4,
             wave_delay_ms: 0,
             worker_count: 8,
+            finality_confirmations: 2,
+            latency_basis: "submit_to_receipt_with_2_confirmation_depth".into(),
         };
         let json = serde_json::to_string(&snap).unwrap();
         let deser: ConfigSnapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.tx_count, 100);
         assert_eq!(deser.test_mode, "transfer");
+        assert_eq!(deser.finality_confirmations, 2);
+        assert_eq!(
+            deser.latency_basis,
+            "submit_to_receipt_with_2_confirmation_depth"
+        );
+
+        let legacy: ConfigSnapshot = serde_json::from_str(
+            r#"{"test_mode":"transfer","execution_mode":"burst","tx_count":1,"target_tps":1,"duration_secs":1,"sender_count":1,"batch_size":1,"wave_count":1,"wave_delay_ms":0,"worker_count":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.finality_confirmations, 0);
+        assert_eq!(legacy.latency_basis, "submit_to_first_receipt");
     }
 
     fn make_latency_stats() -> LatencyStats {
@@ -687,6 +709,8 @@ mod tests {
                 wave_count: 4,
                 wave_delay_ms: 0,
                 worker_count: 8,
+                finality_confirmations: 0,
+                latency_basis: "submit_to_first_receipt".into(),
             },
             results: BurstResult {
                 attempted: 500,

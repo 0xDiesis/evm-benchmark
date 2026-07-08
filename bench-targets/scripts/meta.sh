@@ -79,6 +79,8 @@ bench_params = {
     'workers':    int(env_or('BENCH_WORKERS',     '8')),
     'tps':        int(env_or('BENCH_TPS',         '200')),
     'duration':   int(env_or('BENCH_DURATION',    '30')),
+    'finality_confirmations': int(env_or('BENCH_FINALITY_CONFIRMATIONS', '0')),
+    'latency_basis': env_or('BENCH_LATENCY_BASIS', 'submit_to_first_receipt'),
     'prometheus_after_settle_secs': float(env_or('BENCH_PROMETHEUS_AFTER_SETTLE_SECS', '5')),
 }
 
