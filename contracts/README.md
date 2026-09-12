@@ -14,13 +14,13 @@ These contracts are intentionally minimal and not for production use:
 Build:
 
 ```
-forge build
+../scripts/forge.sh build
 ```
 
 Run tests:
 
 ```
-forge test
+../scripts/forge.sh test
 ```
 
 The Rust harness in `crates/evm-benchmark/` embeds creation bytecode for

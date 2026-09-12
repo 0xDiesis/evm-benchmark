@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installed on PATH only by forge.sh --exec, for Slither/Doublcov subprocesses.
+set -eu
+: "${DIESIS_FORGE_EXECUTABLE:?Run this shim through scripts/forge.sh --exec}"
+exec "$DIESIS_FORGE_EXECUTABLE" "$@"

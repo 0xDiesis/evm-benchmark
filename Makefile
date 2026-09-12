@@ -6,6 +6,8 @@
        bytecode bytecode-check
 
 CARGO  := cargo
+export RUSTC_WRAPPER ?= sccache
+FORGE := $(CURDIR)/scripts/forge.sh
 HARNESS_MANIFEST := crates/evm-benchmark/Cargo.toml
 SCRIPTS := bench-targets/scripts
 
@@ -75,7 +77,7 @@ BYTECODE_DIR   := crates/evm-benchmark/bytecode
 BYTECODE_NAMES := BenchmarkToken BenchmarkPair BenchmarkNFT
 
 bytecode: ## Regenerate Token/Pair/NFT bytecode from contracts/ into the harness embed dir
-	cd $(CONTRACTS_DIR) && forge build
+	cd $(CONTRACTS_DIR) && "$(FORGE)" build
 	@for name in $(BYTECODE_NAMES); do \
 	  jq -r '.bytecode.object' $(CONTRACTS_DIR)/out/$$name.sol/$$name.json \
 	    | sed 's/^0x//' | tr -d '\n' > $(BYTECODE_DIR)/$$name.hex; \
@@ -83,7 +85,7 @@ bytecode: ## Regenerate Token/Pair/NFT bytecode from contracts/ into the harness
 	done
 
 bytecode-check: ## Fail if committed .hex files drifted from contracts/ source
-	@cd $(CONTRACTS_DIR) && forge build > /dev/null
+	@cd $(CONTRACTS_DIR) && "$(FORGE)" build > /dev/null
 	@status=0; \
 	for name in $(BYTECODE_NAMES); do \
 	  fresh=$$(jq -r '.bytecode.object' $(CONTRACTS_DIR)/out/$$name.sol/$$name.json | sed 's/^0x//' | tr -d '\n'); \

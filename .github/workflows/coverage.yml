@@ -92,14 +92,21 @@ jobs:
             doublcov-contracts-history-${{ github.ref_name }}-
             doublcov-contracts-history-
 
+      - name: Setup forge-ds
+        uses: ./.github/actions/setup-forge-ds
+
+      - name: Test forge launcher routing
+        run: python3 -m unittest scripts.tests.test_forge_launcher
+
       - name: Generate contracts LCOV
         working-directory: contracts
         run: |
           mkdir -p coverage
-          forge coverage \
+          ../scripts/forge.sh coverage \
             --report lcov \
             --report-file coverage/lcov.info \
-            --exclude-tests
+            --exclude-tests \
+            --instrumented
 
       - name: Build contracts Doublcov report
         uses: doublesharp/doublcov@v0

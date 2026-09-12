@@ -525,3 +525,20 @@ Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CAC
 - [docs/evm-benchmark.md](docs/evm-benchmark.md) — architecture and design notes
 - [docs/evm-benchmark-features.md](docs/evm-benchmark-features.md) — detailed harness capabilities
 - [bench-targets/network-topology/README.md](bench-targets/network-topology/README.md) — geo-latency simulation guide
+
+### Foundry executable
+
+Use `./scripts/forge.sh` from the repository root for Foundry commands. It prefers
+`forge-ds` when installed, otherwise uses standard `forge`. Set `FORGE_BIN` to
+a specific executable to override selection. A selected compiler failure is
+returned directly; it never retries with another compiler. For tools that launch
+Forge internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
+
+Make and CI entry points use this selection too. CI builds and caches `forge-ds`
+from the pinned Diesis fork revision, then verifies that revision before use.
+Solidity keeps Foundry artifact caching; Rust uses sccache separately. No
+Solidity sccache integration is implied by `RUSTC_WRAPPER`.
+
+The launcher keeps artifacts in `out` and cache in `cache`, matching Diesis ABI
+and bytecode consumers. Explicit `FOUNDRY_OUT` and `FOUNDRY_CACHE_PATH` environment
+overrides are honored. Update these launcher defaults if repository paths change.
