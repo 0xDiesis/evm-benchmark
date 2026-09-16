@@ -15,6 +15,8 @@ if [[ ! -f "${SCRIPT_DIR}/lib.sh" ]]; then
 fi
 # shellcheck source=lib.sh
 source "${SCRIPT_DIR}/lib.sh"
+# shellcheck source=cargo-env.sh
+source "${SCRIPT_DIR}/cargo-env.sh"
 
 # ── Defaults ──────────────────────────────────────────────────────────────
 CHAIN="diesis" MODE="burst" ENV="clean" TAG=""
@@ -301,7 +303,7 @@ _BLOCK_ADVANCE_TIMEOUT="${BENCH_BLOCK_ADVANCE_TIMEOUT_SECS:-60}"
 wait_for_block_advance "${FIRST_RPC}" "${_BLOCK_ADVANCE_TIMEOUT}"
 
 # ── Build harness if needed ──────────────────────────────────────────────
-HARNESS="${BENCH_REPO_DIR}/target/release/evm-benchmark"
+HARNESS="$(cargo_target_directory "${BENCH_REPO_DIR}/Cargo.toml")/release/evm-benchmark"
 if [[ ! -f "${HARNESS}" ]]; then
     echo "Building evm-benchmark (release)..."
     cargo build -p evm-benchmark --release \

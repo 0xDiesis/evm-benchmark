@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${REPO_ROOT}/bench-targets/scripts/cargo-env.sh"
 
 EVMOS_RPC="http://localhost:8545"
 EVMOS_WS="ws://localhost:8546"

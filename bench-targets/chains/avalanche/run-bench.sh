@@ -2,6 +2,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${REPO_ROOT}/bench-targets/scripts/cargo-env.sh"
 
 # Avalanche C-Chain RPC (path includes /ext/bc/C/rpc)
 AVAX_RPC="http://localhost:9650/ext/bc/C/rpc,http://localhost:9660/ext/bc/C/rpc,http://localhost:9670/ext/bc/C/rpc,http://localhost:9680/ext/bc/C/rpc,http://localhost:9690/ext/bc/C/rpc"

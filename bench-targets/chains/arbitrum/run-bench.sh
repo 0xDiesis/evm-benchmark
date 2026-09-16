@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${REPO_ROOT}/bench-targets/scripts/cargo-env.sh"
 
 # Arbitrum Nitro testnode L2 sequencer endpoints
 ARB_RPC="http://127.0.0.1:8547"

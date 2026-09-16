@@ -2,6 +2,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${REPO_ROOT}/bench-targets/scripts/cargo-env.sh"
 
 # Sei EVM RPC endpoints (mock_balances auto-funds any account)
 SEI_RPC="http://localhost:28545,http://localhost:28547,http://localhost:28549,http://localhost:28551"

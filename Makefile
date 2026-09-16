@@ -1,4 +1,4 @@
-.PHONY: build test clippy fmt check quality quality-fix clean-rust help \
+.PHONY: build test test-scripts clippy fmt check quality quality-fix clean-rust help preflight \
        bench bench-all compare compare-all \
        sweep sweep-all sweep-list \
        results results-latest results-compare results-ledger results-summary \
@@ -40,6 +40,11 @@ build-debug: ## Build the benchmark harness (debug)
 
 test: ## Run harness unit tests
 	$(CARGO) test --manifest-path $(HARNESS_MANIFEST)
+
+test-scripts: ## Run local launcher and diagnostics tests (not part of CI)
+	@bash $(SCRIPTS)/test-cargo-env.sh
+	@python3 scripts/tests/test_forge_launcher.py
+	@python3 $(SCRIPTS)/test_prometheus_diagnostics.py
 
 clippy: ## Run clippy
 	$(CARGO) clippy --manifest-path $(HARNESS_MANIFEST) -- -D warnings
@@ -188,12 +193,25 @@ results-summary: ## Aggregate stats across all runs
 chains: ## List all registered chains
 	@bash -c 'source $(SCRIPTS)/lib.sh && list_chains'
 
+preflight: ## Check local benchmark tools without starting containers
+	@command -v $(CARGO) >/dev/null || { echo "ERROR: cargo not found" >&2; exit 1; }
+	@if [ -n "$(RUSTC_WRAPPER)" ]; then \
+		command -v "$(firstword $(RUSTC_WRAPPER))" >/dev/null || { echo "ERROR: Rust compiler wrapper '$(firstword $(RUSTC_WRAPPER))' not found" >&2; exit 1; }; \
+	fi
+	@command -v python3 >/dev/null || { echo "ERROR: python3 not found" >&2; exit 1; }
+	@command -v curl >/dev/null || { echo "ERROR: curl not found" >&2; exit 1; }
+	@command -v docker >/dev/null || { echo "ERROR: docker not found" >&2; exit 1; }
+	@docker compose version >/dev/null || { echo "ERROR: docker compose plugin not found" >&2; exit 1; }
+	@$(CARGO) metadata --no-deps --format-version 1 --manifest-path $(HARNESS_MANIFEST) >/dev/null
+	@echo "preflight: local benchmark tools available"
+
 help: ## Show this help
 	@echo ""
 	@echo "  EVM Benchmark Suite"
 	@echo "  ───────────────────"
 	@echo ""
 	@echo "  Quick start:"
+	@echo "    make preflight                       # Check tools; does not start containers"
 	@echo "    make chains                          # List registered chains"
 	@echo "    make bench CHAIN=<chain>             # Run a 10000-tx burst against <chain>"
 	@echo "    make bench CHAIN=<chain> MODE=ceiling  # Find max throughput"

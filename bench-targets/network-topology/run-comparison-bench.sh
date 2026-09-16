@@ -11,6 +11,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_REPO="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# shellcheck source=../scripts/cargo-env.sh
+source "${BENCH_REPO}/bench-targets/scripts/cargo-env.sh"
 # DIESIS_REPO_DIR points at the (private) Diesis source repo for compose files and
 # cluster lifecycle. Falls back to the conventional sibling layout when unset.
 DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-${BENCH_REPO}/../diesis}"

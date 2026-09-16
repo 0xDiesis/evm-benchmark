@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${REPO_ROOT}/bench-targets/scripts/cargo-env.sh"
 
 # BSC cluster RPC endpoints (matches docker-compose.yml port mapping)
 BSC_RPC="http://localhost:8545,http://localhost:8645,http://localhost:8745,http://localhost:8845"

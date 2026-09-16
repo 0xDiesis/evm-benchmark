@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BENCH_REPO_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${BENCH_REPO_DIR}/bench-targets/scripts/cargo-env.sh"
 DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-${BENCH_REPO_DIR}/../diesis}"
 HARNESS_MANIFEST="${BENCH_REPO_DIR}/crates/evm-benchmark/Cargo.toml"
 

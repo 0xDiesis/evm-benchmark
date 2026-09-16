@@ -8,6 +8,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+# shellcheck source=../../scripts/cargo-env.sh
+source "${REPO_ROOT}/bench-targets/scripts/cargo-env.sh"
 
 # Sonic fakenet RPC endpoints (matches docker-compose.yml port mapping)
 SONIC_RPC="http://localhost:18545,http://localhost:18645,http://localhost:18745,http://localhost:18845"

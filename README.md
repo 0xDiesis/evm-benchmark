@@ -13,7 +13,12 @@ This repository is chain-agnostic: benchmark orchestration, reporting, and harne
 
 - `docker compose` (required for chain targets)
 - Rust toolchain `>= 1.93` (if building from source)
-- Optional: `make`, `python3`, `curl` for orchestration scripts
+- `sccache` (default Rust compiler cache for source builds)
+- `make`, `python3`, and `curl` (for local orchestration)
+
+Set `RUSTC_WRAPPER` before a command to use another Rust compiler wrapper. Set
+it to an empty value to disable the wrapper. Cargo's configured target directory
+is honored, including `CARGO_TARGET_DIR` and workspace scratch routing.
 
 ## Install
 
@@ -50,19 +55,42 @@ cd evm-benchmark
 make build
 ```
 
-## Quick Start
+## Local quick start
+
+The Make targets and `run-bench.sh` orchestration scripts require a source
+checkout and the build tools above. With a prebuilt binary, `--setup` downloads
+the chain configurations; start the target using its README, then run the binary
+against its RPC endpoint as shown below.
 
 ```bash
-# Using the standalone binary (auto-prompts to download bench-targets if missing)
-evm-benchmark --rpc-endpoints http://localhost:8545 --txs 2000 --fund
+# These inspect the local setup and do not start containers.
+make help
+make preflight
+make chains
 
-# Using the Makefile (requires cloned repo)
+# Review bench-targets/chains/<chain>/README.md for target prerequisites,
+# then run one benchmark. The orchestrator starts or restarts the target.
 make bench CHAIN=sonic MODE=burst TXS=2000
 
-# Compare two chains with identical settings
-make compare CHAINS="diesis sonic" MODE=burst
+# Inspect the resulting report.
+make results-latest FILTER_CHAIN=sonic FILTER_MODE=burst
+```
 
-# Run all modes (burst + sustained + ceiling)
+The Make targets and direct scripts use `sccache` for Rust builds by default and
+reuse Cargo, Foundry, and Docker caches. They do not clean caches or force image
+rebuilds unless you explicitly pass `REBUILD=1`.
+
+For an already running RPC endpoint, the standalone binary does not need a
+local chain target:
+
+```bash
+evm-benchmark --rpc-endpoints http://localhost:8545 --txs 2000 --fund
+```
+
+Comparisons use the same maintained orchestration path:
+
+```bash
+make compare CHAINS="diesis sonic" MODE=burst
 make compare-all CHAINS="diesis sonic" ENV=clean
 ```
 
@@ -77,6 +105,7 @@ All targets accept override variables on the command line. Defaults are shown in
 | `make build` | Build the benchmark harness (release) |
 | `make build-debug` | Build the benchmark harness (debug) |
 | `make test` | Run harness unit tests |
+| `make test-scripts` | Run local launcher and diagnostics tests |
 | `make clippy` | Run clippy with `-D warnings` |
 | `make fmt` | Format all Rust code |
 | `make check` | Run fmt check + clippy + tests |
@@ -440,7 +469,7 @@ evm-benchmark \
 Or via `cargo run` from the repo:
 
 ```bash
-cargo run -p evm-benchmark --release -- \
+RUSTC_WRAPPER=sccache cargo run -p evm-benchmark --release -- \
     --rpc-endpoints http://your-node:8545 \
     --chain-id 1 --txs 2000 --execution burst --fund
 ```
@@ -484,6 +513,7 @@ Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CAC
 │   ├── scripts/                   # Orchestration scripts
 │   │   ├── lib.sh                 # Chain registry, shared functions
 │   │   ├── bench.sh               # Single run orchestrator
+│   │   ├── cargo-env.sh           # Shared Rust cache and target routing
 │   │   ├── compare.sh             # Multi-chain comparison
 │   │   ├── sweep.sh               # Parameter sweep orchestrator
 │   │   ├── sweep-profiles.sh      # Sweep profile definitions
@@ -534,8 +564,8 @@ Forge internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
 
 Make and CI entry points use this selection too. CI builds and caches `forge-ds`
 from the pinned Diesis fork revision, then verifies that revision before use.
-Solidity keeps Foundry artifact caching; Rust uses sccache separately. No
-Solidity sccache integration is implied by `RUSTC_WRAPPER`.
+Solidity keeps Foundry artifact caching; Rust uses sccache separately.
+`RUSTC_WRAPPER` applies only to Rust compilation.
 
 The launcher keeps artifacts in `out` and cache in `cache`, matching Diesis ABI
 and bytecode consumers. Explicit `FOUNDRY_OUT` and `FOUNDRY_CACHE_PATH` environment
