@@ -1,22 +1,6 @@
-mod analytics;
-#[allow(dead_code)]
-mod cache;
-mod config;
-mod errors;
-mod funding;
-#[allow(dead_code)]
-mod generators;
-mod metrics;
-mod modes;
-mod reporting;
-mod setup;
-mod signing;
-mod submission;
-mod types;
-mod validators;
-
 use alloy_primitives::Address;
 use clap::Parser;
+use evm_benchmark::{config, funding, generators, modes, reporting, setup, types};
 use std::future::Future;
 use std::io::BufRead;
 use std::path::Path;
