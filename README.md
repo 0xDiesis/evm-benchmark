@@ -498,8 +498,6 @@ Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CAC
 │   │   ├── bsc/
 │   │   └── cosmos/
 │   ├── network-topology/          # Geo-latency simulation (TC pairwise + Pumba chaos)
-│   ├── run-comparison.sh          # Legacy comparison script
-│   ├── test-suite.sh              # Legacy test suite
 │   └── results/                   # Generated output (gitignored)
 ├── crates/
 │   └── evm-benchmark/             # Rust CLI benchmark harness
