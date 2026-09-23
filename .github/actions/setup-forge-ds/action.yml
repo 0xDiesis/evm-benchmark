@@ -11,18 +11,18 @@ runs:
         path: ~/.cargo/bin/forge-ds
         key: forge-ds-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-6975c33c48e438d986fe90c7d6c0c5502f1235ed
 
-    # The fork publishes prebuilt binaries. They are used only when the
-    # checksum matches and the binary reports the pinned commit; otherwise the
-    # pinned revision is built from source below.
+    # The prebuilt binary is used only when its checksum matches and it reports
+    # the pinned commit; otherwise the pinned revision is built from source below.
     - name: Install prebuilt forge-ds
       id: prebuilt
       if: steps.forge-ds-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
         FORGE_DS_REVISION: 6975c33c48e438d986fe90c7d6c0c5502f1235ed
-        FORGE_DS_RELEASE_URL: https://github.com/doublesharp/foundry/releases/download/forge-ds
       run: |
         set -euo pipefail
+        # Each fork build publishes an immutable release tagged with its short commit.
+        release_url="https://github.com/doublesharp/foundry/releases/download/forge-ds-${FORGE_DS_REVISION:0:7}"
         case "${RUNNER_OS}-${RUNNER_ARCH}" in
           Linux-X64) platform=linux_amd64 ;;
           Linux-ARM64) platform=linux_arm64 ;;
@@ -31,8 +31,8 @@ runs:
         esac
         archive="forge-ds_${platform}.tar.gz"
         work="$(mktemp -d)"
-        if ! curl -fsSL --retry 3 -o "$work/$archive" "$FORGE_DS_RELEASE_URL/$archive" \
-          || ! curl -fsSL --retry 3 -o "$work/$archive.sha256" "$FORGE_DS_RELEASE_URL/$archive.sha256"; then
+        if ! curl -fsSL --retry 3 -o "$work/$archive" "$release_url/$archive" \
+          || ! curl -fsSL --retry 3 -o "$work/$archive.sha256" "$release_url/$archive.sha256"; then
           echo "::notice::Prebuilt forge-ds is unavailable; building from source"
           exit 0
         fi

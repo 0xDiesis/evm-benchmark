@@ -129,6 +129,7 @@ class ForgeLauncherTests(unittest.TestCase):
         self.assertIn("RUSTC_WRAPPER: sccache", action)
         # The prebuilt release binary is used only after checksum and commit checks.
         self.assertIn("forge-ds_${platform}.tar.gz", action)
+        self.assertIn("releases/download/forge-ds-${FORGE_DS_REVISION:0:7}", action)
         self.assertIn("forge-ds archive checksum mismatch", action)
         self.assertIn('grep -qF "Commit SHA: $FORGE_DS_REVISION"', action)
         self.assertEqual(
