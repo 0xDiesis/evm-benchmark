@@ -21,15 +21,15 @@ runs:
         FORGE_DS_REVISION: 6975c33c48e438d986fe90c7d6c0c5502f1235ed
       run: |
         set -euo pipefail
-        # Each fork build publishes an immutable release tagged with its short commit.
-        release_url="https://github.com/doublesharp/foundry/releases/download/forge-ds-${FORGE_DS_REVISION:0:7}"
+        # Every fork build adds its commit-named archives to the forge-ds release.
+        release_url="https://github.com/doublesharp/foundry/releases/download/forge-ds"
         case "${RUNNER_OS}-${RUNNER_ARCH}" in
           Linux-X64) platform=linux_amd64 ;;
           Linux-ARM64) platform=linux_arm64 ;;
           macOS-ARM64) platform=darwin_arm64 ;;
           *) echo "::notice::No prebuilt forge-ds for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 0 ;;
         esac
-        archive="forge-ds_${platform}.tar.gz"
+        archive="forge-ds-${FORGE_DS_REVISION:0:7}_${platform}.tar.gz"
         work="$(mktemp -d)"
         if ! curl -fsSL --retry 3 -o "$work/$archive" "$release_url/$archive" \
           || ! curl -fsSL --retry 3 -o "$work/$archive.sha256" "$release_url/$archive.sha256"; then
