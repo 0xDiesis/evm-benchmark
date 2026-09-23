@@ -119,7 +119,10 @@ class ForgeLauncherTests(unittest.TestCase):
             REPO_ROOT / ".github/actions/setup-forge-ds/action.yml"
         ).read_text()
         workflow = (REPO_ROOT / ".github/workflows/coverage.yml").read_text()
-        self.assertIn(FORGE_DS_REVISION, action)
+        # The pinned revision is declared once, as the action input default.
+        self.assertIn(f"    default: {FORGE_DS_REVISION}\n", action)
+        self.assertEqual(action.count(FORGE_DS_REVISION), 1)
+        self.assertIn("rust-1.97.1-${{ inputs.revision }}", action)
         self.assertIn(RUST_TOOLCHAIN_ACTION, action)
         self.assertIn(SCCACHE_ACTION, action)
         self.assertIn("toolchain: 1.97.1", action)

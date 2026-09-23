@@ -1,6 +1,11 @@
 name: Setup forge-ds
 description: Install the pinned Diesis Foundry fork revision, preferring its prebuilt release binary
 
+inputs:
+  revision:
+    description: Full commit SHA of the Diesis Foundry fork to install
+    default: 6975c33c48e438d986fe90c7d6c0c5502f1235ed
+
 runs:
   using: composite
   steps:
@@ -9,7 +14,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ~/.cargo/bin/forge-ds
-        key: forge-ds-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-6975c33c48e438d986fe90c7d6c0c5502f1235ed
+        key: forge-ds-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ inputs.revision }}
 
     # The prebuilt binary is used only when its checksum matches and it reports
     # the pinned commit; otherwise the pinned revision is built from source below.
@@ -18,7 +23,7 @@ runs:
       if: steps.forge-ds-cache.outputs.cache-hit != 'true'
       shell: bash
       env:
-        FORGE_DS_REVISION: 6975c33c48e438d986fe90c7d6c0c5502f1235ed
+        FORGE_DS_REVISION: ${{ inputs.revision }}
       run: |
         set -euo pipefail
         # Every fork build adds its commit-named archives to the forge-ds release.
@@ -73,13 +78,16 @@ runs:
       env:
         RUSTC_WRAPPER: sccache
         SCCACHE_GHA_ENABLED: "true"
-      run: cargo +1.97.1 install --git https://github.com/doublesharp/foundry.git --rev 6975c33c48e438d986fe90c7d6c0c5502f1235ed --locked --bin forge-ds --features forge-ds forge
+        FORGE_DS_REVISION: ${{ inputs.revision }}
+      run: cargo +1.97.1 install --git https://github.com/doublesharp/foundry.git --rev "$FORGE_DS_REVISION" --locked --bin forge-ds --features forge-ds forge
 
     - name: Verify forge-ds revision
       shell: bash
+      env:
+        FORGE_DS_REVISION: ${{ inputs.revision }}
       run: |
         set -euo pipefail
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         version="$("$HOME/.cargo/bin/forge-ds" --version)"
         printf '%s\n' "$version"
-        grep -F "Commit SHA: 6975c33c48e438d986fe90c7d6c0c5502f1235ed" <<<"$version"
+        grep -F "Commit SHA: $FORGE_DS_REVISION" <<<"$version"
