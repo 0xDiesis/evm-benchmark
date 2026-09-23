@@ -14,7 +14,7 @@ LAUNCHER = Path(
     )
 )
 REPO_ROOT = Path(__file__).resolve().parents[2]
-FORGE_DS_REVISION = "319852a15c4b92b34d3434fa997f476877545cf9"
+FORGE_DS_REVISION = "6975c33c48e438d986fe90c7d6c0c5502f1235ed"
 RUST_TOOLCHAIN_ACTION = "02cb101ec7c40f2c49e1d9714d64511d8e1b74de"
 SCCACHE_ACTION = "fc920bf0ec8de6ee65d409111f7ec508035751ba"
 
@@ -127,6 +127,10 @@ class ForgeLauncherTests(unittest.TestCase):
         self.assertIn("-rust-1.97.1", action)
         self.assertIn("--locked --bin forge-ds --features forge-ds forge", action)
         self.assertIn("RUSTC_WRAPPER: sccache", action)
+        # The prebuilt release binary is used only after checksum and commit checks.
+        self.assertIn("forge-ds_${platform}.tar.gz", action)
+        self.assertIn("forge-ds archive checksum mismatch", action)
+        self.assertIn('grep -qF "Commit SHA: $FORGE_DS_REVISION"', action)
         self.assertEqual(
             workflow.count("uses: ./.github/actions/setup-forge-ds"), 1
         )
