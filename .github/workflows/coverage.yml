@@ -22,7 +22,7 @@ env:
 jobs:
   doublcov:
     name: Doublcov
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -190,7 +190,7 @@ jobs:
     name: Publish coverage page
     needs: doublcov
     if: vars.ENABLE_PAGES_PUBLISH == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}coverage/
