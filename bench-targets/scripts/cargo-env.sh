@@ -1,9 +1,9 @@
 #!/bin/bash
 # Shared Cargo setup for local benchmark launchers.
 
-# Use sccache by default while preserving explicit caller overrides, including
+# Enable sccache only when requested, preserving caller overrides, including
 # RUSTC_WRAPPER= to disable the wrapper for one command.
-if [[ -z "${RUSTC_WRAPPER+x}" ]]; then
+if [[ "${DIESIS_USE_SCCACHE:-0}" == 1 && -z "${RUSTC_WRAPPER+x}" ]]; then
     export RUSTC_WRAPPER=sccache
 fi
 

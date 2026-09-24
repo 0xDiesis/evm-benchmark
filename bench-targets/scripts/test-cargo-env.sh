@@ -7,7 +7,9 @@ HELPER="${SCRIPT_DIR}/cargo-env.sh"
 
 # The single-quoted snippets must expand in their child bash processes.
 # shellcheck disable=SC2016
-env -u RUSTC_WRAPPER bash -c \
+env -u RUSTC_WRAPPER DIESIS_USE_SCCACHE=0 bash -c \
+    'source "$1"; [[ -z "${RUSTC_WRAPPER-}" ]]' _ "${HELPER}"
+env -u RUSTC_WRAPPER DIESIS_USE_SCCACHE=1 bash -c \
     'source "$1"; [[ "$RUSTC_WRAPPER" == sccache ]]' _ "${HELPER}"
 # shellcheck disable=SC2016
 RUSTC_WRAPPER=custom-wrapper bash -c \

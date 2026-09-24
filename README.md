@@ -13,7 +13,7 @@ This repository is chain-agnostic: benchmark orchestration, reporting, and harne
 
 - `docker compose` (required for chain targets)
 - Rust toolchain `>= 1.93` (if building from source)
-- `sccache` (default Rust compiler cache for source builds)
+- `sccache` (optional Rust compiler cache)
 - `make`, `python3`, and `curl` (for local orchestration)
 
 Set `RUSTC_WRAPPER` before a command to use another Rust compiler wrapper. Set
@@ -76,8 +76,9 @@ make bench CHAIN=sonic MODE=burst TXS=2000
 make results-latest FILTER_CHAIN=sonic FILTER_MODE=burst
 ```
 
-The Make targets and direct scripts use `sccache` for Rust builds by default and
-reuse Cargo, Foundry, and Docker caches. They do not clean caches or force image
+The Make targets and direct scripts enable `sccache` only with
+`DIESIS_USE_SCCACHE=1`, preserving explicit `RUSTC_WRAPPER` overrides. Default
+builds need no compiler-cache setup. They reuse Cargo, Foundry, and Docker caches. They do not clean caches or force image
 rebuilds unless you explicitly pass `REBUILD=1`.
 
 For an already running RPC endpoint, the standalone binary does not need a
