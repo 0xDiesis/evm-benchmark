@@ -6,7 +6,7 @@
        bytecode bytecode-check
 
 CARGO  := cargo
-export RUSTC_WRAPPER ?= sccache
+export RUSTC_WRAPPER ?= $(if $(filter 1,$(DIESIS_USE_SCCACHE)),sccache,)
 FORGE := $(CURDIR)/scripts/forge.sh
 HARNESS_MANIFEST := crates/evm-benchmark/Cargo.toml
 SCRIPTS := bench-targets/scripts
