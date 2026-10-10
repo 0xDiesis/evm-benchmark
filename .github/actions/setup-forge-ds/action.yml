@@ -14,7 +14,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ~/.cargo/bin/forge-ds
-        key: forge-ds-${{ runner.os }}-${{ runner.arch }}-rust-1.97.1-${{ inputs.revision }}
+        key: forge-ds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.0-${{ inputs.revision }}
 
     # The prebuilt binary is used only when its checksum matches and it reports
     # the pinned commit; otherwise the pinned revision is built from source below.
@@ -64,7 +64,7 @@ runs:
       if: steps.forge-ds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
       uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
       with:
-        toolchain: 1.97.1
+        toolchain: 1.99.0
 
     - name: Setup sccache for forge-ds build
       if: steps.forge-ds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
@@ -79,7 +79,7 @@ runs:
         RUSTC_WRAPPER: sccache
         SCCACHE_GHA_ENABLED: "true"
         FORGE_DS_REVISION: ${{ inputs.revision }}
-      run: cargo +1.97.1 install --git https://github.com/doublesharp/foundry.git --rev "$FORGE_DS_REVISION" --locked --bin forge-ds --features forge-ds forge
+      run: cargo +1.99.0 install --git https://github.com/doublesharp/foundry.git --rev "$FORGE_DS_REVISION" --locked --bin forge-ds --features forge-ds forge
 
     - name: Verify forge-ds revision
       shell: bash

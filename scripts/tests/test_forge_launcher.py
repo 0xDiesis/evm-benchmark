@@ -122,12 +122,12 @@ class ForgeLauncherTests(unittest.TestCase):
         # The pinned revision is declared once, as the action input default.
         self.assertIn(f"    default: {FORGE_DS_REVISION}\n", action)
         self.assertEqual(action.count(FORGE_DS_REVISION), 1)
-        self.assertIn("rust-1.97.1-${{ inputs.revision }}", action)
+        self.assertIn("rust-1.99.0-${{ inputs.revision }}", action)
         self.assertIn(RUST_TOOLCHAIN_ACTION, action)
         self.assertIn(SCCACHE_ACTION, action)
-        self.assertIn("toolchain: 1.97.1", action)
-        self.assertIn("cargo +1.97.1 install", action)
-        self.assertIn("-rust-1.97.1", action)
+        self.assertIn("toolchain: 1.99.0", action)
+        self.assertIn("cargo +1.99.0 install", action)
+        self.assertIn("-rust-1.99.0", action)
         self.assertIn("--locked --bin forge-ds --features forge-ds forge", action)
         self.assertIn("RUSTC_WRAPPER: sccache", action)
         # The prebuilt release binary is used only after checksum and commit checks.
