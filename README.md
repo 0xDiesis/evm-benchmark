@@ -12,7 +12,7 @@ This repository is chain-agnostic: benchmark orchestration, reporting, and harne
 ## Prerequisites
 
 - `docker compose` (required for chain targets)
-- Rust toolchain `>= 1.93` (if building from source)
+- Rust toolchain `>= 1.99` (if building from source)
 - `sccache` (optional Rust compiler cache)
 - `make`, `python3`, and `curl` (for local orchestration)
 
