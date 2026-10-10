@@ -52,8 +52,8 @@ jobs:
         shell: bash
         run: |
           tag="${GITHUB_REF_NAME}"
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../${BINARY_NAME}-${tag}-${{ matrix.target }}.tar.gz ${BINARY_NAME}
+          cd "target/${{ matrix.target }}/release"
+          tar czf "../../../${BINARY_NAME}-${tag}-${{ matrix.target }}.tar.gz" "${BINARY_NAME}"
           cd ../../..
 
       - name: Upload artifact
