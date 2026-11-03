@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.34;
+pragma solidity 0.8.38;
 
 /// @title BenchmarkRegistry
 /// @notice Key-value registry for benchmarking. Models NFT metadata,

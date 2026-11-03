@@ -571,3 +571,9 @@ Solidity keeps Foundry artifact caching; Rust uses sccache separately.
 The launcher keeps artifacts in `out` and cache in `cache`, matching Diesis ABI
 and bytecode consumers. Explicit `FOUNDRY_OUT` and `FOUNDRY_CACHE_PATH` environment
 overrides are honored. Update these launcher defaults if repository paths change.
+
+## Solidity compiler
+
+Run `./scripts/install-solar.sh` once and keep `$HOME/.foundry/bin` on `PATH`.
+Development, CI and release bytecode use pinned Solar 0.3.0 (Solidity 0.8.38).
+Run `make bytecode` after contract changes and `make bytecode-check` before release.

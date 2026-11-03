@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.34;
+pragma solidity 0.8.38;
 
 /// @title BenchmarkNFT
 /// @notice Minimal ERC-721 for e2e benchmarking. Open mint with sequential

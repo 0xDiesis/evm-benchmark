@@ -3,10 +3,12 @@ src = "src"
 out = "out"
 libs = ["lib"]
 test = "test"
-solc = "0.8.34"
+solc = "solar"
 optimizer = true
 optimizer_runs = 200
 via_ir = true
+# Gas tests measure calls within one transaction, including warmed storage.
+isolate = false
 
 [profile.ci]
 fuzz = { runs = 1000 }

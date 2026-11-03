@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.34;
+pragma solidity 0.8.38;
 
 /// @title BenchmarkToken
 /// @notice Minimal ERC-20 for e2e benchmarking. No access control — anyone

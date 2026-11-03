@@ -37,6 +37,10 @@ jobs:
         with:
           version: stable
 
+      - name: Setup Solar 0.3.0 (Solidity 0.8.38)
+        run: |
+          ./scripts/install-solar.sh
+          echo "${FOUNDRY_DIR:-$HOME/.foundry}/bin" >> "$GITHUB_PATH"
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
@@ -46,7 +50,7 @@ jobs:
           path: |
             contracts/cache
             contracts/out
-          key: foundry-build-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('contracts/foundry.toml', 'contracts/src/**/*.sol', 'contracts/test/**/*.sol', 'contracts/lib/**/*.sol') }}
+          key: foundry-build-${{ runner.os }}-${{ github.ref_name }}-${{ hashFiles('scripts/install-solar.sh', 'contracts/foundry.toml', 'contracts/src/**/*.sol', 'contracts/test/**/*.sol', 'contracts/lib/**/*.sol') }}
           restore-keys: |
             foundry-build-${{ runner.os }}-${{ github.ref_name }}-
             foundry-build-${{ runner.os }}-main-
