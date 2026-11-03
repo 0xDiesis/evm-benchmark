@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity 0.8.34;
+pragma solidity 0.8.38;
 
 /// @title BenchmarkMixer
 /// @notice E2E benchmark contract exercising storage, computation, and events.
