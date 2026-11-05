@@ -542,6 +542,7 @@ mod tests {
             submission_method: "http".to_string(),
             retry_profile: "light".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             out: PathBuf::from("test-report.json"),
             quiet: true,
             chain_id: 19803,

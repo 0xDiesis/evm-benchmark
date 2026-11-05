@@ -59,6 +59,7 @@ pub async fn write_report(
         wave_delay_ms: config.wave_delay_ms,
         worker_count: config.worker_count,
         finality_confirmations: config.finality_confirmations,
+        receipt_concurrency: config.receipt_concurrency,
         latency_basis: latency_basis(config.finality_confirmations),
     };
 
@@ -176,6 +177,7 @@ mod tests {
             submission_method: SubmissionMethod::Http,
             retry_profile: "light".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             output: PathBuf::from("test.json"),
             quiet: true,
             chain_id: 19803,
