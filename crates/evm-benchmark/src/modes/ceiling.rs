@@ -455,6 +455,7 @@ async fn wait_for_pending_confirmations(
                     poller.rpc_url,
                     tracker,
                     poller.finality_confirmations,
+                    poller.receipt_concurrency,
                 )
                 .await;
             }
@@ -470,6 +471,7 @@ struct ConfirmationPoller<'a> {
     last_scanned_block: &'a mut u64,
     scan_floor_block: u64,
     finality_confirmations: u32,
+    receipt_concurrency: u32,
 }
 
 fn next_step_increase(
@@ -877,6 +879,7 @@ async fn run_ceiling_with(
                 last_scanned_block: &mut last_scanned_block,
                 scan_floor_block,
                 finality_confirmations: config.finality_confirmations,
+                receipt_concurrency: config.receipt_concurrency,
             }),
             options.max_confirm_wait,
             Duration::from_millis(100),
@@ -1143,6 +1146,7 @@ mod tests {
             submission_method: SubmissionMethod::Http,
             retry_profile: "off".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             output: PathBuf::from("report.json"),
             quiet,
             chain_id: 1,

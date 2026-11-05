@@ -336,6 +336,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
                 config.rpc.as_str(),
                 &tracker,
                 config.finality_confirmations,
+                config.receipt_concurrency,
             )
             .await;
         }
@@ -716,6 +717,7 @@ mod tests {
             submission_method: SubmissionMethod::Http,
             retry_profile: "off".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             output: std::path::PathBuf::from("sustained-test.json"),
             quiet: true,
             chain_id: 1,
@@ -774,6 +776,7 @@ mod tests {
             submission_method: crate::config::SubmissionMethod::Http,
             retry_profile: "light".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             output: std::path::PathBuf::from("test.json"),
             quiet: true,
             chain_id: 1,

@@ -117,6 +117,10 @@ pub struct Args {
     #[arg(long, default_value = "0")]
     pub finality_confirmations: u32,
 
+    /// Maximum concurrent receipt reads during confirmation drain.
+    #[arg(long, default_value = "4")]
+    pub receipt_concurrency: u32,
+
     // Output
     /// JSON report output path
     #[arg(long, default_value = "report.json")]
@@ -188,6 +192,8 @@ pub struct Config {
     pub submission_method: SubmissionMethod,
     pub retry_profile: String,
     pub finality_confirmations: u32,
+    /// Maximum concurrent receipt reads during confirmation drain.
+    pub receipt_concurrency: u32,
     pub output: PathBuf,
     pub quiet: bool,
     /// Chain ID used for transaction signing.
@@ -219,6 +225,9 @@ impl Args {
     where
         F: Fn(&str) -> anyhow::Result<Option<String>>,
     {
+        if self.receipt_concurrency == 0 {
+            anyhow::bail!("--receipt-concurrency must be greater than 0");
+        }
         if self.batch_size == 0 {
             anyhow::bail!("--batch-size must be greater than 0");
         }
@@ -304,6 +313,7 @@ impl Args {
             submission_method,
             retry_profile: self.retry_profile,
             finality_confirmations: self.finality_confirmations,
+            receipt_concurrency: self.receipt_concurrency,
             output: self.out,
             quiet: self.quiet,
             chain_id: self.chain_id,
@@ -391,6 +401,7 @@ mod tests {
             submission_method: submission_method.to_string(),
             retry_profile: "light".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             out: std::path::PathBuf::from("test-report.json"),
             quiet: true,
             chain_id: 19803,
@@ -526,6 +537,7 @@ mod tests {
         args.wave_delay_ms = 50;
         args.workers = 16;
         args.batch_size = 200;
+        args.receipt_concurrency = 7;
         args.quiet = false;
 
         let config = args.into_config().unwrap();
@@ -540,6 +552,7 @@ mod tests {
         assert_eq!(config.wave_delay_ms, 50);
         assert_eq!(config.worker_count, 16);
         assert_eq!(config.batch_size, 200);
+        assert_eq!(config.receipt_concurrency, 7);
         assert!(!config.quiet);
     }
 
@@ -560,6 +573,20 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Invalid RPC URL"), "got: {msg}");
+    }
+
+    #[test]
+    fn receipt_concurrency_is_configurable_and_rejects_zero() {
+        let mut args =
+            Args::try_parse_from(["evm-benchmark", "--receipt-concurrency", "2"]).unwrap();
+        assert_eq!(args.receipt_concurrency, 2);
+        args.receipt_concurrency = 0;
+        assert!(
+            args.into_config()
+                .unwrap_err()
+                .to_string()
+                .contains("--receipt-concurrency must be greater than 0")
+        );
     }
 
     #[test]

@@ -73,8 +73,8 @@ async fn ensure_account_funded(
 /// Poll `eth_getTransactionReceipt` for all pending txs concurrently.
 ///
 /// Each tx gets its own confirmation timestamp (captured after the RPC round-trip)
-/// for accurate per-tx latency measurement. Concurrency is capped at 200 to avoid
-/// overwhelming the RPC endpoint while still saturating the connection pool.
+/// for accurate per-tx latency measurement. The configured concurrency budget
+/// leaves RPC capacity for block tracking and independent observers.
 ///
 /// Used by both burst and sustained modes for reliable confirmation tracking.
 pub(crate) async fn poll_pending_receipts(
@@ -82,6 +82,7 @@ pub(crate) async fn poll_pending_receipts(
     rpc_url: &str,
     tracker: &LatencyTracker,
     finality_confirmations: u32,
+    receipt_concurrency: u32,
 ) {
     use futures::stream::{self, StreamExt};
 
@@ -114,14 +115,8 @@ pub(crate) async fn poll_pending_receipts(
         0
     };
 
-    // Capture a poll-start timestamp. This is the earliest possible confirmation time
-    // for any tx found in this round (they were mined at or before this moment).
-    // Per-tx: we record arrival immediately after each receipt is fetched so txs
-    // confirmed in earlier blocks don't inherit a later poll timestamp.
-    let poll_start = Instant::now();
-
     stream::iter(hashes)
-        .for_each_concurrent(200, |hash| {
+        .for_each_concurrent(receipt_concurrency.max(1) as usize, |hash| {
             let client = client.clone();
             let rpc_url = rpc_url.to_string();
             let tracker = tracker.clone();
@@ -169,12 +164,11 @@ pub(crate) async fn poll_pending_receipts(
                         .and_then(|v| v.as_str())
                         .and_then(parse_hex_u64)
                         .map(|status| status != 0);
-                    // Use poll_start as the arrival time: this is when we initiated
-                    // the poll round, so latency = submit_time → poll_start which
-                    // upper-bounds the true inclusion latency by at most poll_interval (25ms).
+                    // Record this response, including time spent queued behind
+                    // earlier reads. A poll-start timestamp would backdate it.
                     tracker.on_block_inclusion_with_receipt(
                         hash,
-                        poll_start,
+                        Instant::now(),
                         gas_used,
                         status_success,
                     );
@@ -742,6 +736,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
                 config.rpc.as_str(),
                 &tracker,
                 config.finality_confirmations,
+                config.receipt_concurrency,
             )
             .await;
         }
@@ -862,6 +857,7 @@ mod tests {
             submission_method: SubmissionMethod::Http,
             retry_profile: "off".to_string(),
             finality_confirmations: 0,
+            receipt_concurrency: 4,
             output: std::path::PathBuf::from("burst-test.json"),
             quiet: true,
             chain_id: 1,
@@ -1289,6 +1285,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn receipt_polling_timestamps_the_response_instead_of_the_poll_start() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(receipt_response(&format!("{:?}", B256::with_last_byte(1))))
+                    .set_delay(Duration::from_millis(100)),
+            )
+            .mount(&server)
+            .await;
+        let tracker = LatencyTracker::new();
+        tracker.record_submit(
+            B256::with_last_byte(1),
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+        poll_pending_receipts(&reqwest::Client::new(), &server.uri(), &tracker, 0, 1).await;
+        assert_eq!(tracker.confirmed_count(), 1);
+        assert!(
+            tracker.statistics().min >= 100,
+            "receipt observation was backdated"
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_polling_respects_configured_concurrency() {
+        let server = MockServer::start().await;
+        let arrivals = StdArc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
+        let peak = StdArc::new(AtomicUsize::new(0));
+        let seen = arrivals.clone();
+        let observed_peak = peak.clone();
+        Mock::given(method("POST"))
+            .respond_with(move |request: &Request| {
+                let mut arrivals = seen.lock().unwrap();
+                // Every response is delayed by 200 ms. Requests arriving in
+                // the preceding 100 ms therefore still overlap this request.
+                arrivals.retain(|at| at.elapsed() < Duration::from_millis(100));
+                arrivals.push(Instant::now());
+                observed_peak.fetch_max(arrivals.len(), Ordering::SeqCst);
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                ResponseTemplate::new(200)
+                    .set_body_json(receipt_response(body["params"][0].as_str().unwrap()))
+                    .set_delay(Duration::from_millis(200))
+            })
+            .expect(16)
+            .mount(&server)
+            .await;
+        let tracker = LatencyTracker::new();
+        for i in 1..=16 {
+            tracker.record_submit(
+                B256::with_last_byte(i),
+                0,
+                Address::default(),
+                21_000,
+                TransactionType::SimpleTransfer,
+            );
+        }
+        poll_pending_receipts(&reqwest::Client::new(), &server.uri(), &tracker, 0, 3).await;
+        assert_eq!(tracker.confirmed_count(), 16);
+        assert_eq!(tracker.pending_count(), 0);
+        assert!(
+            peak.load(Ordering::SeqCst) <= 3,
+            "receipt polling exceeded its read budget: {}",
+            peak.load(Ordering::SeqCst)
+        );
+    }
+
+    #[tokio::test]
     async fn test_poll_pending_receipts_confirms_single_tx() {
         let mock_server = MockServer::start().await;
 
@@ -1313,7 +1379,7 @@ mod tests {
         assert_eq!(tracker.pending_count(), 1);
         assert_eq!(tracker.confirmed_count(), 0);
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
 
         assert_eq!(tracker.confirmed_count(), 1);
         assert_eq!(tracker.pending_count(), 0);
@@ -1336,7 +1402,7 @@ mod tests {
         let tracker = LatencyTracker::new();
 
         // No pending txs — should return immediately without making any RPC calls.
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
 
         assert_eq!(tracker.pending_count(), 0);
         assert_eq!(tracker.confirmed_count(), 0);
@@ -1364,7 +1430,7 @@ mod tests {
             TransactionType::SimpleTransfer,
         );
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
 
         // The tx should remain pending since the receipt was null.
         assert_eq!(tracker.pending_count(), 1);
@@ -1392,7 +1458,7 @@ mod tests {
             TransactionType::SimpleTransfer,
         );
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
 
         assert_eq!(tracker.pending_count(), 1);
         assert_eq!(tracker.confirmed_count(), 0);
@@ -1429,7 +1495,7 @@ mod tests {
         assert_eq!(tracker.pending_count(), 3);
 
         // First poll — all still pending.
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
         assert_eq!(tracker.pending_count(), 3);
         assert_eq!(tracker.confirmed_count(), 0);
 
@@ -1441,7 +1507,7 @@ mod tests {
             .await;
 
         // Second poll — all should now be confirmed.
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
         assert_eq!(tracker.confirmed_count(), 3);
         assert_eq!(tracker.pending_count(), 0);
     }
@@ -1470,7 +1536,7 @@ mod tests {
         }
         assert_eq!(tracker.pending_count(), 10);
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 0, 4).await;
 
         assert_eq!(tracker.confirmed_count(), 10);
         assert_eq!(tracker.pending_count(), 0);
@@ -1518,7 +1584,7 @@ mod tests {
             TransactionType::SimpleTransfer,
         );
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1, 4).await;
 
         assert_eq!(tracker.confirmed_count(), 1);
         assert_eq!(tracker.pending_count(), 0);
@@ -1566,7 +1632,7 @@ mod tests {
             TransactionType::SimpleTransfer,
         );
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1, 4).await;
 
         assert_eq!(tracker.confirmed_count(), 0);
         assert_eq!(tracker.pending_count(), 1);
@@ -1601,7 +1667,7 @@ mod tests {
             TransactionType::SimpleTransfer,
         );
 
-        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1).await;
+        poll_pending_receipts(&client, &mock_server.uri(), &tracker, 1, 4).await;
 
         assert_eq!(tracker.confirmed_count(), 0);
         assert_eq!(tracker.pending_count(), 1);
@@ -1623,7 +1689,7 @@ mod tests {
             TransactionType::SimpleTransfer,
         );
 
-        poll_pending_receipts(&client, &format!("http://{}", addr), &tracker, 1).await;
+        poll_pending_receipts(&client, &format!("http://{}", addr), &tracker, 1, 4).await;
 
         assert_eq!(tracker.confirmed_count(), 0);
         assert_eq!(tracker.pending_count(), 1);

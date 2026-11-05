@@ -98,11 +98,18 @@ hash/receipt matching.
 Transactions are tracked from submission to on-chain confirmation:
 
 1. **Recent block scanning** — rescans recent block bodies so delayed receipt indexes or late block-body visibility do not undercount confirmations.
-2. **Receipt polling** — concurrent `eth_getTransactionReceipt` for smaller pending sets.
+2. **Receipt polling** — bounded concurrent `eth_getTransactionReceipt` for smaller pending sets.
 3. **WS BlockTracker** — `eth_subscribe("newHeads")` with `eth_getBlockReceipts`.
 
 Confirmed txs are **immediately removed** from the pending set (O(1) pending count).
-Latency is measured as `poll_start - submit_time` using monotonic `Instant` timestamps.
+Receipt polling records each successful response with a monotonic `Instant`; its
+latency includes the RPC round trip and any wait behind other receipt reads.
+It is an observation latency, not the exact time the chain included the transaction.
+
+`--receipt-concurrency` controls simultaneous receipt reads during confirmation
+drain (default `4`, must be positive). Leave room below the node’s read-admission
+limit for block tracking and other observers. This setting is independent of
+submission `--workers` and `--batch-size` and is captured in the JSON config.
 
 ### Per-Wave Latency Tracking
 

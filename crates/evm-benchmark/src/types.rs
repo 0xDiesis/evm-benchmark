@@ -399,8 +399,16 @@ pub struct ConfigSnapshot {
     pub worker_count: u32,
     #[serde(default)]
     pub finality_confirmations: u32,
+    /// Configured concurrent receipt-read budget.
+    #[serde(default = "legacy_receipt_concurrency")]
+    pub receipt_concurrency: u32,
     #[serde(default = "default_latency_basis")]
     pub latency_basis: String,
+}
+
+fn legacy_receipt_concurrency() -> u32 {
+    // Reports predating the configurable limit used this fixed concurrency.
+    200
 }
 
 fn default_latency_basis() -> String {
@@ -632,6 +640,7 @@ mod tests {
             wave_delay_ms: 0,
             worker_count: 8,
             finality_confirmations: 2,
+            receipt_concurrency: 4,
             latency_basis: "submit_to_receipt_with_2_confirmation_depth".into(),
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -639,6 +648,7 @@ mod tests {
         assert_eq!(deser.tx_count, 100);
         assert_eq!(deser.test_mode, "transfer");
         assert_eq!(deser.finality_confirmations, 2);
+        assert_eq!(deser.receipt_concurrency, 4);
         assert_eq!(
             deser.latency_basis,
             "submit_to_receipt_with_2_confirmation_depth"
@@ -649,6 +659,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(legacy.finality_confirmations, 0);
+        assert_eq!(legacy.receipt_concurrency, 200);
         assert_eq!(legacy.latency_basis, "submit_to_first_receipt");
     }
 
@@ -710,6 +721,7 @@ mod tests {
                 wave_delay_ms: 0,
                 worker_count: 8,
                 finality_confirmations: 0,
+                receipt_concurrency: 4,
                 latency_basis: "submit_to_first_receipt".into(),
             },
             results: BurstResult {
