@@ -62,6 +62,14 @@ the public-RPC anti-abuse profile. The values are still configurable with
 
 ### Sustained Target Accounting
 
+Sustained mode signs before the timed load and interleaves transactions across
+senders, preserving each sender's nonce order. Every sender is offered work
+before the next nonce round, including runs that use only part of the pre-signed
+pool. Workers submit one transaction per tick; `--batch-size` does not increase
+their submission concurrency. Pacing preserves fractional milliseconds, but
+timer resolution and RPC response time can still limit actual delivery. Increase
+`--workers` when measuring client headroom and check the accepted rate.
+
 Sustained reports include `target_tps`, `duration_secs`, and `batch_size` in the
 captured config. The result printers derive window attempted/accepted TPS from
 those fields and flag whether the load generator reached at least 95% of the
