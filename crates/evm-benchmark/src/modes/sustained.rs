@@ -42,13 +42,29 @@ fn signer_transaction_count(total_txs: usize, signer_count: usize, signer_idx: u
     base + usize::from(signer_idx < extra)
 }
 
-fn worker_interval_ms(tps_per_worker: f64) -> u64 {
-    if tps_per_worker > 0.0 {
-        (1000.0 / tps_per_worker) as u64
-    } else {
-        1000
+fn worker_interval(tps_per_worker: f64) -> Duration {
+    if !tps_per_worker.is_finite() || tps_per_worker <= 0.0 {
+        return Duration::from_secs(1);
     }
-    .max(1)
+    Duration::try_from_secs_f64(1.0 / tps_per_worker)
+        .unwrap_or(Duration::MAX)
+        .max(Duration::from_nanos(1))
+}
+
+// Keep each sender's nonce order while exposing the whole sender set at the
+// start of the timed run, even when only part of the headroom pool is consumed.
+fn interleave_sender_batches<T>(batches: Vec<Vec<T>>) -> Vec<T> {
+    let total = batches.iter().map(Vec::len).sum();
+    let mut batches: Vec<_> = batches.into_iter().map(Vec::into_iter).collect();
+    let mut interleaved = Vec::with_capacity(total);
+    while interleaved.len() < total {
+        for batch in &mut batches {
+            if let Some(tx) = batch.next() {
+                interleaved.push(tx);
+            }
+        }
+    }
+    interleaved
 }
 
 fn log_analysis_result(quiet: bool, analysis_ascii: Result<String>) {
@@ -85,8 +101,8 @@ async fn run_block_tracker_task(
 /// # Strategy
 /// - Pre-sign a pool of transactions so the hot loop only does submission,
 ///   not signing.
-/// - Divide the pre-signed pool evenly across workers; each worker uses
-///   `tokio::time::interval` for precise rate limiting.
+/// - Interleave senders in a shared pre-signed pool; workers use
+///   `tokio::time::interval` without truncating fractional milliseconds.
 /// - BlockTracker is kept alive through the post-run confirmation wait.
 /// - Timeline task captures per-second metrics.
 pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
@@ -143,7 +159,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     }
 
     let recipient = Address::with_last_byte(0x42);
-    let mut all_pre_signed = Vec::new();
+    let mut sender_batches = Vec::new();
     let evm_contracts = if config.test_mode == TestMode::Evm {
         Some(super::evm_contracts(config)?)
     } else {
@@ -198,11 +214,10 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
                 .sign_batch_parallel(tx_data)
                 .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?
         };
-        all_pre_signed.extend(signed);
+        sender_batches.push(signed);
     }
 
-    // Alias for existing code below
-    let pre_signed = all_pre_signed;
+    let pre_signed = interleave_sender_batches(sender_batches);
 
     if !config.quiet {
         println!("Pre-signing complete. Starting benchmark...");
@@ -424,9 +439,7 @@ async fn run_worker(
 ) {
     let pool_len = pre_signed.len() as u32;
 
-    let interval_ms = worker_interval_ms(tps_per_worker);
-
-    let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+    let mut interval = tokio::time::interval(worker_interval(tps_per_worker));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     while start.elapsed() < duration {
@@ -734,10 +747,9 @@ mod tests {
     }
 
     #[test]
-    fn test_interval_ms_clamped_to_one() {
-        let tps_per_worker = 100_000.0f64;
-        let interval_ms = ((1000.0 / tps_per_worker) as u64).max(1);
-        assert_eq!(interval_ms, 1);
+    fn test_interval_supports_submillisecond_rates_without_zero_duration() {
+        assert_eq!(worker_interval(100_000.0), Duration::from_micros(10));
+        assert_eq!(worker_interval(f64::MAX), Duration::from_nanos(1));
     }
 
     #[tokio::test]
@@ -865,17 +877,43 @@ mod tests {
 
     #[test]
     fn test_interval_for_very_low_tps() {
-        assert_eq!(worker_interval_ms(0.5), 2000);
+        assert_eq!(worker_interval(0.5), Duration::from_secs(2));
     }
 
     #[test]
     fn test_interval_for_zero_tps() {
-        assert_eq!(worker_interval_ms(0.0), 1000);
+        assert_eq!(worker_interval(0.0), Duration::from_secs(1));
     }
 
     #[test]
     fn test_interval_for_negative_tps() {
-        assert_eq!(worker_interval_ms(-1.0), 1000);
+        assert_eq!(worker_interval(-1.0), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_interval_for_nonfinite_tps() {
+        assert_eq!(worker_interval(f64::NAN), Duration::from_secs(1));
+        assert_eq!(worker_interval(f64::INFINITY), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_interval_preserves_fractional_milliseconds() {
+        assert_eq!(
+            worker_interval(1200.0 / 8.0),
+            Duration::from_nanos(6_666_667)
+        );
+        assert_eq!(worker_interval(2000.0), Duration::from_micros(500));
+    }
+
+    #[test]
+    fn test_sender_pool_uses_every_sender_before_next_nonce() {
+        let batches = vec![vec![(0, 7), (0, 8), (0, 9)], vec![(1, 2), (1, 3)], vec![]];
+        assert_eq!(
+            interleave_sender_batches(batches),
+            vec![(0, 7), (1, 2), (0, 8), (1, 3), (0, 9)]
+        );
+        assert!(interleave_sender_batches::<u64>(vec![]).is_empty());
+        assert!(interleave_sender_batches::<u64>(vec![vec![], vec![]]).is_empty());
     }
 
     // ── Pre-signing pool sizing ──────────────────────────────────────────
@@ -947,15 +985,13 @@ mod tests {
     /// Worker interval for 1 TPS per worker is 1000ms.
     #[test]
     fn test_interval_for_1_tps() {
-        assert_eq!(worker_interval_ms(1.0), 1000);
+        assert_eq!(worker_interval(1.0), Duration::from_secs(1));
     }
 
     /// Worker interval for 10 TPS is 100ms.
     #[test]
     fn test_interval_for_10_tps() {
-        let tps_per_worker = 10.0f64;
-        let interval_ms = (1000.0 / tps_per_worker) as u64;
-        assert_eq!(interval_ms, 100);
+        assert_eq!(worker_interval(10.0), Duration::from_millis(100));
     }
 
     /// Actual TPS: confirmed / duration.
@@ -1092,7 +1128,7 @@ mod tests {
         let worker_count = 100usize;
         let tps_per_worker = target_tps / worker_count as f64;
         assert!((tps_per_worker - 0.1).abs() < 0.001);
-        assert_eq!(worker_interval_ms(tps_per_worker), 10_000);
+        assert_eq!(worker_interval(tps_per_worker), Duration::from_secs(10));
     }
 
     #[tokio::test]
