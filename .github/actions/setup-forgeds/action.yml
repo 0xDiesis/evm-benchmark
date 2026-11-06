@@ -1,0 +1,131 @@
+name: Setup forgeds
+description: Install the pinned Diesis Foundry fork revision, preferring its prebuilt release binary
+
+inputs:
+  revision:
+    description: Full commit SHA of the Diesis Foundry fork to install
+    default: bb92ff96b819bcea5ced55228d122ac725e9ffd9
+
+runs:
+  using: composite
+  steps:
+    - name: Restore forgeds binary
+      id: forgeds-cache
+      uses: actions/cache@v5
+      with:
+        path: ~/.cargo/bin/forgeds${{ runner.os == 'Windows' && '.exe' || '' }}
+        key: forgeds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.0-${{ inputs.revision }}
+
+    # The prebuilt binary is used only when its checksum matches and it reports
+    # the pinned commit; otherwise the pinned revision is built from source below.
+    - name: Install prebuilt forgeds
+      id: prebuilt
+      if: steps.forgeds-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        FORGEDS_REVISION: ${{ inputs.revision }}
+      run: |
+        set -euo pipefail
+        # Every fork build adds its commit-named archives to the forgeds release.
+        release_url="https://github.com/doublesharp/foundry/releases/download/forgeds"
+        executable=forgeds
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64) platform=linux_amd64 ;;
+          Linux-ARM64) platform=linux_arm64 ;;
+          macOS-ARM64) platform=darwin_arm64 ;;
+          Windows-X64) platform=win32_amd64; executable=forgeds.exe ;;
+          *) echo "::notice::No prebuilt forgeds for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 0 ;;
+        esac
+        archive="forgeds-${FORGEDS_REVISION:0:7}_${platform}.tar.gz"
+        work="$(mktemp -d)"
+        trap 'rm -rf "$work"' EXIT
+        if ! curl -fsSL --retry 3 -o "$work/$archive" "$release_url/$archive" \
+          || ! curl -fsSL --retry 3 -o "$work/$archive.sha256" "$release_url/$archive.sha256"; then
+          echo "::notice::Prebuilt forgeds is unavailable; building from source"
+          exit 0
+        fi
+        expected="$(cut -d ' ' -f 1 "$work/$archive.sha256")"
+        if command -v sha256sum >/dev/null; then
+          actual="$(sha256sum "$work/$archive" | cut -d ' ' -f 1)"
+        else
+          actual="$(shasum -a 256 "$work/$archive" | cut -d ' ' -f 1)"
+        fi
+        if [ "$expected" != "$actual" ]; then
+          echo "::error::forgeds archive checksum mismatch"
+          exit 1
+        fi
+        tar -xzf "$work/$archive" -C "$work"
+        if ! "$work/$executable" --version | grep -qF "Commit SHA: $FORGEDS_REVISION"; then
+          echo "::notice::Prebuilt forgeds is not the pinned revision; building from source"
+          exit 0
+        fi
+        mkdir -p "$HOME/.cargo/bin"
+        install -m 0755 "$work/$executable" "$HOME/.cargo/bin/$executable"
+        echo "installed=true" >> "$GITHUB_OUTPUT"
+
+    - name: Setup pinned Rust for forgeds
+      if: steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
+      uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+      with:
+        toolchain: 1.99.0
+
+    - name: Install Linux source build dependencies
+      if: runner.os == 'Linux' && steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends libudev-dev pkg-config
+
+    - name: Check out pinned forgeds source
+      if: steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        repository: doublesharp/foundry
+        ref: ${{ inputs.revision }}
+        path: .forgeds-source
+        persist-credentials: false
+
+    - name: Cache forgeds build dependencies
+      if: steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+      with:
+        workspaces: .forgeds-source -> target
+        key: forgeds-${{ runner.os }}-${{ runner.arch }}
+        cache-bin: false
+        cache-on-failure: true
+
+    - name: Build forgeds from the pinned source revision
+      if: steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
+      shell: bash
+      env:
+        RUSTC_WRAPPER: ""
+        CARGO_INCREMENTAL: "0"
+        CARGO_TARGET_DIR: ${{ github.workspace }}/.forgeds-source/target
+      run: |
+        features="forgeds,asm-keccak,optimism"
+        if [[ "$RUNNER_OS" != "Windows" && "${RUNNER_OS}-${RUNNER_ARCH}" != "Linux-ARM64" ]]; then
+          features="${features},jemalloc"
+        fi
+        cargo +1.99.0 install --path .forgeds-source/crates/forge --locked \
+          --bin forgeds --no-default-features --features "$features"
+
+    - name: Verify forgeds revision
+      shell: bash
+      env:
+        FORGEDS_REVISION: ${{ inputs.revision }}
+      run: |
+        set -euo pipefail
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        executable=forgeds
+        if [ "$RUNNER_OS" = Windows ]; then executable=forgeds.exe; fi
+        version="$("$HOME/.cargo/bin/$executable" --version)"
+        printf '%s\n' "$version"
+        grep -F "Commit SHA: $FORGEDS_REVISION" <<<"$version"
+
+    - name: Cache compiler results
+      uses: actions/cache@v5
+      with:
+        path: ~/.foundry/cache/compilers
+        key: forgeds-compilers-${{ runner.os }}-${{ runner.arch }}-${{ inputs.revision }}-${{ github.sha }}
+        restore-keys: |
+          forgeds-compilers-${{ runner.os }}-${{ runner.arch }}-${{ inputs.revision }}-
