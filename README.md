@@ -558,12 +558,12 @@ Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CAC
 ### Foundry executable
 
 Use `./scripts/forge.sh` from the repository root for Foundry commands. It prefers
-`forge-ds` when installed, otherwise uses standard `forge`. Set `FORGE_BIN` to
+`forgeds` when installed, otherwise uses standard `forge`. Set `FORGE_BIN` to
 a specific executable to override selection. A selected compiler failure is
 returned directly; it never retries with another compiler. For tools that launch
 Forge internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
 
-Make and CI entry points use this selection too. CI builds and caches `forge-ds`
+Make and CI entry points use this selection too. CI builds and caches `forgeds`
 from the pinned Diesis fork revision, then verifies that revision before use.
 Solidity keeps Foundry artifact caching; Rust uses sccache separately.
 `RUSTC_WRAPPER` applies only to Rust compilation.

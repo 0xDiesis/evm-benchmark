@@ -92,8 +92,8 @@ jobs:
             doublcov-contracts-history-${{ github.ref_name }}-
             doublcov-contracts-history-
 
-      - name: Setup forge-ds
-        uses: ./.github/actions/setup-forge-ds
+      - name: Setup forgeds
+        uses: ./.github/actions/setup-forgeds
 
       - name: Test forge launcher routing
         run: python3 -m unittest scripts.tests.test_forge_launcher
