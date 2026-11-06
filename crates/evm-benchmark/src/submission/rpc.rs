@@ -89,7 +89,9 @@ impl RpcSubmitter {
         batch_size: u32,
         retry_profile: &str,
     ) -> Result<Self> {
-        let client = Client::builder().pool_max_idle_per_host(32).build()?;
+        // Preserve peak concurrency between paced bursts. A smaller fixed idle
+        // cap discards sockets and can exhaust local TCP ports under load.
+        let client = Client::builder().build()?;
 
         Ok(RpcSubmitter {
             rpc_url: rpc_url.clone(),
@@ -370,6 +372,89 @@ mod tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[tokio::test]
+    async fn concurrent_bursts_reuse_their_http_connections() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        const CONCURRENT: usize = 40;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(tokio::sync::Barrier::new(CONCURRENT + 1));
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let server_connections = Arc::clone(&connections);
+        let server_barrier = Arc::clone(&barrier);
+        let server = tokio::spawn(async move {
+            let mut handlers = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    _ = &mut stop_rx => break,
+                    accepted = listener.accept() => {
+                        let (mut stream, _) = accepted.unwrap();
+                        server_connections.fetch_add(1, Ordering::SeqCst);
+                        let barrier = Arc::clone(&server_barrier);
+                        handlers.spawn(async move {
+                            loop {
+                                let mut header = Vec::new();
+                                let mut byte = [0];
+                                while !header.ends_with(b"\r\n\r\n") {
+                                    if stream.read_exact(&mut byte).await.is_err() {
+                                        return;
+                                    }
+                                    header.push(byte[0]);
+                                    assert!(header.len() < 8192);
+                                }
+                                let header = String::from_utf8(header).unwrap();
+                                let length: usize = header.lines().find_map(|line| {
+                                    line.to_ascii_lowercase().strip_prefix("content-length: ")
+                                        .map(|value| value.parse().unwrap())
+                                }).expect("request body length");
+                                assert!(length < 8192);
+                                let mut body = vec![0; length];
+                                stream.read_exact(&mut body).await.unwrap();
+                                // Every request in a burst holds its socket until all
+                                // concurrent requests arrive, independently of timing.
+                                barrier.wait().await;
+                                let body = r#"[{"jsonrpc":"2.0","id":0,"result":"0xaaaa"}]"#;
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                                    body.len(), body
+                                );
+                                stream.write_all(response.as_bytes()).await.unwrap();
+                            }
+                        });
+                    }
+                }
+            }
+            handlers.abort_all();
+            while handlers.join_next().await.is_some() {}
+        });
+        let submitter = RpcSubmitter::with_retry_profile(&url, 200, "off").unwrap();
+        for burst in 0..2 {
+            let requests = futures::future::join_all((0..CONCURRENT).map(|nonce| {
+                submitter.submit_single(make_test_tx((burst * CONCURRENT + nonce) as u64))
+            }));
+            let (results, _) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(requests, barrier.wait())
+            })
+            .await
+            .expect("all requests in the burst complete");
+            assert!(results.iter().all(|result| {
+                result
+                    .as_ref()
+                    .is_ok_and(|result| result.submitted == 1 && result.errors == 0)
+            }));
+        }
+        stop_tx.send(()).unwrap();
+        server.await.unwrap();
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            CONCURRENT,
+            "the second burst should reuse the first burst's sockets"
+        );
+    }
     /// Helper to build a test transaction with a given nonce.
     fn make_test_tx(nonce: u64) -> SignedTxWithMetadata {
         SignedTxWithMetadata {

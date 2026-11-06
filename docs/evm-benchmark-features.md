@@ -44,6 +44,9 @@ evm-benchmark --update-targets --txs 2000 --execution burst
 | **HTTP** (default) | `--submission-method http` | JSON-RPC batch submission with connection pooling |
 | **WebSocket** | `--submission-method ws` | Persistent WS connection with per-tx retry |
 
+HTTP clients retain idle connections across concurrent bursts to avoid exhausting
+local TCP ports during sustained high-rate runs.
+
 HTTP mode supports **multi-endpoint round-robin** with automatic failover:
 - Health tracking per endpoint (3 consecutive failures = degraded)
 - 30-second recovery timeout for degraded endpoints
