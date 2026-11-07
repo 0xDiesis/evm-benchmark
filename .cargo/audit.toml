@@ -1,0 +1,8 @@
+# cargo audit exceptions, each with its reason.
+[advisories]
+ignore = [
+    # crypto-bigint 0.5.5 via elliptic-curve 0.13 (k256, alloy-signer); fixed only
+    # in 0.7.6+, which needs elliptic-curve 0.14 across Alloy. Remove this
+    # exception when that upgrade lands.
+    "RUSTSEC-2026-0387",
+]
