@@ -14,7 +14,7 @@ runs:
       uses: actions/cache@v5
       with:
         path: ~/.cargo/bin/forgeds${{ runner.os == 'Windows' && '.exe' || '' }}
-        key: forgeds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.0-${{ inputs.revision }}
+        key: forgeds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.1-${{ inputs.revision }}
 
     # The prebuilt binary is used only when its checksum matches and it reports
     # the pinned commit; otherwise the pinned revision is built from source below.
@@ -67,7 +67,7 @@ runs:
       if: steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
       uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
       with:
-        toolchain: 1.99.0
+        toolchain: 1.99.1
 
     - name: Install Linux source build dependencies
       if: runner.os == 'Linux' && steps.forgeds-cache.outputs.cache-hit != 'true' && steps.prebuilt.outputs.installed != 'true'
@@ -106,7 +106,7 @@ runs:
         if [[ "$RUNNER_OS" != "Windows" && "${RUNNER_OS}-${RUNNER_ARCH}" != "Linux-ARM64" ]]; then
           features="${features},jemalloc"
         fi
-        cargo +1.99.0 install --path .forgeds-source/crates/forge --locked \
+        cargo +1.99.1 install --path .forgeds-source/crates/forge --locked \
           --bin forgeds --no-default-features --features "$features"
 
     - name: Verify forgeds revision
