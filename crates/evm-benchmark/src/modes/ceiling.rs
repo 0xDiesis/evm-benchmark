@@ -447,6 +447,7 @@ async fn wait_for_pending_confirmations(
                 &mut *poller.last_scanned_block,
                 poller.scan_floor_block,
                 poller.finality_confirmations,
+                confirm_start + max_confirm_wait,
             )
             .await;
             if super::burst::should_poll_receipts(tracker.pending_count()) {

@@ -319,6 +319,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     // BlockTracker (WS newHeads) is kept alive as a backup but receipt polling
     // catches txs that the WS subscription misses.
     let confirm_start = Instant::now();
+    let confirm_deadline = confirm_start + max_wait;
     while confirm_start.elapsed() < max_wait && tracker.pending_count() > 0 {
         metrics.set_pending_transactions(tracker.pending_count() as i64);
         super::burst::poll_new_block_inclusions(
@@ -328,6 +329,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
             &mut last_scanned_block,
             scan_floor_block,
             config.finality_confirmations,
+            confirm_deadline,
         )
         .await;
         if super::burst::should_poll_receipts(tracker.pending_count()) {
@@ -350,6 +352,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         &mut last_scanned_block,
         scan_floor_block,
         config.finality_confirmations,
+        Instant::now() + super::burst::FINAL_INCLUSION_SCAN_GRACE,
     )
     .await;
 

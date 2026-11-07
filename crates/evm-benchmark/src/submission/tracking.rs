@@ -3,7 +3,7 @@ use alloy_primitives::{Address, B256};
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::Instant;
 
 /// Confirmed transaction entry with latency data.
@@ -44,6 +44,12 @@ pub struct WaveEntry {
 pub struct LatencyTracker {
     /// Pending transactions awaiting confirmation.
     pending: Arc<DashMap<B256, TxRecord>>,
+    /// Pending hash for each sender and nonce, so block-body identity matching
+    /// stays constant-time while many transactions are pending.
+    pending_by_sender_nonce: Arc<DashMap<(Address, u64), B256>>,
+    /// Pending records visited by linear scans. Confirmation lookups must not
+    /// add to this; it lets tests prove they stay bounded.
+    pending_scan_visits: Arc<AtomicU64>,
     /// Confirmed transactions moved out of pending immediately.
     confirmed: Arc<parking_lot::Mutex<Vec<ConfirmedEntry>>>,
     /// Atomic confirmed count for lock-free reads.
@@ -54,6 +60,8 @@ impl Clone for LatencyTracker {
     fn clone(&self) -> Self {
         LatencyTracker {
             pending: Arc::clone(&self.pending),
+            pending_by_sender_nonce: Arc::clone(&self.pending_by_sender_nonce),
+            pending_scan_visits: Arc::clone(&self.pending_scan_visits),
             confirmed: Arc::clone(&self.confirmed),
             confirmed_count: Arc::clone(&self.confirmed_count),
         }
@@ -70,6 +78,8 @@ impl LatencyTracker {
     pub fn new() -> Self {
         LatencyTracker {
             pending: Arc::new(DashMap::new()),
+            pending_by_sender_nonce: Arc::new(DashMap::new()),
+            pending_scan_visits: Arc::new(AtomicU64::new(0)),
             confirmed: Arc::new(parking_lot::Mutex::new(Vec::new())),
             confirmed_count: Arc::new(AtomicU32::new(0)),
         }
@@ -144,6 +154,8 @@ impl LatencyTracker {
             revert_status: None,
             wave: meta.wave,
         };
+        self.pending_by_sender_nonce
+            .insert((meta.sender, meta.nonce), meta.hash);
         self.pending.insert(meta.hash, record);
     }
 
@@ -163,6 +175,8 @@ impl LatencyTracker {
         status_success: Option<bool>,
     ) -> bool {
         if let Some((_, record)) = self.pending.remove(&tx_hash) {
+            self.pending_by_sender_nonce
+                .remove_if(&(record.sender, record.nonce), |_, hash| *hash == tx_hash);
             let latency_ms = block_time
                 .saturating_duration_since(record.submit_time)
                 .as_millis() as u64;
@@ -193,10 +207,9 @@ impl LatencyTracker {
         block_time: Instant,
     ) -> bool {
         let pending_hash = self
-            .pending
-            .iter()
-            .find(|entry| entry.sender == sender && entry.nonce == nonce)
-            .map(|entry| *entry.key());
+            .pending_by_sender_nonce
+            .get(&(sender, nonce))
+            .map(|entry| *entry.value());
         if let Some(hash) = pending_hash {
             self.on_block_inclusion(hash, block_time)
         } else {
@@ -216,6 +229,8 @@ impl LatencyTracker {
             .iter()
             .map(|entry| (*entry.key(), entry.submit_time))
             .collect();
+        self.pending_scan_visits
+            .fetch_add(pending.len() as u64, Ordering::Relaxed);
         pending.sort_by_key(|(_, submit_time)| *submit_time);
 
         let mut confirmed = 0;
@@ -225,6 +240,11 @@ impl LatencyTracker {
             }
         }
         confirmed
+    }
+
+    /// Pending records visited by linear scans since the tracker was created.
+    pub fn pending_scan_visits(&self) -> u64 {
+        self.pending_scan_visits.load(Ordering::Relaxed)
     }
 
     /// Number of transactions still awaiting confirmation.
@@ -447,6 +467,71 @@ mod tests {
         assert_eq!(tracker.pending_count(), 0);
         assert_eq!(tracker.confirmed_count(), 1);
         assert!(!tracker.on_account_nonce_inclusion(sender, 7, Instant::now()));
+    }
+
+    #[test]
+    fn account_nonce_lookups_do_not_scan_pending_transactions() {
+        let tracker = LatencyTracker::new();
+        let pending = 20_000u64;
+        let sender = Address::with_last_byte(0x22);
+        for nonce in 0..pending {
+            let mut bytes = [0u8; 32];
+            bytes[24..].copy_from_slice(&nonce.to_be_bytes());
+            tracker.record_submit(
+                B256::from(bytes),
+                nonce,
+                sender,
+                21_000,
+                TransactionType::SimpleTransfer,
+            );
+        }
+
+        // A rescanned block repeats identities that are already confirmed or
+        // belong to other clients. None of them may walk the pending map.
+        let block_time = Instant::now();
+        let other_sender = Address::with_last_byte(0x33);
+        for nonce in 0..10_000u64 {
+            assert!(!tracker.on_account_nonce_inclusion(other_sender, nonce, block_time));
+        }
+        for nonce in 0..pending {
+            assert!(tracker.on_account_nonce_inclusion(sender, nonce, block_time));
+            assert!(!tracker.on_account_nonce_inclusion(sender, nonce, block_time));
+        }
+
+        assert_eq!(tracker.pending_scan_visits(), 0);
+        assert_eq!(tracker.pending_count(), 0);
+        assert_eq!(tracker.confirmed_count(), pending as u32);
+        assert!(tracker.pending_by_sender_nonce.is_empty());
+    }
+
+    #[test]
+    fn hash_confirmation_releases_sender_nonce_identity() {
+        let tracker = LatencyTracker::new();
+        let hash = B256::with_last_byte(0x51);
+        let sender = Address::with_last_byte(0x52);
+        tracker.record_submit(hash, 3, sender, 21_000, TransactionType::SimpleTransfer);
+
+        assert!(tracker.on_block_inclusion(hash, Instant::now()));
+        assert!(tracker.pending_by_sender_nonce.is_empty());
+        assert!(!tracker.on_account_nonce_inclusion(sender, 3, Instant::now()));
+        assert_eq!(tracker.confirmed_count(), 1);
+    }
+
+    #[test]
+    fn replaced_identity_keeps_the_latest_pending_hash() {
+        let tracker = LatencyTracker::new();
+        let sender = Address::with_last_byte(0x61);
+        let original = B256::with_last_byte(0x62);
+        let replacement = B256::with_last_byte(0x63);
+        for hash in [original, replacement] {
+            tracker.record_submit(hash, 9, sender, 21_000, TransactionType::SimpleTransfer);
+        }
+
+        // Confirming the superseded hash must not drop the replacement's index.
+        assert!(tracker.on_block_inclusion(original, Instant::now()));
+        assert!(tracker.on_account_nonce_inclusion(sender, 9, Instant::now()));
+        assert_eq!(tracker.pending_count(), 0);
+        assert_eq!(tracker.confirmed_count(), 2);
     }
 
     #[test]

@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 const MIN_BALANCE_WEI: u128 = 1_000_000_000_000_000_000; // 1 ETH
 const RECEIPT_POLL_PENDING_LIMIT: u32 = 512;
 const BLOCK_CONFIRM_RESCAN_DEPTH: u64 = 64;
+/// Time allowed for the closing block scan after the confirmation wait ends.
+pub(crate) const FINAL_INCLUSION_SCAN_GRACE: Duration = Duration::from_secs(5);
 
 struct BlockTxIdentity {
     hash: Option<B256>,
@@ -257,6 +259,9 @@ async fn fetch_block_transactions(
 
 /// Scan newly produced blocks for pending benchmark tx hashes.
 ///
+/// The scan stops at `deadline`, between blocks, and records only the blocks it
+/// finished.
+///
 /// Some EVM nodes can expose block bodies before receipt indexes are cheap to
 /// query under load. Block scanning prevents confirmed transactions from being
 /// reported as pending when `eth_getTransactionReceipt` lags.
@@ -267,7 +272,11 @@ pub(crate) async fn poll_new_block_inclusions(
     last_scanned_block: &mut u64,
     scan_floor_block: u64,
     finality_confirmations: u32,
+    deadline: Instant,
 ) {
+    if Instant::now() >= deadline {
+        return;
+    }
     let Some(latest_block) = rpc_latest_block_number(client, rpc_url).await else {
         return;
     };
@@ -282,6 +291,11 @@ pub(crate) async fn poll_new_block_inclusions(
     let mut processed_to = *last_scanned_block;
     let assume_isolated_blocks = assume_isolated_block_counts();
     for block_num in scan_from..=scan_to {
+        // Stop between blocks so a large rescan cannot outlive the caller's
+        // confirmation deadline. Unscanned blocks are retried by the next pass.
+        if Instant::now() >= deadline {
+            break;
+        }
         let Some(block_txs) = fetch_block_transactions(client, rpc_url, block_num).await else {
             break;
         };
@@ -719,6 +733,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
     // We poll every 25ms until all txs are confirmed or max_wait is exceeded.
     let confirm_start = Instant::now();
 
+    let confirm_deadline = confirm_start + max_wait;
     while confirm_start.elapsed() < max_wait && tracker.pending_count() > 0 {
         metrics.set_pending_transactions(tracker.pending_count() as i64);
         poll_new_block_inclusions(
@@ -728,6 +743,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
             &mut last_scanned_block,
             scan_floor_block,
             config.finality_confirmations,
+            confirm_deadline,
         )
         .await;
         if should_poll_receipts(tracker.pending_count()) {
@@ -751,6 +767,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         &mut last_scanned_block,
         scan_floor_block,
         config.finality_confirmations,
+        Instant::now() + FINAL_INCLUSION_SCAN_GRACE,
     )
     .await;
 
@@ -1088,6 +1105,7 @@ mod tests {
             &mut last_scanned_block,
             1,
             0,
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
 
@@ -1138,6 +1156,7 @@ mod tests {
             &mut last_scanned_block,
             1,
             1,
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
 
@@ -1193,6 +1212,7 @@ mod tests {
             &mut last_scanned_block,
             1,
             0,
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
 
@@ -1242,12 +1262,47 @@ mod tests {
             &mut last_scanned_block,
             1,
             0,
+            Instant::now() + Duration::from_secs(60),
         )
         .await;
 
         assert_eq!(last_scanned_block, 3);
         assert_eq!(tracker.confirmed_count(), 1);
         assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn expired_deadline_stops_block_inclusion_scan() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+        let tracker = LatencyTracker::new();
+        tracker.record_submit(
+            B256::with_last_byte(0xf6),
+            0,
+            Address::default(),
+            21_000,
+            TransactionType::SimpleTransfer,
+        );
+
+        let client = reqwest::Client::new();
+        let mut last_scanned_block = 2;
+        poll_new_block_inclusions(
+            &client,
+            &mock_server.uri(),
+            &tracker,
+            &mut last_scanned_block,
+            1,
+            0,
+            Instant::now(),
+        )
+        .await;
+
+        assert_eq!(last_scanned_block, 2);
+        assert_eq!(tracker.pending_count(), 1);
     }
 
     #[test]
