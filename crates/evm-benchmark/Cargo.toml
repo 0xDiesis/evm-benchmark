@@ -54,17 +54,17 @@ chrono = { version = "0.4", features = ["serde"] }
 rayon = "1.7"
 
 # HTTP client with connection pooling (rustls avoids OpenSSL system dependency)
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 
 # Archive extraction (for downloading bench-targets from GitHub)
 flate2 = "1"
 tar = "0.4"
 
 # Raw WebSocket for block tracking (rustls avoids OpenSSL system dependency)
-tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 
-# Prometheus metrics
-prometheus = "0.13"
+# Prometheus metrics (text exposition only, so the protobuf encoder is not built)
+prometheus = { version = "0.14", default-features = false }
 
 # Testing
 [dev-dependencies]

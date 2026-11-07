@@ -99,7 +99,7 @@ impl BlockTracker {
             "id": 1
         });
         ws_stream
-            .send(Message::Text(sub_msg.to_string()))
+            .send(Message::Text(sub_msg.to_string().into()))
             .await
             .map_err(|e| anyhow::anyhow!("WS send failed: {}", e))?;
 
@@ -116,7 +116,7 @@ impl BlockTracker {
                 "WS subscription failed: non-text confirmation"
             ));
         };
-        let resp: serde_json::Value = serde_json::from_str(&text.to_string())
+        let resp: serde_json::Value = serde_json::from_str(text.as_str())
             .map_err(|e| anyhow::anyhow!("WS subscription response parse error: {}", e))?;
         if resp.get("result").is_none() {
             return Err(anyhow::anyhow!("WS subscription failed: {:?}", resp));
@@ -420,7 +420,7 @@ mod tests {
             let text = first_message
                 .into_text()
                 .expect("subscription request should be a text frame");
-            let request: Value = serde_json::from_str(&text.to_string())
+            let request: Value = serde_json::from_str(text.as_str())
                 .expect("subscription request should be valid json");
             assert_eq!(
                 request.get("method").and_then(|m| m.as_str()),
@@ -698,10 +698,14 @@ mod tests {
             }
         });
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
+            Message::Text(
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
+                    .to_string()
+                    .into(),
+            ),
             vec![
-                Message::Ping(vec![1, 2, 3]),
-                Message::Text(new_head.to_string()),
+                Message::Ping(vec![1u8, 2, 3].into()),
+                Message::Text(new_head.to_string().into()),
             ],
             Duration::from_millis(250),
         )
@@ -734,7 +738,8 @@ mod tests {
         let (ws_url, server_task) = start_heads_ws_server(
             Message::Text(
                 json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "denied"}})
-                    .to_string(),
+                    .to_string()
+                    .into(),
             ),
             Vec::new(),
             Duration::from_millis(50),
@@ -762,7 +767,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_with_ready_delegates_and_signals_ready() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
+            Message::Text(
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
+                    .to_string()
+                    .into(),
+            ),
             Vec::new(),
             Duration::from_millis(125),
         )
@@ -789,7 +798,7 @@ mod tests {
     #[tokio::test]
     async fn test_run_ws_raw_rejects_non_text_subscription_confirmation() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Ping(vec![7]),
+            Message::Ping(vec![7u8].into()),
             Vec::new(),
             Duration::from_millis(125),
         )
@@ -816,7 +825,11 @@ mod tests {
     #[tokio::test]
     async fn test_run_ws_raw_errors_when_stream_ends_after_close_frame() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
+            Message::Text(
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
+                    .to_string()
+                    .into(),
+            ),
             vec![Message::Close(None)],
             Duration::from_millis(25),
         )
@@ -926,14 +939,19 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
     #[tokio::test]
     async fn test_run_ws_raw_ignores_invalid_new_head_messages() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
+            Message::Text(
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
+                    .to_string()
+                    .into(),
+            ),
             vec![Message::Text(
                 json!({
                     "jsonrpc": "2.0",
                     "method": "eth_subscription",
                     "params": {"subscription": "0xsub", "result": {"number": "not-hex"}}
                 })
-                .to_string(),
+                .to_string()
+                .into(),
             )],
             Duration::from_secs(1),
         )
@@ -958,7 +976,11 @@ Sec-WebSocket-Accept: {accept_key}\r\n\r\n"
     #[tokio::test]
     async fn test_run_ws_raw_times_out_cleanly_at_deadline() {
         let (ws_url, server_task) = start_heads_ws_server(
-            Message::Text(json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"}).to_string()),
+            Message::Text(
+                json!({"jsonrpc": "2.0", "id": 1, "result": "0xsub"})
+                    .to_string()
+                    .into(),
+            ),
             Vec::new(),
             Duration::from_millis(150),
         )

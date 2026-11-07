@@ -127,11 +127,11 @@ mod tests {
                 let text = message
                     .into_text()
                     .expect("ws request should be sent as a text frame");
-                let request: Value = serde_json::from_str(&text.to_string())
-                    .expect("ws request should be valid json");
+                let request: Value =
+                    serde_json::from_str(text.as_str()).expect("ws request should be valid json");
                 let response = handler(request);
                 socket
-                    .send(Message::Text(response.to_string()))
+                    .send(Message::Text(response.to_string().into()))
                     .await
                     .expect("failed to send ws response");
             }
