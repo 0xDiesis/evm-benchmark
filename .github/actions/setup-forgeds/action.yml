@@ -4,7 +4,7 @@ description: Install the pinned Diesis Foundry fork revision, preferring its pre
 inputs:
   revision:
     description: Full commit SHA of the Diesis Foundry fork to install
-    default: bb92ff96b819bcea5ced55228d122ac725e9ffd9
+    default: 4ca15fcba25aa61a1b436d28b428e30b459f3d56
 
 runs:
   using: composite
