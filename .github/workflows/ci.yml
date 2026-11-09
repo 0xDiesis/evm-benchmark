@@ -30,7 +30,26 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Configure Cargo Steward wrapper
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ -n "${RUSTC_WRAPPER:-}" && "$RUSTC_WRAPPER" != cargo-steward ]]; then
+            printf 'CARGO_STEWARD_INNER=%s\n' "$RUSTC_WRAPPER" >> "$GITHUB_ENV"
+          fi
+          echo "RUSTC_WRAPPER=cargo-steward" >> "$GITHUB_ENV"
+      - name: Track Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: start
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Trim Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: trim
+          budget: 4GiB
 
   test:
     name: Test
@@ -39,7 +58,26 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
+      - name: Configure Cargo Steward wrapper
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ -n "${RUSTC_WRAPPER:-}" && "$RUSTC_WRAPPER" != cargo-steward ]]; then
+            printf 'CARGO_STEWARD_INNER=%s\n' "$RUSTC_WRAPPER" >> "$GITHUB_ENV"
+          fi
+          echo "RUSTC_WRAPPER=cargo-steward" >> "$GITHUB_ENV"
+      - name: Track Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: start
       - run: cargo test --all-targets
+      - name: Trim Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: trim
+          budget: 4GiB
 
   bytecode-check:
     name: Bytecode Check

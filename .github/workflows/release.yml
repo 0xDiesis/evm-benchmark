@@ -41,12 +41,32 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      - name: Configure Cargo Steward wrapper
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ -n "${RUSTC_WRAPPER:-}" && "$RUSTC_WRAPPER" != cargo-steward ]]; then
+            printf 'CARGO_STEWARD_INNER=%s\n' "$RUSTC_WRAPPER" >> "$GITHUB_ENV"
+          fi
+          echo "RUSTC_WRAPPER=cargo-steward" >> "$GITHUB_ENV"
+      - name: Track Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: start
       - name: Install cross
         if: matrix.cross
         run: cargo install cross --locked
 
       - name: Build release binary
-        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} -p evm-benchmark
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = true ]; then
+            # The host wrapper is not installed in cross's build container.
+            RUSTC_WRAPPER='' cross build --release --target "${{ matrix.target }}" -p evm-benchmark
+          else
+            cargo build --release --target "${{ matrix.target }}" -p evm-benchmark
+          fi
 
       - name: Package artifact
         shell: bash
@@ -61,6 +81,12 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: ${{ env.BINARY_NAME }}-*-${{ matrix.target }}.tar.gz
+      - name: Trim Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: trim
+          budget: 4GiB
 
   release:
     name: Create Release

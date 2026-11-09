@@ -44,6 +44,19 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
+      - name: Configure Cargo Steward wrapper
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [[ -n "${RUSTC_WRAPPER:-}" && "$RUSTC_WRAPPER" != cargo-steward ]]; then
+            printf 'CARGO_STEWARD_INNER=%s\n' "$RUSTC_WRAPPER" >> "$GITHUB_ENV"
+          fi
+          echo "RUSTC_WRAPPER=cargo-steward" >> "$GITHUB_ENV"
+      - name: Track Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: start
       - name: Cache Foundry build artifacts
         uses: actions/cache@v5
         with:
@@ -189,6 +202,12 @@ jobs:
             echo
             echo "History is restored from and saved to the \`doublcov-*-history-*\` Actions cache keys."
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Trim Cargo build cache
+        if: runner.os != 'Windows'
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
+        with:
+          mode: trim
+          budget: 4GiB
 
   pages:
     name: Publish coverage page
