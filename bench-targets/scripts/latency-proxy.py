@@ -29,9 +29,10 @@ def percentiles(values):
 
 
 class Observer:
-    def __init__(self, upstreams, output, chain_id):
+    def __init__(self, upstreams, output, chain_id, max_inflight=4):
         self.upstreams, self.output, self.chain_id = upstreams, output, chain_id
-        self.limit = threading.BoundedSemaphore(4)
+        self.max_inflight = max_inflight
+        self.limit = threading.BoundedSemaphore(max_inflight)
         # Keep observation and client reads from racing the smallest validator's
         # read admission bound. Apply the same bound to every chain.
         self.read_limits = {url: threading.BoundedSemaphore(1) for url in upstreams}
@@ -367,14 +368,19 @@ def main():
         help="New directory for raw events, ready.json and atomic summary.json",
     )
     parser.add_argument("--chain-id", type=int, required=True)
+    parser.add_argument("--max-inflight", type=int, default=4)
     parser.add_argument("--poll-interval", type=float, default=0.05)
     args = parser.parse_args()
     upstreams = args.upstreams.split(",")
-    if len(upstreams) != 4 or args.poll_interval < 0.01:
+    if (
+        len(upstreams) != 4
+        or args.poll_interval < 0.01
+        or not 1 <= args.max_inflight <= 64
+    ):
         parser.error(
             "Exactly four upstream validators and poll interval >= 0.01 are required"
         )
-    observer = Observer(upstreams, args.out, args.chain_id)
+    observer = Observer(upstreams, args.out, args.chain_id, args.max_inflight)
     observer.initialize()
     servers, threads = [], []
     signal.signal(signal.SIGTERM, lambda *_: observer.stop.set())
@@ -400,7 +406,7 @@ def main():
                 proxy_urls=[f"http://127.0.0.1:{s.server_port}" for s in servers],
                 upstreams=upstreams,
                 initial_height=observer.last,
-                max_inflight=4,
+                max_inflight=observer.max_inflight,
                 max_state_reads_per_validator=1,
             ),
         )
