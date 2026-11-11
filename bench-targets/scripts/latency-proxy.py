@@ -2,6 +2,7 @@
 """Observe transaction response, receipt and finalized visibility independently."""
 
 import argparse
+from contextlib import nullcontext
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import math
@@ -31,6 +32,9 @@ class Observer:
     def __init__(self, upstreams, output, chain_id):
         self.upstreams, self.output, self.chain_id = upstreams, output, chain_id
         self.limit = threading.BoundedSemaphore(4)
+        # Keep observation and client reads from racing the smallest validator's
+        # read admission bound. Apply the same bound to every chain.
+        self.read_limits = {url: threading.BoundedSemaphore(1) for url in upstreams}
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.transactions, self.receipts, self.finalized = {}, {}, {}
@@ -50,7 +54,19 @@ class Observer:
             self.events.flush()
 
     def request(self, upstream, body):
-        with self.limit:
+        requests = json.loads(body)
+        requests = requests if isinstance(requests, list) else [requests]
+        methods = [request.get("method", "") for request in requests]
+        bounded_read = any(
+            method.startswith(("eth_get", "eth_call", "eth_estimateGas"))
+            for method in methods
+        )
+        queued = time.monotonic_ns()
+        with (
+            self.read_limits[upstream] if bounded_read else nullcontext(),
+            self.limit,
+        ):
+            started = time.monotonic_ns()
             request = Request(upstream, body, {"Content-Type": "application/json"})
             try:
                 response = urlopen(request, timeout=5)
@@ -59,6 +75,17 @@ class Observer:
             with response:
                 encoded, status = response.read(), response.code
             completed = time.monotonic_ns()
+        if self.events:
+            self.emit(
+                "rpc_transport",
+                upstream=upstream,
+                methods=methods,
+                queued_ns=queued,
+                started_ns=started,
+                completed_ns=completed,
+                queue_ms=(started - queued) / 1e6,
+                upstream_ms=(completed - started) / 1e6,
+            )
         return status, encoded, completed
 
     def rpc(self, upstream, method, params):
@@ -242,7 +269,7 @@ class Observer:
             reverted = sum(t["receipt"]["status"] != 1 for t in received)
             passed = (
                 bool(transactions)
-                and not (self.failures or self.errors or reverted)
+                and not (self.failures or self.errors or self.duplicates or reverted)
                 and len(finalized) == len(transactions)
             )
             return dict(
@@ -374,6 +401,7 @@ def main():
                 upstreams=upstreams,
                 initial_height=observer.last,
                 max_inflight=4,
+                max_state_reads_per_validator=1,
             ),
         )
         observer.stop.wait()

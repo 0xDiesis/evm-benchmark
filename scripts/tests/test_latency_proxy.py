@@ -1,6 +1,7 @@
 """Exercise receipt observation through real loopback HTTP servers."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import signal
@@ -34,6 +35,9 @@ class MockChain:
         self.send_delay = 0
         self.receipt_delay = 0
         self.receipt_completed = None
+        self.receipt_reads = 0
+        self.max_receipt_reads = 0
+        self.read_lock = threading.Lock()
         self.reverted = False
         chain = self
 
@@ -74,7 +78,16 @@ class MockChain:
                             transactions=[TX] if height else [],
                         )
                     elif method == "eth_getBlockReceipts":
-                        time.sleep(chain.receipt_delay)
+                        with chain.read_lock:
+                            chain.receipt_reads += 1
+                            chain.max_receipt_reads = max(
+                                chain.max_receipt_reads, chain.receipt_reads
+                            )
+                        try:
+                            time.sleep(chain.receipt_delay)
+                        finally:
+                            with chain.read_lock:
+                                chain.receipt_reads -= 1
                         result = (
                             [
                                 dict(
@@ -256,6 +269,37 @@ class LatencyProxyTests(unittest.TestCase):
         self.assertEqual(result["accepted"], 1)
         self.assertEqual(result["duplicate_submissions"], 1)
         self.assertEqual(result["receipt_latency_ms"]["count"], 1)
+        self.assertEqual(result["status"], "failed")
+
+    def test_transport_records_queue_and_upstream_time_separately(self):
+        self.chain.send_delay = 0.05
+        self.send()
+        self.wait_for(
+            lambda: any(
+                e["event"] == "rpc_transport"
+                and "eth_sendRawTransaction" in e["methods"]
+                for e in self.events()
+            )
+        )
+        event = next(
+            e
+            for e in self.events()
+            if e["event"] == "rpc_transport"
+            and "eth_sendRawTransaction" in e["methods"]
+        )
+        self.assertLessEqual(event["queued_ns"], event["started_ns"])
+        self.assertLessEqual(event["started_ns"], event["completed_ns"])
+        self.assertGreaterEqual(event["queue_ms"], 0)
+        self.assertGreaterEqual(event["upstream_ms"], 50)
+
+    def test_state_reads_on_one_validator_do_not_compete_for_its_single_read_slot(self):
+        self.chain.receipt_delay = 0.1
+        body = dict(jsonrpc="2.0", id=1, method="eth_getBlockReceipts", params=["0x1"])
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            requests = [pool.submit(post, self.urls[0], body) for _ in range(2)]
+            for request in requests:
+                self.assertEqual(request.result()["result"], [])
+        self.assertEqual(self.chain.max_receipt_reads, 1)
 
 
 if __name__ == "__main__":
