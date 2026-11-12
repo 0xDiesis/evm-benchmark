@@ -16,15 +16,15 @@ futures = "0.3"
 
 # Alloy (signing, RPC, types)
 alloy-primitives = { version = "1", features = ["serde"] }
-alloy-signer-local = "1"
-alloy-provider = { version = "1", features = ["pubsub", "ws"] }
-alloy-transport-http = "1"
-alloy-transport-ws = "1"
-alloy-rpc-types = "1"
-alloy-consensus = "1"
-alloy-eips = "1"
+alloy-signer-local = "~2.5.0"
+alloy-provider = { version = "~2.5.0", features = ["pubsub", "ws"] }
+alloy-transport-http = "~2.5.0"
+alloy-transport-ws = "~2.5.0"
+alloy-rpc-types = "~2.5.0"
+alloy-consensus = "~2.5.0"
+alloy-eips = "~2.5.0"
 alloy-chains = "0.2"
-alloy-network = "1"
+alloy-network = "~2.5.0"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
