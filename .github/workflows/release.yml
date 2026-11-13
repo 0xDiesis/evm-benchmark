@@ -41,21 +41,17 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Install Cargo Steward v0.2.0
+      - name: Configure Cargo Steward wrapper
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          installer="$RUNNER_TEMP/install-cargo-steward.sh"
-          curl --fail --silent --show-error --location --retry 3 https://raw.githubusercontent.com/0xdoublesharp/cargo-steward/v0.2.0/scripts/install.sh -o "$installer"
-          sh "$installer" --release 0.2.0 --repo 0xdoublesharp/cargo-steward --no-setup
-          echo "${CARGO_HOME:-$HOME/.cargo}/bin" >> "$GITHUB_PATH"
           if [[ -n "${RUSTC_WRAPPER:-}" && "$RUSTC_WRAPPER" != cargo-steward ]]; then
             printf 'CARGO_STEWARD_INNER=%s\n' "$RUSTC_WRAPPER" >> "$GITHUB_ENV"
           fi
           echo "RUSTC_WRAPPER=cargo-steward" >> "$GITHUB_ENV"
       - name: Track Cargo build cache
         if: runner.os != 'Windows'
-        uses: 0xdoublesharp/cargo-steward@v0.2.0
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
         with:
           mode: start
       - name: Install cross
@@ -63,10 +59,14 @@ jobs:
         run: cargo install cross --locked
 
       - name: Build release binary
-        env:
-          # The host wrapper is not installed in cross's build container.
-          RUSTC_WRAPPER: ${{ matrix.cross && '' || 'cargo-steward' }}
-        run: ${{ matrix.cross && 'cross' || 'cargo' }} build --release --target ${{ matrix.target }} -p evm-benchmark
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = true ]; then
+            # The host wrapper is not installed in cross's build container.
+            RUSTC_WRAPPER='' cross build --release --target "${{ matrix.target }}" -p evm-benchmark
+          else
+            cargo build --release --target "${{ matrix.target }}" -p evm-benchmark
+          fi
 
       - name: Package artifact
         shell: bash
@@ -83,7 +83,7 @@ jobs:
           path: ${{ env.BINARY_NAME }}-*-${{ matrix.target }}.tar.gz
       - name: Trim Cargo build cache
         if: runner.os != 'Windows'
-        uses: 0xdoublesharp/cargo-steward@v0.2.0
+        uses: 0xdoublesharp/cargo-steward@v0.2.2
         with:
           mode: trim
           budget: 4GiB
