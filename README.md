@@ -557,14 +557,24 @@ Environment variables: `BENCH_KEY` (comma-separated private keys), `BENCH_TX_CAC
 
 ### Foundry executable
 
-Use `./scripts/forge.sh` from the repository root for Foundry commands. It prefers
-`forgeds` when installed, otherwise uses standard `forge`. Set `FORGE_BIN` to
-a specific executable to override selection. A selected compiler failure is
-returned directly; it never retries with another compiler. For tools that launch
-Forge internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
+The benchmark contracts build with forgeds, the Diesis fork of Foundry, using
+Solar as the compiler. forgeds adds faster development builds, smaller disk use,
+via-IR coverage instrumentation, and `foundry.toml` keys such as
+`compiler_warnings` that upstream Foundry does not recognize.
 
-Make and CI entry points use this selection too. CI builds and caches `forgeds`
-from the pinned Diesis fork revision, then verifies that revision before use.
+Use `./scripts/forge.sh` from the repository root for Foundry commands. It prefers
+`forgeds` when installed and otherwise falls back to upstream `forge`, which is
+unpinned and warns about the forgeds-only keys. Set `FORGE_BIN` to a specific
+executable to override selection. A selected compiler failure is returned
+directly; it never retries with another compiler. For tools that launch Forge
+internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
+
+For reproducible builds, install the forgeds revision pinned in
+`.github/actions/setup-forgeds/action.yml`. CI downloads its prebuilt archive
+from the [forgeds release](https://github.com/doublesharp/foundry/releases/tag/forgeds),
+checks the `.sha256` file and the reported commit, and builds that revision from
+source when no matching archive exists. Make and CI entry points use the
+launcher too.
 Solidity keeps Foundry artifact caching; Rust uses sccache separately.
 `RUSTC_WRAPPER` applies only to Rust compilation.
 

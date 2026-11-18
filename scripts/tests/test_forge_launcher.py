@@ -236,6 +236,17 @@ class ForgeLauncherTests(unittest.TestCase):
         )
         self.assertIn("--instrumented", workflow)
 
+    def test_bytecode_check_compiles_with_pinned_forgeds(self):
+        workflow = (REPO_ROOT / ".github/workflows/ci.yml").read_text()
+        job = workflow.split("\n  bytecode-check:\n", 1)[1]
+        job = job.split("\n\n  ", 1)[0]
+        self.assertIn("uses: ./.github/actions/setup-forgeds", job)
+        self.assertNotIn("foundry-rs/foundry-toolchain", job)
+        self.assertLess(
+            job.index("uses: ./.github/actions/setup-forgeds"),
+            job.index("run: make bytecode-check"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
