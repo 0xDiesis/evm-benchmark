@@ -461,5 +461,15 @@ class ForgeLauncherTests(unittest.TestCase):
                 self.assertIn("hashFiles('scripts/install-solar.sh'", keys[0])
 
 
+    def test_coverage_rust_cache_leaves_cargo_bin_to_the_forgeds_cache(self):
+        # ~/.cargo/bin holds forgeds; only setup-forgeds may restore it, after
+        # checking the reviewed digest.
+        workflow = (REPO_ROOT / ".github/workflows/coverage.yml").read_text()
+        steps = workflow.split("uses: Swatinem/rust-cache@v2\n")[1:]
+        self.assertTrue(steps)
+        for step in steps:
+            self.assertIn("cache-bin: false", step.split("\n      - ", 1)[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -48,6 +48,8 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
 
       - name: Configure Cargo Steward wrapper
         if: runner.os != 'Windows'
