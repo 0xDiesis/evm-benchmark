@@ -570,12 +570,15 @@ directly; it never retries with another compiler. For tools that launch Forge
 internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
 
 For reproducible builds, install the forgeds revision pinned in
-`.github/actions/setup-forgeds/action.yml`. CI downloads its prebuilt archive
-from the [forgeds release](https://github.com/doublesharp/foundry/releases/tag/forgeds),
-checks the `.sha256` file and the reported commit, and builds that revision from
-source when no matching archive exists. Make and CI entry points use the
-launcher too.
-Solidity keeps Foundry artifact caching; Rust uses sccache separately.
+`.github/actions/setup-forgeds/action.yml`. CI uses its prebuilt archive from
+the [forgeds release](https://github.com/doublesharp/foundry/releases/tag/forgeds)
+only when the archive's SHA-256 equals the digest reviewed into that action, the
+release's `.sha256` file agrees and the binary reports the pinned commit. Without
+a reviewed digest for the platform, CI builds that revision from source. A cached
+binary is used only while it still reports the pinned commit. Make and CI entry
+points use the launcher too.
+Solidity keeps Foundry artifact caching, keyed in CI by the forgeds revision and
+Solar version; Rust uses sccache separately.
 `RUSTC_WRAPPER` applies only to Rust compilation.
 
 The launcher keeps artifacts in `out` and cache in `cache`, matching Diesis ABI

@@ -21,6 +21,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FORGEDS_REVISION = "4ca15fcba25aa61a1b436d28b428e30b459f3d56"
 RUST_TOOLCHAIN_ACTION = "02cb101ec7c40f2c49e1d9714d64511d8e1b74de"
 RUST_CACHE_ACTION = "d1527c8f67ef9af357290475d4af4b0fab8f12e0"
+REVIEWED_ARCHIVE_DIGESTS = {
+    "linux_amd64": "a1341d56a7fc743b4d87853596baaf0931a6e4348106def1a6994bc793c5b62f",
+    "linux_arm64": "1555c23e95f42d4c0c907181a0ce157d42e40fa8028e9026caaf524ee007d522",
+    "darwin_arm64": "39c4b0fd5ab8cd7ee2b411a1e0a5ac8519a5566bdd25d50f90ae9bd47ab01f63",
+    "win32_amd64": "b43253bc6fb866df17c8a567ff41ce5ef8d615bc93739317c1f4884ed9566f64",
+}
 
 
 class ForgeLauncherTests(unittest.TestCase):
@@ -119,25 +125,44 @@ class ForgeLauncherTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)[0], [str(ds), "config", "--json"])
 
 
-    def install_prebuilt(self, revision=None, valid_checksum=True, runner_os="Linux"):
+    def action_step(self, name, next_name):
+        action = (REPO_ROOT / ".github/actions/setup-forgeds/action.yml").read_text()
+        step = action.split(f"    - name: {name}\n", 1)[1].split(f"    - name: {next_name}", 1)[0]
+        return textwrap.dedent(step.split("      run: |\n", 1)[1])
+
+    def install_prebuilt(
+        self,
+        reports=None,
+        published="archive",
+        pin_fixture=True,
+        runner_os="Linux",
+        revision=FORGEDS_REVISION,
+    ):
         windows = runner_os == "Windows"
         platform = "win32_amd64" if windows else "linux_amd64"
         executable = "forgeds.exe" if windows else "forgeds"
-        archive_name = f"forgeds-{FORGEDS_REVISION[:7]}_{platform}.tar.gz"
+        archive_name = f"forgeds-{revision[:7]}_{platform}.tar.gz"
         release = self.bin / "release"
         release.mkdir()
-        payload = f"#!/bin/sh\nprintf '%s\\n' 'Commit SHA: {revision or FORGEDS_REVISION}'\n".encode()
+        payload = f"#!/bin/sh\nprintf '%s\\n' 'Commit SHA: {reports or revision}'\n".encode()
         archive = release / archive_name
         with tarfile.open(archive, "w:gz") as package:
             entry = tarfile.TarInfo(executable)
             entry.mode = 0o755
             entry.size = len(payload)
             package.addfile(entry, io.BytesIO(payload))
-        checksum = hashlib.sha256(archive.read_bytes()).hexdigest() if valid_checksum else "0" * 64
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        checksum = {
+            "archive": digest,
+            "zeros": "0" * 64,
+            "reviewed": REVIEWED_ARCHIVE_DIGESTS[platform],
+        }[published]
         (release / (archive_name + ".sha256")).write_text(f"{checksum}  {archive_name}\n")
+        downloads = self.bin / "downloads"
         curl = self.bin / "curl"
         curl.write_text(
             "#!" + sys.executable + "\nimport pathlib, shutil, sys\n"
+            f"with open({str(downloads)!r}, 'a') as log: log.write(sys.argv[-1] + '\\n')\n"
             f"source = pathlib.Path({str(release)!r}) / sys.argv[-1].rsplit('/', 1)[-1]\n"
             "shutil.copyfile(source, sys.argv[sys.argv.index('-o') + 1])\n"
         )
@@ -149,26 +174,25 @@ class ForgeLauncherTests(unittest.TestCase):
             "HOME": str(self.bin / "home"),
             "RUNNER_OS": runner_os,
             "RUNNER_ARCH": "X64",
-            "FORGEDS_REVISION": FORGEDS_REVISION,
+            "FORGEDS_REVISION": revision,
             "GITHUB_OUTPUT": str(output),
             "GITHUB_PATH": str(self.bin / "github-path"),
         }
-        action = (REPO_ROOT / ".github/actions/setup-forgeds/action.yml").read_text()
-        step = action.split("    - name: Install prebuilt forgeds", 1)[1].split(
-            "    - name: Setup pinned Rust", 1
-        )[0]
-        command = textwrap.dedent(step.split("      run: |\n", 1)[1])
+        command = self.action_step("Install prebuilt forgeds", "Setup pinned Rust for forgeds")
+        if pin_fixture:
+            # Stand in the fixture archive for the reviewed release archive.
+            reviewed = f"{platform}) pinned={REVIEWED_ARCHIVE_DIGESTS[platform]} ;;"
+            self.assertIn(reviewed, command)
+            command = command.replace(reviewed, f"{platform}) pinned={digest} ;;")
         result = subprocess.run(["/bin/bash", "-c", command], env=env, text=True, capture_output=True)
         if result.returncode == 0 and output.read_text() == "installed=true\n":
-            verify = action.split("    - name: Verify forgeds revision", 1)[1].split(
-                "    - name: Cache compiler results", 1
-            )[0]
-            command = textwrap.dedent(verify.split("      run: |\n", 1)[1])
+            command = self.action_step("Verify forgeds revision", "Cache compiler results")
             result = subprocess.run(["/bin/bash", "-c", command], env=env, text=True, capture_output=True)
-        return result, self.bin / "home/.cargo/bin" / executable, output.read_text()
+        calls = downloads.read_text().splitlines() if downloads.exists() else []
+        return result, self.bin / "home/.cargo/bin" / executable, output.read_text(), calls
 
     def test_prebuilt_installs_verified_forgeds(self):
-        result, installed, output = self.install_prebuilt()
+        result, installed, output, _ = self.install_prebuilt()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(installed.is_file())
         self.assertEqual(output, "installed=true\n")
@@ -176,7 +200,7 @@ class ForgeLauncherTests(unittest.TestCase):
         self.assertEqual(version, f"Commit SHA: {FORGEDS_REVISION}\n")
 
     def test_prebuilt_installs_and_verifies_windows_executable(self):
-        result, installed, output = self.install_prebuilt(runner_os="Windows")
+        result, installed, output, _ = self.install_prebuilt(runner_os="Windows")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(installed.name, "forgeds.exe")
         self.assertTrue(installed.is_file())
@@ -184,25 +208,102 @@ class ForgeLauncherTests(unittest.TestCase):
         self.assertIn(f"Commit SHA: {FORGEDS_REVISION}", result.stdout)
 
     def test_prebuilt_rejects_bad_checksum(self):
-        result, installed, output = self.install_prebuilt(valid_checksum=False)
+        result, installed, output, _ = self.install_prebuilt(published="zeros")
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertFalse(installed.exists())
         self.assertEqual(output, "")
 
-    def test_prebuilt_wrong_revision_requests_source_fallback(self):
-        result, installed, output = self.install_prebuilt(revision="f" * 40)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_prebuilt_rejects_release_files_replaced_together(self):
+        # A replaced archive with a matching replaced .sha256 still differs
+        # from the reviewed digest in the action.
+        result, installed, output, _ = self.install_prebuilt(pin_fixture=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("disagrees with the reviewed digest", result.stdout)
         self.assertFalse(installed.exists())
         self.assertEqual(output, "")
+
+    def test_prebuilt_rejects_archive_that_differs_from_reviewed_digest(self):
+        result, installed, output, _ = self.install_prebuilt(
+            published="reviewed", pin_fixture=False
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("forgeds archive checksum mismatch", result.stdout)
+        self.assertFalse(installed.exists())
+        self.assertEqual(output, "")
+
+    def test_reviewed_archive_reporting_another_commit_fails(self):
+        result, installed, output, _ = self.install_prebuilt(reports="f" * 40)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertFalse(installed.exists())
+        self.assertEqual(output, "")
+
+    def test_revision_without_reviewed_digest_builds_from_source(self):
+        result, installed, output, calls = self.install_prebuilt(
+            pin_fixture=False, revision="f" * 40
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("building from source", result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(installed.exists())
+        self.assertEqual(output, "")
+
+    def verify_cached(self, reports=None, code=0, runner_os="Linux"):
+        home = Path(tempfile.mkdtemp(dir=self.bin))
+        executable = "forgeds.exe" if runner_os == "Windows" else "forgeds"
+        cached = home / ".cargo/bin" / executable
+        cached.parent.mkdir(parents=True)
+        cached.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' 'Commit SHA: {reports or FORGEDS_REVISION}'\nexit {code}\n"
+        )
+        cached.chmod(0o755)
+        output = home / "github-output"
+        output.write_text("")
+        env = {
+            **self.env,
+            "HOME": str(home),
+            "RUNNER_OS": runner_os,
+            "FORGEDS_REVISION": FORGEDS_REVISION,
+            "GITHUB_OUTPUT": str(output),
+        }
+        command = self.action_step("Verify restored forgeds", "Install prebuilt forgeds")
+        result = subprocess.run(["/bin/bash", "-c", command], env=env, text=True, capture_output=True)
+        return result, cached, output.read_text()
+
+    def test_cached_forgeds_with_pinned_commit_is_kept(self):
+        for runner_os in ("Linux", "Windows"):
+            with self.subTest(runner_os=runner_os):
+                result, cached, output = self.verify_cached(runner_os=runner_os)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(cached.is_file())
+                self.assertEqual(output, "verified=true\n")
+
+    def test_cached_forgeds_with_another_commit_is_discarded(self):
+        for reports, code in (("f" * 40, 0), (None, 3)):
+            with self.subTest(reports=reports, code=code):
+                result, cached, output = self.verify_cached(reports=reports, code=code)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(cached.exists())
+                self.assertEqual(output, "")
+
+    def test_ci_pins_reviewed_forgeds_archive_digests(self):
+        action = (REPO_ROOT / ".github/actions/setup-forgeds/action.yml").read_text()
+        # The revision appears as the input default and as the digest table key.
+        self.assertEqual(action.count(FORGEDS_REVISION), 2)
+        self.assertIn(f"          {FORGEDS_REVISION})\n", action)
+        for platform, digest in REVIEWED_ARCHIVE_DIGESTS.items():
+            with self.subTest(platform=platform):
+                self.assertIn(f"{platform}) pinned={digest} ;;", action)
+        # A restored binary is re-verified; every install step depends on that.
+        self.assertNotIn("cache-hit != 'true'", action)
+        self.assertEqual(action.count("steps.restored.outputs.verified != 'true'"), 6)
+        self.assertIn("id: restored\n      if: steps.forgeds-cache.outputs.cache-hit == 'true'", action)
 
     def test_ci_provisions_the_exact_forgeds_source_revision(self):
         action = (
             REPO_ROOT / ".github/actions/setup-forgeds/action.yml"
         ).read_text()
         workflow = (REPO_ROOT / ".github/workflows/coverage.yml").read_text()
-        # The pinned revision is declared once, as the action input default.
         self.assertIn(f"    default: {FORGEDS_REVISION}\n", action)
-        self.assertEqual(action.count(FORGEDS_REVISION), 1)
         self.assertIn("rust-1.99.1-${{ inputs.revision }}", action)
         self.assertIn(RUST_TOOLCHAIN_ACTION, action)
         self.assertIn(RUST_CACHE_ACTION, action)
@@ -219,7 +320,7 @@ class ForgeLauncherTests(unittest.TestCase):
         self.assertNotIn("SCCACHE_GHA_ENABLED", action)
         self.assertIn("path: ~/.foundry/cache/compilers", action)
         self.assertIn("forgeds-compilers-${{ runner.os }}-${{ runner.arch }}-${{ inputs.revision }}-", action)
-        # The prebuilt release binary is used only after checksum and commit checks.
+        # The prebuilt release binary is used only after digest and commit checks.
         self.assertIn("releases/download/forgeds\"", action)
         self.assertIn("forgeds-${FORGEDS_REVISION:0:7}_${platform}.tar.gz", action)
         self.assertIn("forgeds archive checksum mismatch", action)
@@ -246,6 +347,40 @@ class ForgeLauncherTests(unittest.TestCase):
             job.index("uses: ./.github/actions/setup-forgeds"),
             job.index("run: make bytecode-check"),
         )
+
+
+    def test_foundry_artifact_caches_are_keyed_by_forgeds_and_solar(self):
+        # Artifacts built by another Forge or Solar never satisfy a restore.
+        prefix = (
+            "foundry-build-${{ runner.os }}-forgeds-${{ steps.forgeds.outputs.revision }}"
+            "-solar-${{ steps.solar.outputs.version }}-"
+        )
+        for name in ("ci.yml", "coverage.yml"):
+            with self.subTest(workflow=name):
+                workflow = (REPO_ROOT / ".github/workflows" / name).read_text()
+                self.assertIn(
+                    "- name: Setup forgeds\n        id: forgeds\n"
+                    "        uses: ./.github/actions/setup-forgeds",
+                    workflow,
+                )
+                solar = workflow.split("- name: Setup Solar 0.3.0 (Solidity 0.8.38)\n", 1)[1]
+                solar = solar.split("\n      - name:", 1)[0]
+                self.assertTrue(solar.startswith("        id: solar\n"))
+                self.assertIn('test -n "$version"', solar)
+                self.assertIn('echo "version=$version" >> "$GITHUB_OUTPUT"', solar)
+                position = workflow.index("- name: Cache Foundry build artifacts")
+                self.assertLess(workflow.index("id: forgeds"), position)
+                self.assertLess(workflow.index("id: solar"), position)
+                cache = workflow[position:].split("\n      - name:", 1)[0]
+                keys = [
+                    line.strip().removeprefix("key: ")
+                    for line in cache.splitlines()
+                    if "foundry-build-" in line
+                ]
+                self.assertEqual(len(keys), 4)
+                for key in keys:
+                    self.assertTrue(key.startswith(prefix), key)
+                self.assertIn("hashFiles('scripts/install-solar.sh'", keys[0])
 
 
 if __name__ == "__main__":
