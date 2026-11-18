@@ -572,11 +572,12 @@ internally, use `./scripts/forge.sh --exec COMMAND [ARGS...]`.
 For reproducible builds, install the forgeds revision pinned in
 `.github/actions/setup-forgeds/action.yml`. CI uses its prebuilt archive from
 the [forgeds release](https://github.com/doublesharp/foundry/releases/tag/forgeds)
-only when the archive's SHA-256 equals the digest reviewed into that action, the
-release's `.sha256` file agrees and the binary reports the pinned commit. Without
-a reviewed digest for the platform, CI builds that revision from source. A cached
-binary is used only while it still reports the pinned commit. Make and CI entry
-points use the launcher too.
+only when the archive and the executable inside it match the SHA-256 digests
+reviewed into that action, the release's `.sha256` file agrees and the binary
+reports the pinned commit. Without reviewed digests for the platform, CI builds
+that revision from source. Only reviewed binaries are cached, and a cached binary
+runs only after its bytes match the reviewed digest. Make and CI entry points use
+the launcher too.
 Solidity keeps Foundry artifact caching, keyed in CI by the forgeds revision and
 Solar version; Rust uses sccache separately.
 `RUSTC_WRAPPER` applies only to Rust compilation.

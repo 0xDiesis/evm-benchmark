@@ -14,73 +14,131 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Restore forgeds binary
-      id: forgeds-cache
-      uses: actions/cache@v5
-      with:
-        path: ~/.cargo/bin/forgeds${{ runner.os == 'Windows' && '.exe' || '' }}
-        key: forgeds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.1-${{ inputs.revision }}
-
-    # A restored binary is used only while it reports the pinned commit;
-    # otherwise it is discarded and installed again below.
-    - name: Verify restored forgeds
-      id: restored
-      if: steps.forgeds-cache.outputs.cache-hit == 'true'
+    # Reviewed SHA-256 digests of each release archive and of the forgeds
+    # executable inside it, hashed from fresh downloads. Pin new ones whenever
+    # the revision changes. A revision or platform without them is built from
+    # source.
+    - name: Resolve reviewed forgeds digests
+      id: pins
       shell: bash
       env:
         FORGEDS_REVISION: ${{ inputs.revision }}
       run: |
         set -euo pipefail
-        executable=forgeds
-        if [ "$RUNNER_OS" = Windows ]; then executable=forgeds.exe; fi
-        binary="$HOME/.cargo/bin/$executable"
-        if version="$("$binary" --version 2>/dev/null)" \
-          && grep -qF "Commit SHA: $FORGEDS_REVISION" <<<"$version"; then
-          echo "verified=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "::warning::Cached forgeds is not the pinned revision; reinstalling"
-          rm -f "$binary"
-        fi
-
-    # The prebuilt archive is used only when its SHA-256 equals the reviewed
-    # digest below, the release's .sha256 agrees, and the binary reports the
-    # pinned commit. Without a reviewed digest, the revision is built from source.
-    - name: Install prebuilt forgeds
-      id: prebuilt
-      if: steps.restored.outputs.verified != 'true'
-      shell: bash
-      env:
-        FORGEDS_REVISION: ${{ inputs.revision }}
-      run: |
-        set -euo pipefail
-        # Every fork build adds its commit-named archives to the forgeds release.
-        release_url="https://github.com/doublesharp/foundry/releases/download/forgeds"
         executable=forgeds
         case "${RUNNER_OS}-${RUNNER_ARCH}" in
           Linux-X64) platform=linux_amd64 ;;
           Linux-ARM64) platform=linux_arm64 ;;
           macOS-ARM64) platform=darwin_arm64 ;;
           Windows-X64) platform=win32_amd64; executable=forgeds.exe ;;
-          *) echo "::notice::No prebuilt forgeds for ${RUNNER_OS}-${RUNNER_ARCH}"; exit 0 ;;
+          *) platform="" ;;
         esac
-        # Reviewed archive digests, hashed from a fresh download of each asset.
-        # Pin new ones whenever the revision changes.
-        pinned=""
+        archive_digest=""
+        binary_digest=""
         case "$FORGEDS_REVISION" in
           4ca15fcba25aa61a1b436d28b428e30b459f3d56)
             case "$platform" in
-              linux_amd64) pinned=a1341d56a7fc743b4d87853596baaf0931a6e4348106def1a6994bc793c5b62f ;;
-              linux_arm64) pinned=1555c23e95f42d4c0c907181a0ce157d42e40fa8028e9026caaf524ee007d522 ;;
-              darwin_arm64) pinned=39c4b0fd5ab8cd7ee2b411a1e0a5ac8519a5566bdd25d50f90ae9bd47ab01f63 ;;
-              win32_amd64) pinned=b43253bc6fb866df17c8a567ff41ce5ef8d615bc93739317c1f4884ed9566f64 ;;
+              linux_amd64)
+                archive_digest=a1341d56a7fc743b4d87853596baaf0931a6e4348106def1a6994bc793c5b62f
+                binary_digest=236083c70a100792a61206fb48aa082813671c0e5623bf11d7d0a03ea02ded5d
+                ;;
+              linux_arm64)
+                archive_digest=1555c23e95f42d4c0c907181a0ce157d42e40fa8028e9026caaf524ee007d522
+                binary_digest=0fc34873bed14e185fc83e585840d5c689734e251d09dd7fcd8f85bec8e96776
+                ;;
+              darwin_arm64)
+                archive_digest=39c4b0fd5ab8cd7ee2b411a1e0a5ac8519a5566bdd25d50f90ae9bd47ab01f63
+                binary_digest=a94c0565fc86a3cc91b73b745bfa76dfb5dfafbaf3beaba536b36651fd9e044d
+                ;;
+              win32_amd64)
+                archive_digest=b43253bc6fb866df17c8a567ff41ce5ef8d615bc93739317c1f4884ed9566f64
+                binary_digest=fd738afbec4b6e0b8cc0f6c3718c553bcacfb0aed26ca28773b8c2b9db89fa46
+                ;;
             esac
             ;;
         esac
-        if [ -z "$pinned" ]; then
-          echo "::notice::No reviewed forgeds digest for ${FORGEDS_REVISION:0:7} ${platform}; building from source"
+        {
+          echo "platform=$platform"
+          echo "executable=$executable"
+          echo "archive_digest=$archive_digest"
+          echo "binary_digest=$binary_digest"
+        } >> "$GITHUB_OUTPUT"
+
+    # Only reviewed release binaries are cached, keyed by their digest. Source
+    # builds have no reviewed digest to authenticate a restored copy against,
+    # so they are not cached; their Cargo dependencies are cached below.
+    - name: Restore forgeds binary
+      id: forgeds-cache
+      if: steps.pins.outputs.binary_digest != ''
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.cargo/bin/forgeds${{ runner.os == 'Windows' && '.exe' || '' }}
+        key: forgeds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.1-${{ inputs.revision }}-${{ steps.pins.outputs.binary_digest }}
+
+    # A restored binary runs only after its bytes match the reviewed digest,
+    # and is used only if it then reports the pinned commit. Otherwise it is
+    # deleted and installed again below.
+    - name: Verify restored forgeds
+      id: restored
+      if: steps.forgeds-cache.outputs.cache-hit == 'true'
+      shell: bash
+      env:
+        FORGEDS_REVISION: ${{ inputs.revision }}
+        EXECUTABLE: ${{ steps.pins.outputs.executable }}
+        BINARY_DIGEST: ${{ steps.pins.outputs.binary_digest }}
+      run: |
+        set -euo pipefail
+        binary="$HOME/.cargo/bin/$EXECUTABLE"
+        actual=""
+        if [ -f "$binary" ]; then
+          if command -v sha256sum >/dev/null; then
+            actual="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          else
+            actual="$(shasum -a 256 "$binary" | cut -d ' ' -f 1)"
+          fi
+        fi
+        if [ -n "$BINARY_DIGEST" ] && [ "$actual" = "$BINARY_DIGEST" ] \
+          && version="$("$binary" --version 2>/dev/null)" \
+          && grep -qF "Commit SHA: $FORGEDS_REVISION" <<<"$version"; then
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "::warning::Cached forgeds is not the reviewed binary; reinstalling"
+          rm -f "$binary"
+        fi
+
+    # The prebuilt archive is used only when it and the executable inside match
+    # the reviewed digests, the release's .sha256 agrees, and the binary reports
+    # the pinned commit.
+    - name: Install prebuilt forgeds
+      id: prebuilt
+      if: steps.restored.outputs.verified != 'true'
+      shell: bash
+      env:
+        FORGEDS_REVISION: ${{ inputs.revision }}
+        PLATFORM: ${{ steps.pins.outputs.platform }}
+        EXECUTABLE: ${{ steps.pins.outputs.executable }}
+        ARCHIVE_DIGEST: ${{ steps.pins.outputs.archive_digest }}
+        BINARY_DIGEST: ${{ steps.pins.outputs.binary_digest }}
+      run: |
+        set -euo pipefail
+        # Every fork build adds its commit-named archives to the forgeds release.
+        release_url="https://github.com/doublesharp/foundry/releases/download/forgeds"
+        if [ -z "$PLATFORM" ]; then
+          echo "::notice::No prebuilt forgeds for ${RUNNER_OS}-${RUNNER_ARCH}"
           exit 0
         fi
-        archive="forgeds-${FORGEDS_REVISION:0:7}_${platform}.tar.gz"
+        if [ -z "$ARCHIVE_DIGEST" ] || [ -z "$BINARY_DIGEST" ]; then
+          echo "::notice::No reviewed forgeds digest for ${FORGEDS_REVISION:0:7} ${PLATFORM}; building from source"
+          exit 0
+        fi
+        sha256() {
+          if command -v sha256sum >/dev/null; then
+            sha256sum "$1" | cut -d ' ' -f 1
+          else
+            shasum -a 256 "$1" | cut -d ' ' -f 1
+          fi
+        }
+        archive="forgeds-${FORGEDS_REVISION:0:7}_${PLATFORM}.tar.gz"
         work="$(mktemp -d)"
         trap 'rm -rf "$work"' EXIT
         if ! curl -fsSL --retry 3 -o "$work/$archive" "$release_url/$archive" \
@@ -89,27 +147,26 @@ runs:
           exit 0
         fi
         published="$(cut -d ' ' -f 1 "$work/$archive.sha256")"
-        if [ "$published" != "$pinned" ]; then
+        if [ "$published" != "$ARCHIVE_DIGEST" ]; then
           echo "::error::Published forgeds checksum disagrees with the reviewed digest"
           exit 1
         fi
-        if command -v sha256sum >/dev/null; then
-          actual="$(sha256sum "$work/$archive" | cut -d ' ' -f 1)"
-        else
-          actual="$(shasum -a 256 "$work/$archive" | cut -d ' ' -f 1)"
-        fi
-        if [ "$actual" != "$pinned" ]; then
+        if [ "$(sha256 "$work/$archive")" != "$ARCHIVE_DIGEST" ]; then
           echo "::error::forgeds archive checksum mismatch"
           exit 1
         fi
         tar -xzf "$work/$archive" -C "$work"
-        version="$("$work/$executable" --version)"
+        if [ "$(sha256 "$work/$EXECUTABLE")" != "$BINARY_DIGEST" ]; then
+          echo "::error::forgeds executable checksum mismatch"
+          exit 1
+        fi
+        version="$("$work/$EXECUTABLE" --version)"
         if ! grep -qF "Commit SHA: $FORGEDS_REVISION" <<<"$version"; then
           echo "::error::Reviewed forgeds archive does not report the pinned commit"
           exit 1
         fi
         mkdir -p "$HOME/.cargo/bin"
-        install -m 0755 "$work/$executable" "$HOME/.cargo/bin/$executable"
+        install -m 0755 "$work/$EXECUTABLE" "$HOME/.cargo/bin/$EXECUTABLE"
         echo "installed=true" >> "$GITHUB_OUTPUT"
 
     - name: Setup pinned Rust for forgeds
@@ -170,6 +227,14 @@ runs:
         version="$("$HOME/.cargo/bin/$executable" --version)"
         printf '%s\n' "$version"
         grep -F "Commit SHA: $FORGEDS_REVISION" <<<"$version"
+
+    # Saves only a prebuilt binary whose bytes matched the reviewed digest.
+    - name: Save reviewed forgeds binary
+      if: steps.prebuilt.outputs.installed == 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.cargo/bin/forgeds${{ runner.os == 'Windows' && '.exe' || '' }}
+        key: forgeds-${{ runner.os }}-${{ runner.arch }}-rust-1.99.1-${{ inputs.revision }}-${{ steps.pins.outputs.binary_digest }}
 
     - name: Cache compiler results
       uses: actions/cache@v5
