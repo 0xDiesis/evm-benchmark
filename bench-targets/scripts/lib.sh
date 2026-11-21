@@ -71,6 +71,14 @@ log_metric() {
 }
 
 # ── 3. RPC health check ──────────────────────────────────────────────────────
+# Print an endpoint's eth_chainId as a decimal; print nothing when it does not answer.
+rpc_chain_id() {
+    local url="$1"
+    curl -sf --max-time 5 "$url" -X POST -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' 2>/dev/null |
+        python3 -c 'import json, sys; print(int(json.load(sys.stdin)["result"], 16))' 2>/dev/null || true
+}
+
 check_rpc() {
     local url="$1"
     curl -sf "$url" -X POST -H "Content-Type: application/json" \
@@ -162,7 +170,10 @@ chain_config_joltzu() {
 chain_config_diesis() {
     CHAIN_RPC="${DIESIS_RPC:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
     CHAIN_WS="${DIESIS_WS:-ws://localhost:18546}"
-    CHAIN_CHAIN_ID=19803
+    # DIESIS_CHAIN_ID wins; otherwise ask the first endpoint, falling back to the e2e
+    # chain ID while a managed cluster is still down (bench.sh reloads after starting it).
+    CHAIN_CHAIN_ID="${DIESIS_CHAIN_ID:-$(rpc_chain_id "${CHAIN_RPC%%,*}")}"
+    CHAIN_CHAIN_ID="${CHAIN_CHAIN_ID:-19803}"
     CHAIN_KEYS="0x0000000000000000000000000000000000000000000000000000000000000001,0x0000000000000000000000000000000000000000000000000000000000000002,0x0000000000000000000000000000000000000000000000000000000000000003,0x0000000000000000000000000000000000000000000000000000000000000004"
     local _tag
     _tag="$(diesis_image_tag)"
@@ -178,6 +189,19 @@ chain_config_diesis() {
     CHAIN_TYPE="L1 (Mysticeti BFT, 4 validators)"
     # Topology overrides — container names and static IPs for network-topology.sh
     CHAIN_TOPOLOGY_ENV="NODE1_CONTAINER=diesis-e2e-node-1 NODE1_IP=10.100.0.11 NODE2_CONTAINER=diesis-e2e-node-2 NODE2_IP=10.100.0.12 NODE3_CONTAINER=diesis-e2e-node-3 NODE3_IP=10.100.0.13 NODE4_CONTAINER=diesis-e2e-node-4 NODE4_IP=10.100.0.14"
+    if [[ "${DIESIS_FLEET:-}" == "external" ]]; then
+        # Use an already-running fleet at DIESIS_RPC / DIESIS_WS: never start, stop,
+        # rebuild or restart it. compare.sh needs a start command, so up/down are no-ops.
+        CHAIN_UP_CMD=":"
+        CHAIN_DOWN_CMD=":"
+        CHAIN_CLEAN_CMD=""
+        CHAIN_REBUILD_CMD=""
+        CHAIN_REBUILD_DEV_CMD=""
+        CHAIN_TYPE="${CHAIN_TYPE} — external fleet"
+    elif [[ -n "${DIESIS_FLEET:-}" ]]; then
+        log_error "DIESIS_FLEET must be 'external' or unset (got '${DIESIS_FLEET}')"
+        return 1
+    fi
 }
 
 chain_config_sonic() {

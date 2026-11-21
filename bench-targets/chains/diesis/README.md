@@ -19,9 +19,21 @@ make status
 make down
 ```
 
+## Existing fleet
+
+To benchmark a fleet that is already running (started elsewhere), use `FLEET=external`
+(`DIESIS_FLEET=external`) with its endpoints. The orchestrator then never starts, stops,
+rebuilds or restarts it, and never reads `DIESIS_REPO_DIR`:
+
+```bash
+make bench CHAIN=diesis FLEET=external \
+  DIESIS_RPC=http://127.0.0.1:38545,http://127.0.0.1:38555,http://127.0.0.1:38565,http://127.0.0.1:38575 \
+  DIESIS_WS=ws://127.0.0.1:38546 MODE=sustained TPS=1000 DURATION=60
+```
+
 ## Defaults
 
-- Chain ID: `19803`
+- Chain ID: `DIESIS_CHAIN_ID` (`CHAIN_ID=` from make), else the first endpoint's `eth_chainId` (e2e: `19803`)
 - RPC endpoints: `http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575`
 - WS endpoint: `ws://localhost:18546`
 - Benchmark keys: deterministic validator keys `1-4`

@@ -10,7 +10,6 @@ HARNESS_MANIFEST="${BENCH_REPO_DIR}/crates/evm-benchmark/Cargo.toml"
 
 DIESIS_RPC="${DIESIS_RPC:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
 DIESIS_WS="${DIESIS_WS:-ws://localhost:18546}"
-DIESIS_CHAIN_ID="${DIESIS_CHAIN_ID:-19803}"
 BENCH_NAME="${BENCH_NAME:-diesis_local}"
 BENCH_OUT="${BENCH_OUT:-${SCRIPT_DIR}/report.json}"
 BENCH_KEY_DEFAULT="0x0000000000000000000000000000000000000000000000000000000000000001,0x0000000000000000000000000000000000000000000000000000000000000002,0x0000000000000000000000000000000000000000000000000000000000000003,0x0000000000000000000000000000000000000000000000000000000000000004"
@@ -52,6 +51,13 @@ if ! curl -sf "${DIESIS_RPC%%,*}" \
     echo "Diesis node is not reachable at ${DIESIS_RPC%%,*}"
     echo "Start it with: make -C \"${DIESIS_REPO_DIR}\" e2e-up-release"
     exit 1
+fi
+
+# Chain ID: DIESIS_CHAIN_ID, else the first endpoint's eth_chainId.
+if [[ -z "${DIESIS_CHAIN_ID:-}" ]]; then
+    DIESIS_CHAIN_ID="$(curl -sf "${DIESIS_RPC%%,*}" -X POST -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' |
+        python3 -c 'import json, sys; print(int(json.load(sys.stdin)["result"], 16))')"
 fi
 
 # Default to the 4 prefunded validator accounts unless callers opt into `--fund`

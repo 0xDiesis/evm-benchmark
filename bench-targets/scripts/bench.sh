@@ -262,6 +262,11 @@ CHAIN_OVERRIDES="${BASE_OVERRIDES}"
 if [[ -n "${GEO_OVERRIDES}" ]]; then
     CHAIN_OVERRIDES="${CHAIN_OVERRIDES} ${GEO_OVERRIDES}"
 fi
+if [[ "${CHAIN}" == "diesis" && "${DIESIS_FLEET:-}" == "external" ]]; then
+    # The running fleet keeps its own configuration; nothing here can change it.
+    echo "Using the running Diesis fleet at ${CHAIN_RPC} (chain ID ${CHAIN_CHAIN_ID}); no start, stop or restart."
+    CHAIN_OVERRIDES=""
+fi
 if [[ "${BENCH_PRINT_CHAIN_OVERRIDES:-true}" == "true" && -n "${CHAIN_OVERRIDES}" ]]; then
     echo "Effective chain overrides:"
     printf '  %s\n' ${CHAIN_OVERRIDES}

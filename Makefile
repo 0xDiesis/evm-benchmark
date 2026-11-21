@@ -28,6 +28,15 @@ PARAM      ?=
 FILTER_CHAIN ?=
 FILTER_MODE  ?=
 
+# Diesis: FLEET=external benchmarks an already-running fleet at DIESIS_RPC / DIESIS_WS
+# without starting, stopping or restarting it; CHAIN_ID= overrides eth_chainId.
+ifdef FLEET
+export DIESIS_FLEET := $(FLEET)
+endif
+ifdef CHAIN_ID
+export DIESIS_CHAIN_ID := $(CHAIN_ID)
+endif
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Build & Quality
 # ══════════════════════════════════════════════════════════════════════════════
@@ -47,6 +56,7 @@ test-scripts: ## Run local launcher and diagnostics tests (not part of CI)
 	@python3 scripts/tests/test_joltzu_target.py
 	@python3 scripts/tests/test_latency_proxy.py
 	@python3 $(SCRIPTS)/test_prometheus_diagnostics.py
+	@python3 scripts/tests/test_diesis_external.py
 
 clippy: ## Run clippy
 	$(CARGO) clippy --manifest-path $(HARNESS_MANIFEST) -- -D warnings
