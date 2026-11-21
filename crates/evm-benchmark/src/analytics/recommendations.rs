@@ -46,19 +46,6 @@ pub fn generate_recommendations(bottlenecks: &[BottleneckFinding]) -> Vec<Recomm
 fn recommendations_for_state_root(_bottleneck: &BottleneckFinding) -> Vec<Recommendation> {
     vec![
         Recommendation {
-            priority: "Critical".to_string(),
-            title: "Implement Verkle Tree Commitment Scheme".to_string(),
-            description: "Replace Merkle tree state commitments with Verkle (Vector Commitment) trees for faster state root computation.".to_string(),
-            estimated_tps_improvement_pct: 25.0,
-            effort_level: "High".to_string(),
-            roi_score: (25.0 / 3.0), // impact / effort (High=3, Medium=2, Low=1)
-            implementation_hints: vec![
-                "Investigate Ipa commitment library".to_string(),
-                "Add Verkle tree data structure".to_string(),
-                "Implement lazy evaluation and batching".to_string(),
-            ],
-        },
-        Recommendation {
             priority: "High".to_string(),
             title: "Parallelize State Root Computation".to_string(),
             description: "Use SIMD or multithreading to compute state root updates in parallel with transaction validation.".to_string(),
@@ -327,7 +314,10 @@ mod tests {
         let bottlenecks = vec![make_bottleneck("StateRootComputation", 0.8)];
         let recs = generate_recommendations(&bottlenecks);
         assert!(!recs.is_empty());
-        assert!(recs.iter().any(|r| r.title.contains("Verkle")));
+        assert!(
+            recs.iter()
+                .any(|r| r.title.contains("Parallelize State Root"))
+        );
     }
 
     #[test]
