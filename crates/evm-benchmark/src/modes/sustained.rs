@@ -7,13 +7,13 @@ use crate::types::{
     SubmissionErrorSummary, SustainedResult, TestMode, WindowEntry, benchmark_validity,
     merge_submission_error_summaries,
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
 use anyhow::Result;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 fn actual_tps(confirmed: u32, total_duration: Duration) -> f32 {
@@ -40,6 +40,47 @@ fn signer_transaction_count(total_txs: usize, signer_count: usize, signer_idx: u
     let base = total_txs / signer_count;
     let extra = total_txs % signer_count;
     base + usize::from(signer_idx < extra)
+}
+
+/// Pre-signed pool size as a multiple of `tps * duration`. Workers skip missed
+/// ticks, so they never consume more than about `tps * duration` transactions;
+/// `BENCH_PRESIGN_HEADROOM` (for example 1.2) trims the default 5x, which at
+/// thousands of TPS over long runs costs minutes of signing and gigabytes of memory.
+fn presign_headroom() -> f64 {
+    parse_presign_headroom(std::env::var("BENCH_PRESIGN_HEADROOM").ok().as_deref())
+}
+
+fn parse_presign_headroom(value: Option<&str>) -> f64 {
+    value
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 1.0)
+        .unwrap_or(5.0)
+}
+
+fn presign_tx_count(target_tps: usize, duration_secs: u64, headroom: f64) -> usize {
+    let base = target_tps.saturating_mul(duration_secs as usize) as f64;
+    ((base * headroom).ceil() as usize).max(1000)
+}
+
+/// Accepted transactions with their submission wall-clock time, written when
+/// `BENCH_SUBMIT_LOG` names a file, so an external observer can join each hash
+/// to the block that included it and the time that block finalized.
+type SubmitLog = Arc<std::sync::Mutex<Vec<(B256, u64)>>>;
+
+fn unix_micros(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_micros() as u64)
+        .unwrap_or(0)
+}
+
+fn write_submit_log(path: &std::path::Path, entries: &[(B256, u64)]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+    writeln!(out, "hash,submit_unix_us")?;
+    for (hash, micros) in entries {
+        writeln!(out, "{hash:?},{micros}")?;
+    }
+    out.flush()
 }
 
 fn worker_interval(tps_per_worker: f64) -> Duration {
@@ -142,10 +183,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
     let worker_count = (config.worker_count as usize).max(1);
 
     // Pre-sign enough transactions for the full run, distributed across all senders.
-    let total_txs = target_tps
-        .saturating_mul(config.duration_secs as usize)
-        .saturating_mul(5)
-        .max(1000);
+    let total_txs = presign_tx_count(target_tps, config.duration_secs, presign_headroom());
+    let submit_log_path = std::env::var_os("BENCH_SUBMIT_LOG").map(std::path::PathBuf::from);
+    let submit_log: Option<SubmitLog> = submit_log_path
+        .as_ref()
+        .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())));
 
     if !config.quiet {
         println!(
@@ -268,6 +310,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         let metrics = metrics.clone();
         let pre_signed = pre_signed.clone();
         let pool_idx = pool_idx.clone();
+        let submit_log = submit_log.clone();
         let worker_start = Instant::now();
 
         let handle = tokio::spawn(async move {
@@ -284,6 +327,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
                 worker_start,
                 pre_signed,
                 pool_idx,
+                submit_log,
             )
             .await
         });
@@ -311,6 +355,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         let _ = handle.await;
     }
     let load_duration = start.elapsed();
+    if let (Some(path), Some(log)) = (&submit_log_path, &submit_log) {
+        let entries = std::mem::take(&mut *log.lock().unwrap());
+        write_submit_log(path, &entries)
+            .map_err(|e| anyhow::anyhow!("Failed to write submit log {}: {}", path.display(), e))?;
+    }
 
     timeline_handle.abort();
 
@@ -440,6 +489,7 @@ async fn run_worker(
     start: Instant,
     pre_signed: Arc<Vec<crate::types::SignedTxWithMetadata>>,
     pool_idx: Arc<AtomicU32>,
+    submit_log: Option<SubmitLog>,
 ) {
     let pool_len = pre_signed.len() as u32;
 
@@ -457,6 +507,7 @@ async fn run_worker(
         let signed_tx = pre_signed[idx as usize].clone();
         attempted_count.fetch_add(1, Ordering::SeqCst);
         let submit_time = Instant::now();
+        let submit_wall = SystemTime::now();
 
         match dispatcher.submit_single(signed_tx).await {
             Ok(result) => {
@@ -471,6 +522,12 @@ async fn run_worker(
                             tx.method,
                             submit_time,
                         );
+                    }
+                    if let Some(log) = &submit_log {
+                        let micros = unix_micros(submit_wall);
+                        log.lock()
+                            .unwrap()
+                            .extend(result.accepted_txs.iter().map(|tx| (tx.hash, micros)));
                     }
                     metrics.inc_transactions_submitted(accepted as u64);
                     sent_count.fetch_add(accepted, Ordering::SeqCst);
@@ -927,25 +984,39 @@ mod tests {
     /// Total pre-signed tx count: 5x target to have headroom.
     #[test]
     fn test_presign_pool_size_calculation() {
-        let target_tps = 100usize;
-        let duration_secs = 10usize;
-        let total_txs = target_tps
-            .saturating_mul(duration_secs)
-            .saturating_mul(5)
-            .max(1000);
-        assert_eq!(total_txs, 5000);
+        assert_eq!(presign_tx_count(100, 10, 5.0), 5000);
+    }
+
+    #[test]
+    fn test_presign_headroom_is_configurable() {
+        assert_eq!(parse_presign_headroom(None), 5.0);
+        assert_eq!(parse_presign_headroom(Some("1.2")), 1.2);
+        assert_eq!(parse_presign_headroom(Some("0.5")), 5.0);
+        assert_eq!(parse_presign_headroom(Some("nan")), 5.0);
+        assert_eq!(presign_tx_count(3000, 660, 1.2), 2_376_000);
+    }
+
+    #[test]
+    fn test_submit_log_writes_hash_and_micros() {
+        let path =
+            std::env::temp_dir().join(format!("evm-bench-submit-log-{}.csv", std::process::id()));
+        write_submit_log(&path, &[(B256::with_last_byte(7), 1_795_000_000_123_456)])
+            .expect("write");
+        let text = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(
+            text,
+            format!(
+                "hash,submit_unix_us\n{:?},1795000000123456\n",
+                B256::with_last_byte(7)
+            )
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Small run: floor of 1000 txs.
     #[test]
     fn test_presign_pool_minimum_size() {
-        let target_tps = 1usize;
-        let duration_secs = 1usize;
-        let total_txs = target_tps
-            .saturating_mul(duration_secs)
-            .saturating_mul(5)
-            .max(1000);
-        assert_eq!(total_txs, 1000);
+        assert_eq!(presign_tx_count(1, 1, 5.0), 1000);
     }
 
     /// Per-key distribution must assign exactly the requested total.
@@ -1179,6 +1250,7 @@ mod tests {
             Instant::now() - Duration::from_millis(999),
             Arc::new(vec![sample_signed_tx(0)]),
             Arc::new(AtomicU32::new(0)),
+            None,
         )
         .await;
 
@@ -1221,6 +1293,7 @@ mod tests {
             Instant::now() - Duration::from_millis(999),
             Arc::new(vec![sample_signed_tx(1)]),
             Arc::new(AtomicU32::new(0)),
+            None,
         )
         .await;
 
@@ -1251,6 +1324,7 @@ mod tests {
             Instant::now() - Duration::from_millis(999),
             Arc::new(vec![sample_signed_tx(9)]),
             Arc::new(AtomicU32::new(0)),
+            None,
         )
         .await;
 
@@ -1282,6 +1356,7 @@ mod tests {
             Instant::now() - Duration::from_millis(999),
             Arc::new(vec![]),
             Arc::new(AtomicU32::new(0)),
+            None,
         )
         .await;
 
