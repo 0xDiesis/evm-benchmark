@@ -167,17 +167,25 @@ def render(repo, image_id, tag, profile_name, environ=None):
                       DIESIS_IMAGE_TAG=tag, DIESIS_SOURCE_REVISION=head, DIESIS_IMAGE_PROFILE="release", **env)
     rendered = json.loads(sh(["docker", "compose", *files, "config", "--format", "json"], capture=True,
                              env=render_env).stdout)
-    compose = patch(rendered, image_id, env, profile)
+    interpolated = set()
+    for path in files[1::2]:
+        interpolated |= set(re.findall(r"\$\{([A-Z0-9_]+)", Path(path).read_text()))
+    compose = patch(rendered, image_id, env, profile, interpolated)
     return compose, dict(checkout=str(repo), checkout_head=head, profile=profile_name, profile_values=profile,
                          validator_env=env, image_id=image_id, signing_overlay=signing.is_file())
 
 
-def patch(rendered, image_id, env, profile):
+def patch(rendered, image_id, env, profile, interpolated=frozenset()):
+    """Validators take every override except keys the compose only interpolates (log levels,
+    txpool flags, Rayon thread count): the node's strict configuration rejects any DIESIS_*
+    key it does not consume, so those reach the node only through the rendered values."""
     keep = NODES + ["prometheus"]
     missing = [name for name in keep if name not in rendered["services"]]
     if missing:
         raise SystemExit(f"Rendered compose lacks {missing}")
     services = {name: rendered["services"][name] for name in keep}
+    env_keys = {k for name in NODES for k in services[name].get("environment", {})}
+    container_env = {k: v for k, v in env.items() if k in env_keys or k not in interpolated}
     cpus = profile.get("FLEET_CPUS")
     memory = profile.get("FLEET_MEMORY")
     pin = profile.get("FLEET_PIN_CPUS") == "true"
@@ -186,7 +194,7 @@ def patch(rendered, image_id, env, profile):
         service.pop("build", None)
         service.pop("depends_on", None)
         service["image"] = image_id
-        service["environment"].update(env)
+        service["environment"].update(container_env)
         for key in ("cpus", "cpuset", "mem_limit", "deploy"):
             service.pop(key, None)
         if cpus:

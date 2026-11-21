@@ -151,6 +151,18 @@ class Fleet(unittest.TestCase):
         free = fleet.patch(json.loads(json.dumps(rendered)), "sha256:abc", {}, {})
         self.assertNotIn("cpus", free["services"]["node-1"])
 
+    def test_interpolation_only_keys_stay_out_of_validator_env(self):
+        node = lambda: dict(environment={"RUST_LOG": "info", "DIESIS_MIN_ROUND_DELAY": "50ms"}, ports=[], volumes=[])
+        rendered = dict(services={**{n: node() for n in fleet.NODES}, "prometheus": dict(ports=[])}, networks={},
+                        volumes={})
+        env = {"DIESIS_NODE_RUST_LOG": "info", "DIESIS_MIN_ROUND_DELAY": "20ms",
+               "DIESIS_MPT_SERVE_EXECUTED_HEAD": "true"}
+        c = fleet.patch(rendered, "sha256:abc", env, {}, {"DIESIS_NODE_RUST_LOG", "DIESIS_MIN_ROUND_DELAY"})
+        e = c["services"]["node-1"]["environment"]
+        self.assertNotIn("DIESIS_NODE_RUST_LOG", e)
+        self.assertEqual(e["DIESIS_MIN_ROUND_DELAY"], "20ms")
+        self.assertEqual(e["DIESIS_MPT_SERVE_EXECUTED_HEAD"], "true")
+
     def test_aged_tags_are_restricted(self):
         self.assertEqual(fleet.aged_project("m832-5k"), "diesis-bench-aged-m832-5k")
         with self.assertRaises(SystemExit):
@@ -170,6 +182,18 @@ class AB(unittest.TestCase):
             ab.parse_side("profile=fast")
         with self.assertRaises(SystemExit):
             ab.parse_side("env=PATH=/x")
+
+    def test_probe_step_and_overload(self):
+        plan = dict(rates=[1000], duration=300, warmup=0, probe="2:30", max_load=40)
+        self.assertEqual(ab.steps_of(plan), [("probe", 2, 30, 0), ("1000", 1000, 300, 0)])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            for step, load in (("probe", 12.0), ("1000", 55.0)):
+                d = out / "arm-1a" / step
+                d.mkdir(parents=True)
+                (d / "diesis-metrics.json").write_text(json.dumps(dict(host_load_1m=dict(median=load, max=load))))
+            self.assertEqual(ab.overloaded(out, 1, "a", plan), 55.0)
+            self.assertIsNone(ab.overloaded(out, 1, "a", dict(plan, max_load=60)))
 
     def test_summary_medians_and_ranges(self):
         with tempfile.TemporaryDirectory() as tmp:

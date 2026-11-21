@@ -12,7 +12,10 @@ A side is a comma list of:
   name=<short>              label in the summary
 With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats.
 Each arm runs one sustained bench.sh step per rate (fresh genesis per step, or a restart of
-the aged fleet --aged on its own volumes). Before each arm the host must be quiet for 60 s
+the aged fleet --aged on its own volumes). --probe TPS:SECONDS adds a low-rate idle probe as
+the arm's first step; --reuse-fleet runs the arm's later steps on the fleet its first step
+started (DIESIS_FLEET=external). --max-load reruns an arm, on a fresh fleet, when any of its
+windows saw a 1-minute host load above the limit (up to two reruns, all recorded). Before each arm the host must be quiet for 60 s
 (1-minute load below 8, no compiler or docker build) within 10 minutes; the outcome is
 recorded, never forced: no exclusive measurement window is taken. Re-running with the same
 --name skips completed steps and retries failed ones once. Results:
@@ -111,9 +114,19 @@ def value(fn, step):
         return None
 
 
-def step_metrics(out, i, key, rate):
-    path = out / f"arm-{i}{key}" / str(rate) / "diesis-metrics.json"
+def step_metrics(out, i, key, step):
+    path = out / f"arm-{i}{key}" / str(step) / "diesis-metrics.json"
     return json.loads(path.read_text()) if path.exists() else None
+
+
+def steps_of(plan):
+    """[(name, tps, duration, warmup)] for one arm."""
+    steps = []
+    if plan.get("probe"):
+        tps, seconds = (int(x) for x in plan["probe"].split(":"))
+        steps.append(("probe", tps, seconds, 0))
+    steps += [(str(rate), rate, plan.get("duration"), plan.get("warmup")) for rate in plan["rates"]]
+    return steps
 
 
 def summarize(out, plan):
@@ -121,7 +134,7 @@ def summarize(out, plan):
     for key, side in plan["sides"].items():
         arms = [i for i, k in enumerate(plan["order"], 1) if k == key]
         summary[key] = dict(config=side, rates={})
-        for rate in plan["rates"]:
+        for rate, *_ in steps_of(plan):
             steps = [m for i in arms if (m := step_metrics(out, i, key, rate))]
             row = dict(n=len(steps))
             for name, fn in METRICS:
@@ -130,6 +143,7 @@ def summarize(out, plan):
             for verdict in ("generator_bound", "chain_saturated"):
                 row[verdict] = sum(bool(s.get(verdict)) for s in steps)
             row["pool_full"] = sum(s.get("pool_full_at_s") is not None for s in steps)
+            row["finalized_agreement"] = sum(bool((s.get("finalized_agreement") or {}).get("agree")) for s in steps)
             summary[key]["rates"][str(rate)] = row
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     cols = [name for name, _ in METRICS if name != "host_load_median"]
@@ -147,23 +161,24 @@ def summarize(out, plan):
         c = data["config"]
         lines += [f"## {key.upper()}: {c.get('name') or c['profile']} — {c['profile']} image={c.get('image') or 'HEAD'} "
                   f"{' '.join(c['env'])}", "",
-                  "| offered | " + " | ".join(cols) + " | gen-bound | saturated | pool full |",
-                  "|---" * (len(cols) + 4) + "|"]
+                  "| offered | " + " | ".join(cols) + " | gen-bound | saturated | pool full | agree |",
+                  "|---" * (len(cols) + 5) + "|"]
         for rate, row in data["rates"].items():
             lines.append(f"| {rate} | " + " | ".join(fmt(row[c]) for c in cols)
                          + f" | {row['generator_bound']}/{row['n']} | {row['chain_saturated']}/{row['n']}"
-                         f" | {row['pool_full']}/{row['n']} |")
+                         f" | {row['pool_full']}/{row['n']} | {row['finalized_agreement']}/{row['n']} |")
         lines.append("")
     (out / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def run_step(out, i, key, side, rate, plan, log):
-    step_dir = out / f"arm-{i}{key}" / str(rate)
+def run_step(out, i, key, side, step, plan, log, external=False):
+    name, rate, duration, warmup = step
+    step_dir = out / f"arm-{i}{key}" / name
     if (step_dir / "diesis-metrics.json").exists():
         return True
     if step_dir.exists():
-        step_dir.rename(step_dir.with_name(f"{rate}-failed-{int(time.time())}"))
-    env = dict(os.environ, BENCH_DIESIS_PROFILE=side["profile"], BENCH_WARMUP_SECS=str(plan["warmup"]),
+        step_dir.rename(step_dir.with_name(f"{name}-failed-{int(time.time())}"))
+    env = dict(os.environ, BENCH_DIESIS_PROFILE=side["profile"], BENCH_WARMUP_SECS=str(warmup),
                BENCH_DIESIS_ENV=" ".join(shlex.quote(e) for e in side["env"]))
     if side.get("image"):
         env["DIESIS_IMAGE_TAG"] = side["image"]
@@ -171,12 +186,47 @@ def run_step(out, i, key, side, rate, plan, log):
         env["DIESIS_REPO_DIR"] = side["repo"]
     if plan.get("aged"):
         env["DIESIS_AGED_TAG"] = plan["aged"]
+    if external:
+        env["DIESIS_FLEET"] = "external"
     cmd = ["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained", "--tps", str(rate),
-           "--duration", str(plan["duration"]), "--out", str(step_dir), "--tag", f"{out.name}-{i}{key}"]
-    log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} rate {rate}: {' '.join(cmd)}\n")
+           "--duration", str(duration), "--out", str(step_dir), "--tag", f"{out.name}-{i}{key}"]
+    log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {name}{' (same fleet)' if external else ''}: "
+              f"{' '.join(cmd)}\n")
     log.flush()
     result = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT)
     return result.returncode == 0 and (step_dir / "diesis-metrics.json").exists()
+
+
+def run_arm(out, i, key, plan, log, attempt, no_quiet_wait):
+    """Run the arm's missing steps; returns whether anything ran."""
+    side = plan["sides"][key]
+    steps = steps_of(plan)
+    pending = [st for st in steps if not step_metrics(out, i, key, st[0])]
+    if not pending:
+        return False
+    host = dict(quiet=None) if no_quiet_wait else wait_quiet()
+    arm_dir = out / f"arm-{i}{key}"
+    arm_dir.mkdir(exist_ok=True)
+    (arm_dir / f"host-{attempt}.json").write_text(json.dumps(host) + "\n")
+    # The first step run in this pass starts a fresh fleet; with --reuse-fleet the rest use it.
+    for n, step in enumerate(pending):
+        external = bool(plan.get("reuse_fleet")) and n > 0
+        ok = run_step(out, i, key, side, step, plan, log, external=external)
+        log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {step[0]}: {'ok' if ok else 'FAILED'}\n")
+        log.flush()
+        if not ok and plan.get("reuse_fleet"):
+            break
+    return True
+
+
+def overloaded(out, i, key, plan):
+    """The highest 1-minute host load over the arm's windows when above --max-load."""
+    if not plan.get("max_load"):
+        return None
+    loads = [(m.get("host_load_1m") or {}).get("max") or 0 for st in steps_of(plan)
+             if (m := step_metrics(out, i, key, st[0]))]
+    worst = max(loads, default=0)
+    return worst if worst > plan["max_load"] else None
 
 
 def main():
@@ -189,6 +239,9 @@ def main():
     p.add_argument("--duration", type=int, default=660, help="Load seconds per step (warmup + window)")
     p.add_argument("--warmup", type=int, default=60)
     p.add_argument("--aged", help="Aged fleet tag (fleet.py age); default fresh genesis per step")
+    p.add_argument("--probe", help="TPS:SECONDS idle probe as each arm's first step, e.g. 2:30")
+    p.add_argument("--reuse-fleet", action="store_true", help="Run each arm's later steps on its first step's fleet")
+    p.add_argument("--max-load", type=float, help="Rerun an arm whose windows saw a higher 1-minute host load")
     p.add_argument("--no-quiet-wait", action="store_true")
     p.add_argument("--summarize-only", action="store_true")
     a = p.parse_args()
@@ -201,26 +254,27 @@ def main():
         plan = json.loads(plan_path.read_text())
     else:
         sides = {"a": parse_side(a.a)} | ({"b": parse_side(a.b)} if a.b else {})
+        if a.probe and not re.fullmatch(r"\d+:\d+", a.probe):
+            raise SystemExit("--probe must be TPS:SECONDS")
         plan = dict(sides=sides, order=schedule(a.arms, bool(a.b)), rates=[int(r) for r in a.rates.split(",")],
-                    duration=a.duration, warmup=a.warmup, aged=a.aged, created=time.time())
+                    duration=a.duration, warmup=a.warmup, aged=a.aged, probe=a.probe, reuse_fleet=a.reuse_fleet,
+                    max_load=a.max_load, created=time.time())
         plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     if a.summarize_only:
         return summarize(out, plan)
     with (out / "ab.log").open("a") as log:
         for attempt in (1, 2):
             for i, key in enumerate(plan["order"], 1):
-                side = plan["sides"][key]
-                pending = [r for r in plan["rates"] if not step_metrics(out, i, key, r)]
-                if not pending:
-                    continue
-                host = dict(quiet=None) if a.no_quiet_wait else wait_quiet()
-                arm_dir = out / f"arm-{i}{key}"
-                arm_dir.mkdir(exist_ok=True)
-                (arm_dir / f"host-{attempt}.json").write_text(json.dumps(host) + "\n")
-                for rate in pending:
-                    ok = run_step(out, i, key, side, rate, plan, log)
-                    log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} rate {rate}: {'ok' if ok else 'FAILED'}\n")
-                    log.flush()
+                for rerun in range(3):
+                    if not run_arm(out, i, key, plan, log, attempt, a.no_quiet_wait):
+                        break
+                    hot = overloaded(out, i, key, plan)
+                    if not hot or rerun == 2:
+                        break
+                    arm_dir = out / f"arm-{i}{key}"
+                    log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} host load {hot:.0f} above "
+                              f"{plan['max_load']}: rerunning\n")
+                    arm_dir.rename(arm_dir.with_name(f"{arm_dir.name}-overloaded-{int(time.time())}"))
                 summarize(out, plan)
     summarize(out, plan)
     print(out / "summary.md")

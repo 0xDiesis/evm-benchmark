@@ -343,6 +343,28 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
     return r
 
 
+def agreement(obs, start, end):
+    """All validators' block hashes at up to five finalized heights: the window's first, middle
+    and last finalized blocks and the final all-four finalized head."""
+    try:
+        head = min(int(rpc(u, "eth_getBlockByNumber", ["finalized", False])["number"], 16) for u in RPC_URLS)
+    except Exception as error:
+        return dict(agree=None, error=str(error)[:200])
+    with obs.lock:
+        window = sorted(n for n, b in obs.blocks.items() if start <= b.get("finalized", -1) <= end and n <= head)
+    heights = sorted({h for h in (window[:1] + window[len(window) // 2:len(window) // 2 + 1] + window[-1:] + [head])})
+    checked = []
+    for h in heights:
+        hashes = []
+        for u in RPC_URLS:
+            try:
+                hashes.append(rpc(u, "eth_getBlockByNumber", [hex(h), False])["hash"])
+            except Exception as error:
+                hashes.append(f"error: {str(error)[:80]}")
+        checked.append(dict(height=h, agree=len(set(hashes)) == 1, hashes=sorted(set(hashes))))
+    return dict(agree=all(c["agree"] for c in checked), finalized_head=head, heights=checked)
+
+
 def watch(a):
     obs = Observer()
     done = threading.Event()
@@ -366,13 +388,13 @@ def watch(a):
         if not pending and pool == 0:
             break
         time.sleep(2)
-    obs.stop.set()
-    time.sleep(0.5)
     report = json.loads((a.run_dir / "report.json").read_text())
     metrics = window_metrics(obs, a.run_dir / "submit-log.csv", report, a.target_tps, a.duration, a.warmup,
                              a.pool_cap)
     metrics["drain_s"] = time.time() - load_end
+    metrics["finalized_agreement"] = agreement(obs, metrics["window_start"], metrics["window_end"])
     metrics["pool_pending_after_drain"] = pool
+    obs.stop.set()
     (a.run_dir / "diesis-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     if not a.keep_raw:
         (a.run_dir / "submit-log.csv").unlink(missing_ok=True)
@@ -402,6 +424,9 @@ def print_summary(m):
           f"empty blocks {fmt(m['empty_block_share'])}  pool slope {fmt(m['pool_slope_tx_per_s'])}/s")
     print(f"  Verdicts:               generator_bound={m['generator_bound']}  chain_saturated={m['chain_saturated']}"
           + (f"  EXITS={m['validator_exits']}" if m["validator_exits"] else ""))
+    agree = m.get("finalized_agreement") or {}
+    print(f"  Finalized agreement:    {agree.get('agree')} at heights "
+          f"{[c['height'] for c in agree.get('heights', [])]}")
 
 
 def main():
