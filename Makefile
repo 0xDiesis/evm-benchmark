@@ -1,5 +1,5 @@
 .PHONY: build test test-scripts clippy fmt check quality quality-fix clean-rust help preflight \
-       bench bench-all compare compare-all \
+       bench bench-all compare compare-all ab diesis-age \
        sweep sweep-all sweep-list \
        results results-latest results-compare results-ledger results-summary \
        chains \
@@ -20,7 +20,7 @@ TPS        ?= 200
 DURATION   ?= 30
 SENDERS    ?= 200
 BATCH_SIZE ?= 200
-WORKERS    ?= 8
+WORKERS    ?=
 TAG        ?=
 TEST_MODE  ?= transfer
 CHAINS     ?= diesis sonic
@@ -35,6 +35,21 @@ export DIESIS_FLEET := $(FLEET)
 endif
 ifdef CHAIN_ID
 export DIESIS_CHAIN_ID := $(CHAIN_ID)
+endif
+# Diesis fleet (docs/diesis-methodology.md): PROFILE=capped|uncapped (capped is the official
+# run rule), IMAGE=<diesis-node-e2e tag> (default <checkout HEAD>-release), AGED=<aged fleet
+# tag>, WARMUP=<seconds excluded from the measured window>.
+ifdef PROFILE
+export BENCH_DIESIS_PROFILE := $(PROFILE)
+endif
+ifdef IMAGE
+export DIESIS_IMAGE_TAG := $(IMAGE)
+endif
+ifdef AGED
+export DIESIS_AGED_TAG := $(AGED)
+endif
+ifdef WARMUP
+export BENCH_WARMUP_SECS := $(WARMUP)
 endif
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -56,7 +71,7 @@ test-scripts: ## Run local launcher and diagnostics tests (not part of CI)
 	@python3 scripts/tests/test_joltzu_target.py
 	@python3 scripts/tests/test_latency_proxy.py
 	@python3 $(SCRIPTS)/test_prometheus_diagnostics.py
-	@python3 scripts/tests/test_diesis_external.py
+	@python3 -m unittest discover -s scripts/tests -p 'test_diesis_*.py'
 
 clippy: ## Run clippy
 	$(CARGO) clippy --manifest-path $(HARNESS_MANIFEST) -- -D warnings
@@ -124,7 +139,7 @@ bench: build ## Run a single benchmark  (CHAIN= MODE= ENV= TXS= TPS= DURATION= S
 	@bash $(SCRIPTS)/bench.sh \
 		--chain $(CHAIN) --mode $(MODE) --env $(ENV) \
 		--txs $(TXS) --tps $(TPS) --duration $(DURATION) \
-		--senders $(SENDERS) --batch-size $(BATCH_SIZE) --workers $(WORKERS) \
+		--senders $(SENDERS) --batch-size $(BATCH_SIZE) $(if $(WORKERS),--workers $(WORKERS)) \
 		--test-mode $(TEST_MODE) \
 		$(if $(TAG),--tag $(TAG)) \
 		$(if $(filter true yes 1,$(REBUILD)),--rebuild) \
@@ -151,6 +166,20 @@ compare-all: build ## Compare chains across all modes  (CHAINS="diesis sonic" EN
 		--chains "$(CHAINS)" --mode all --env $(ENV) \
 		--txs $(TXS) --tps $(TPS) --duration $(DURATION) \
 		--senders $(SENDERS) --batch-size $(BATCH_SIZE)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Diesis A/B and aged fleets (docs/diesis-methodology.md)
+# ══════════════════════════════════════════════════════════════════════════════
+
+ab: build ## Interleaved A/B/B/A Diesis runs  (NAME= A="profile=capped" B="profile=capped,image=<tag>" ARMS=3 RATES=2000 AB_DURATION=660 WARMUP=60 AGED=)
+	@test -n "$(NAME)" || { echo "Error: NAME is required"; exit 2; }
+	@python3 $(SCRIPTS)/ab.py --name "$(NAME)" --a "$(or $(A),profile=capped)" $(if $(B),--b "$(B)") \
+		--arms $(or $(ARMS),3) --rates "$(or $(RATES),2000)" --duration $(or $(AB_DURATION),660) \
+		--warmup $(or $(WARMUP),60) $(if $(AGED),--aged $(AGED))
+
+diesis-age: build ## Build an aged Diesis fleet  (TAG= BLOCKS=5100 RATE=400)
+	@test -n "$(TAG)" || { echo "Error: TAG is required"; exit 2; }
+	@python3 bench-targets/chains/diesis/fleet.py age --tag "$(TAG)" --blocks $(or $(BLOCKS),5100) --rate $(or $(RATE),400)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Parameter Sweeps (Diesis-specific)
