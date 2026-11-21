@@ -154,7 +154,6 @@ GAUGES: dict[str, str] = {
     "publication_lag": "max(reth_diesis_pipeline_publication_lag)",
     "persistence_lag": "max(reth_diesis_pipeline_persistence_lag)",
     "overlay_depth": "sum(reth_diesis_pipeline_overlay_depth)",
-    "verkle_stash_depth": "sum(reth_diesis_pipeline_verkle_stash_depth)",
     "witness_stash_depth": "sum(reth_diesis_pipeline_witness_stash_depth)",
     "execution_view_stash_depth": "sum(reth_diesis_pipeline_execution_view_stash_depth)",
     "payload_batch_last_tx_count": "max(reth_diesis_consensus_payload_batch_last_tx_count)",

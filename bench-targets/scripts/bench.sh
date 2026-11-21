@@ -268,12 +268,9 @@ if [[ "${BENCH_PRINT_CHAIN_OVERRIDES:-true}" == "true" && -n "${CHAIN_OVERRIDES}
 fi
 if [[ "${REBUILD}" == "true" && -n "${CHAIN_REBUILD_CMD:-}" ]]; then
     if [[ "${DEV}" == "true" && -n "${CHAIN_REBUILD_DEV_CMD:-}" ]]; then
-        # Debug builds skip expensive verkle computation so blocks execute fast
-        # enough to meet deploy timeouts.  QUIC/FEC behavior is unaffected.
-        DEV_OVERRIDES="E2E_COMMITMENT_MODE=none E2E_SKIP_STATE_ROOT_VALIDATION=true"
         echo "Rebuilding and restarting ${CHAIN} (dev/debug build — faster compile)..."
         eval "${CHAIN_DOWN_CMD}" 2>/dev/null || true
-        eval "${CHAIN_OVERRIDES} ${DEV_OVERRIDES} ${CHAIN_REBUILD_DEV_CMD}" || { echo "ERROR: Dev rebuild failed" >&2; exit 1; }
+        eval "${CHAIN_OVERRIDES} ${CHAIN_REBUILD_DEV_CMD}" || { echo "ERROR: Dev rebuild failed" >&2; exit 1; }
     else
         echo "Rebuilding and restarting ${CHAIN} (forced rebuild)..."
         eval "${CHAIN_DOWN_CMD}" 2>/dev/null || true

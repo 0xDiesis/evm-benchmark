@@ -84,7 +84,7 @@ fn detect_state_root_bottleneck(
             severity,
             pct_of_total,
             details: format!(
-                "State root computation takes {:.1}% of block execution time. Consider Verkle trees or incremental commitment schemes.",
+                "State root computation takes {:.1}% of block execution time. Consider parallel or incremental state root computation.",
                 pct_of_exec
             ),
             stack_attribution: attribution,

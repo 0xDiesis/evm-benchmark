@@ -56,7 +56,6 @@ if '${chain}' == 'diesis':
         'quic_hedge_rlpx_min_bytes': int(env_first(['E2E_QUIC_HEDGE_RLPX_MIN_BYTES', 'DIESIS_QUIC_HEDGE_RLPX_MIN_BYTES'], '65536')),
         'quic_hedge_rlpx_broadcast_min_bytes': int(env_first(['E2E_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES', 'DIESIS_QUIC_HEDGE_RLPX_BROADCAST_MIN_BYTES'], '0')),
         'parallel_execution':      env_or('E2E_PARALLEL_EXECUTION',    'full'),
-        'commitment_mode':         env_or('E2E_COMMITMENT_MODE',       'verkle'),
         'fec_enabled':             env_or('E2E_FEC_ENABLED',           'true'),
         'fec_redundancy_ratio':    env_or('E2E_FEC_REDUNDANCY_RATIO',  '0.33'),
         'fec_min_message_size':    int(env_or('E2E_FEC_MIN_MESSAGE_SIZE', '1024')),

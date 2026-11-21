@@ -151,7 +151,7 @@ sweep: build ## Run a parameter sweep  (PARAM=block-period MODE= TXS=)
 		--txs $(TXS) --tps $(TPS) --senders $(SENDERS) --batch-size $(BATCH_SIZE)
 
 sweep-all: build ## Run all parameter sweeps sequentially
-	@for p in block-period ordering-window max-block-txs parallel-execution commitment-mode proposal-gas round-delay max-proposal-txs; do \
+	@for p in block-period ordering-window max-block-txs parallel-execution proposal-gas round-delay max-proposal-txs; do \
 		echo ""; echo "═══ Sweep: $$p ═══"; \
 		bash $(SCRIPTS)/sweep.sh --param $$p --mode $(MODE) --txs $(TXS) --tps $(TPS) --senders $(SENDERS) --batch-size $(BATCH_SIZE); \
 	done

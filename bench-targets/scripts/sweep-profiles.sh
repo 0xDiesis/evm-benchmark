@@ -26,11 +26,6 @@ SWEEP_PARALLEL_EXECUTION_PARAM="E2E_PARALLEL_EXECUTION"
 SWEEP_PARALLEL_EXECUTION_VALUES="full sequential"
 SWEEP_PARALLEL_EXECUTION_DESC="Execution parallelization mode"
 
-# State commitment mode
-SWEEP_COMMITMENT_MODE_PARAM="E2E_COMMITMENT_MODE"
-SWEEP_COMMITMENT_MODE_VALUES="mpt verkle"
-SWEEP_COMMITMENT_MODE_DESC="State commitment type"
-
 # Max gas per proposal
 SWEEP_PROPOSAL_GAS_PARAM="E2E_MAX_GAS_PER_PROPOSAL"
 SWEEP_PROPOSAL_GAS_VALUES="15000000 30000000 60000000 120000000"
@@ -47,7 +42,7 @@ SWEEP_MAX_PROPOSAL_TXS_VALUES="256 512 1024 2048 4096"
 SWEEP_MAX_PROPOSAL_TXS_DESC="Max transactions per proposal"
 
 # ── Registry of all profile names ────────────────────────────────────────
-_SWEEP_PROFILES="block-period ordering-window max-block-txs parallel-execution commitment-mode proposal-gas round-delay max-proposal-txs"
+_SWEEP_PROFILES="block-period ordering-window max-block-txs parallel-execution proposal-gas round-delay max-proposal-txs"
 
 # ── list_sweep_profiles ─────────────────────────────────────────────────
 list_sweep_profiles() {
