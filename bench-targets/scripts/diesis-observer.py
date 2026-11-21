@@ -36,9 +36,14 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
-RPC_PORTS = [18545, 18555, 18565, 18575]
-METRICS_PORTS = [19101, 19102, 19103, 19104]
-CONTAINERS = [f"diesis-e2e-node-{i}" for i in range(1, 5)]
+# Endpoints default to the fleet.py / e2e layout; an external fleet (DIESIS_FLEET=external)
+# passes its own. Container CPU is read only for containers that exist on this host.
+RPC_URLS = os.environ.get("DIESIS_RPC", "http://127.0.0.1:18545,http://127.0.0.1:18555,"
+                          "http://127.0.0.1:18565,http://127.0.0.1:18575").split(",")
+METRICS_URLS = os.environ.get("DIESIS_METRICS", ",".join(f"http://127.0.0.1:{p}/metrics"
+                                                          for p in (19101, 19102, 19103, 19104))).split(",")
+CONTAINERS = [c for c in os.environ.get("DIESIS_CONTAINERS", ",".join(f"diesis-e2e-node-{i}" for i in range(1, 5)))
+              .split(",") if c]
 PROM = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)$")
 KEEP = ("reth_sync_checkpoint", "reth_diesis_horizon_committed_transactions_total",
         "reth_diesis_consensus_current_round", "reth_diesis_lock_hold_ms_sum", "reth_diesis_mpt_certify_phase_ms",
@@ -46,9 +51,9 @@ KEEP = ("reth_sync_checkpoint", "reth_diesis_horizon_committed_transactions_tota
 INF = float("inf")
 
 
-def rpc(port, method, params=(), timeout=5):
+def rpc(url, method, params=(), timeout=5):
     body = json.dumps(dict(jsonrpc="2.0", id=1, method=method, params=list(params))).encode()
-    with urlopen(Request(f"http://127.0.0.1:{port}", body, {"Content-Type": "application/json"}),
+    with urlopen(Request(url, body, {"Content-Type": "application/json"}),
                  timeout=timeout) as response:
         data = json.load(response)
     if "error" in data:
@@ -67,8 +72,8 @@ def parse_prom(text, keep=KEEP):
     return out
 
 
-def scrape(port):
-    with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=10) as response:
+def scrape(url):
+    with urlopen(url, timeout=10) as response:
         return parse_prom(response.read().decode())
 
 
@@ -157,19 +162,23 @@ class Observer:
         self.errors = []
         self.stop = threading.Event()
         self.sock = docker_socket()
+        present = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True).stdout.split()
+        self.containers = [c for c in CONTAINERS if c in present]
+        if not self.containers:
+            self.err("no local validator containers: CPU per transaction and exit detection are off")
 
     def err(self, text):
         if len(self.errors) < 40:
             self.errors.append(f"{time.time():.1f} {text}"[:300])
 
     def blocks_loop(self):
-        last = int(rpc(RPC_PORTS[0], "eth_blockNumber"), 16)
+        last = int(rpc(RPC_URLS[0], "eth_blockNumber"), 16)
         while not self.stop.is_set():
             try:
-                head = int(rpc(RPC_PORTS[0], "eth_blockNumber"), 16)
+                head = int(rpc(RPC_URLS[0], "eth_blockNumber"), 16)
                 seen = time.time()
                 for number in range(last + 1, head + 1):
-                    block = rpc(RPC_PORTS[0], "eth_getBlockByNumber", [hex(number), False], 10)
+                    block = rpc(RPC_URLS[0], "eth_getBlockByNumber", [hex(number), False], 10)
                     with self.lock:
                         self.blocks.setdefault(number, {}).update(seen=seen, hashes=block["transactions"])
                     last = number
@@ -178,11 +187,11 @@ class Observer:
             self.stop.wait(0.05)
 
     def heads_loop(self):
-        floor = all4 = int(rpc(RPC_PORTS[0], "eth_blockNumber"), 16)
+        floor = all4 = int(rpc(RPC_URLS[0], "eth_blockNumber"), 16)
         while not self.stop.is_set():
             try:
-                finalized = min(int(rpc(p, "eth_getBlockByNumber", ["finalized", False])["number"], 16) for p in RPC_PORTS)
-                latest = min(int(rpc(p, "eth_blockNumber"), 16) for p in RPC_PORTS)
+                finalized = min(int(rpc(p, "eth_getBlockByNumber", ["finalized", False])["number"], 16) for p in RPC_URLS)
+                latest = min(int(rpc(p, "eth_blockNumber"), 16) for p in RPC_URLS)
                 seen = time.time()
                 with self.lock:
                     for number in range(floor + 1, finalized + 1):
@@ -198,21 +207,24 @@ class Observer:
         while not self.stop.is_set():
             wall = time.time()
             nodes, cpu = [], {}
-            for port in METRICS_PORTS:
+            for url in METRICS_URLS:
                 try:
-                    nodes.append(scrape(port))
+                    nodes.append(scrape(url))
                 except Exception as error:
                     nodes.append(None)
-                    self.err(f"prom {port}: {error}")
-            for name in CONTAINERS:
+                    self.err(f"prom {url}: {error}")
+            for name in self.containers:
                 try:
                     cpu[name] = cpu_ns(name, self.sock)
                 except Exception as error:
                     self.err(f"cpu {name}: {error}")
             self.samples.append((wall, nodes, cpu, os.getloadavg()[0]))
             try:
+                if not self.containers:
+                    self.stop.wait(5)
+                    continue
                 state = subprocess.run(["docker", "inspect", "--format", "{{.Name}} {{.State.Status}} {{.State.ExitCode}}",
-                                        *CONTAINERS], capture_output=True, text=True, timeout=10).stdout
+                                        *self.containers], capture_output=True, text=True, timeout=10).stdout
                 gone = [line for line in state.splitlines() if line.split()[1:2] in (["exited"], ["dead"])]
                 if gone:
                     self.exited = gone
@@ -348,7 +360,7 @@ def watch(a):
             pending = [n for n, b in obs.blocks.items() if n <= end_height and "finalized" not in b]
         pool = None
         try:
-            pool = gauge(scrape(METRICS_PORTS[0]), "reth_transaction_pool_pending_pool_transactions")
+            pool = gauge(scrape(METRICS_URLS[0]), "reth_transaction_pool_pending_pool_transactions")
         except Exception:
             pass
         if not pending and pool == 0:
