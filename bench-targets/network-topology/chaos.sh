@@ -38,7 +38,7 @@ compose() {
 check_e2e_running() {
     if ! docker ps --format '{{.Names}}' | grep -q 'diesis-e2e-node-1'; then
         echo "ERROR: Diesis e2e cluster is not running."
-        echo "Start it first: make e2e-up-release"
+        echo "Start it first: python3 bench-targets/chains/diesis/fleet.py reset"
         exit 1
     fi
 }

@@ -7,39 +7,9 @@ set -euo pipefail
 # ── 1. Constants ───────────────────────────────────────────────────────────────
 BENCH_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DIESIS_REPO_DIR="${DIESIS_REPO_DIR:-${BENCH_REPO_ROOT}/../diesis}"
-RESULTS_BASE="${BENCH_REPO_ROOT}/bench-targets/results"
+RESULTS_BASE="${BENCH_RESULTS_BASE:-${BENCH_REPO_ROOT}/bench-targets/results}"
 HARNESS_MANIFEST="${BENCH_REPO_ROOT}/crates/evm-benchmark/Cargo.toml"
 TOPOLOGY_SCRIPT="${BENCH_REPO_ROOT}/bench-targets/network-topology/network-topology.sh"
-
-# ── Docker image tagging ──────────────────────────────────────────────────────
-# Auto-derive image tag from the Diesis repo's git short SHA.
-# Override with DIESIS_IMAGE_TAG=mytag to use a specific tag.
-# This enables instant switching between branches for A/B benchmarking.
-diesis_image_tag() {
-    if [[ -n "${DIESIS_IMAGE_TAG:-}" ]]; then
-        echo "${DIESIS_IMAGE_TAG}"
-    elif [[ -d "${DIESIS_REPO_DIR}/.git" || -f "${DIESIS_REPO_DIR}/.git" ]]; then
-        local branch dirty_suffix=""
-        # Use branch name as tag (e.g. main, feat-pqc-ml-dsa)
-        # Slashes are replaced with dashes for Docker tag compatibility.
-        branch="$(git -C "${DIESIS_REPO_DIR}" branch --show-current 2>/dev/null | tr '/' '-')"
-        branch="${branch:-latest}"
-        # Append -dirty if there are uncommitted changes to crates/ or docker/
-        # so the image is rebuilt when source files change without a commit.
-        if ! git -C "${DIESIS_REPO_DIR}" diff --quiet -- crates/ docker/ 2>/dev/null; then
-            dirty_suffix="-dirty"
-        fi
-        echo "${branch}${dirty_suffix}"
-    else
-        echo "latest"
-    fi
-}
-
-# Check if a tagged Docker image exists locally.
-diesis_image_exists() {
-    local tag="${1:-$(diesis_image_tag)}"
-    docker image inspect "diesis-node-e2e:${tag}" >/dev/null 2>&1
-}
 
 # ── 2. Logging functions ──────────────────────────────────────────────────────
 _CLR_RESET="\033[0m"
@@ -175,16 +145,16 @@ chain_config_diesis() {
     CHAIN_CHAIN_ID="${DIESIS_CHAIN_ID:-$(rpc_chain_id "${CHAIN_RPC%%,*}")}"
     CHAIN_CHAIN_ID="${CHAIN_CHAIN_ID:-19803}"
     CHAIN_KEYS="0x0000000000000000000000000000000000000000000000000000000000000001,0x0000000000000000000000000000000000000000000000000000000000000002,0x0000000000000000000000000000000000000000000000000000000000000003,0x0000000000000000000000000000000000000000000000000000000000000004"
-    local _tag
-    _tag="$(diesis_image_tag)"
-    # e2e-up auto-detects: reuses cached image if it exists, builds release if not.
-    # e2e-rebuild forces a fresh build (use when you need to pick up code changes).
-    # e2e-rebuild-dev forces a fresh debug build (faster compile, use for troubleshooting).
-    CHAIN_UP_CMD="make -C ${DIESIS_REPO_DIR} e2e-up E2E_IMAGE_TAG=${_tag}"
-    CHAIN_DOWN_CMD="make -C ${DIESIS_REPO_DIR} e2e-down E2E_IMAGE_TAG=${_tag}"
-    CHAIN_REBUILD_CMD="make -C ${DIESIS_REPO_DIR} e2e-rebuild E2E_IMAGE_TAG=${_tag}"
-    CHAIN_REBUILD_DEV_CMD="make -C ${DIESIS_REPO_DIR} e2e-rebuild-dev E2E_IMAGE_TAG=${_tag}-dev"
+    # The fleet launcher renders the node checkout's e2e compose for an existing image
+    # (DIESIS_IMAGE_TAG, default <checkout HEAD>-release) under a resource profile
+    # (BENCH_DIESIS_PROFILE=capped|uncapped). With DIESIS_AGED_TAG set, down only stops and
+    # up restarts the aged fleet on its own volumes. See docs/diesis-methodology.md.
+    local fleet
+    printf -v fleet '%q' "${BENCH_REPO_ROOT}/bench-targets/chains/diesis/fleet.py"
+    CHAIN_UP_CMD="DIESIS_REPO_DIR=${DIESIS_REPO_DIR} python3 ${fleet} up"
+    CHAIN_DOWN_CMD="DIESIS_REPO_DIR=${DIESIS_REPO_DIR} python3 ${fleet} down"
     CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
+    CHAIN_FLEET_PROVENANCE_CMD="python3 ${fleet} provenance"
     CHAIN_STATUS_CMD="curl -sf ${CHAIN_RPC%%,*} -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
     CHAIN_TYPE="L1 (Mysticeti BFT, 4 validators)"
     # Topology overrides — container names and static IPs for network-topology.sh
@@ -197,6 +167,7 @@ chain_config_diesis() {
         CHAIN_CLEAN_CMD=""
         CHAIN_REBUILD_CMD=""
         CHAIN_REBUILD_DEV_CMD=""
+        CHAIN_FLEET_PROVENANCE_CMD=""
         CHAIN_TYPE="${CHAIN_TYPE} — external fleet"
     elif [[ -n "${DIESIS_FLEET:-}" ]]; then
         log_error "DIESIS_FLEET must be 'external' or unset (got '${DIESIS_FLEET}')"
