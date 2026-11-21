@@ -1,6 +1,7 @@
 use crate::submission::rpc::{RpcSubmitter, SubmissionResult};
 use crate::types::SignedTxWithMetadata;
 use anyhow::Result;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tracing::{debug, warn};
@@ -63,7 +64,10 @@ impl EndpointHealth {
 pub struct RpcDispatcher {
     endpoints: Arc<Mutex<Vec<EndpointHealth>>>,
     submitters: Vec<RpcSubmitter>,
-    current_index: Arc<Mutex<usize>>,
+    /// Next endpoint to try. Claimed when a submission starts, so concurrent
+    /// in-flight submissions spread across endpoints instead of all reading the
+    /// index the last completed submission left behind.
+    current_index: Arc<AtomicUsize>,
     #[allow(dead_code)]
     batch_size: u32,
 }
@@ -99,7 +103,7 @@ impl RpcDispatcher {
         Ok(RpcDispatcher {
             endpoints: Arc::new(Mutex::new(endpoints)),
             submitters,
-            current_index: Arc::new(Mutex::new(0)),
+            current_index: Arc::new(AtomicUsize::new(0)),
             batch_size,
         })
     }
@@ -127,7 +131,7 @@ impl RpcDispatcher {
                 anyhow::bail!("No healthy RPC endpoints available");
             }
 
-            let current = *self.current_index.lock().unwrap();
+            let current = self.current_index.fetch_add(1, Ordering::Relaxed) % endpoints.len();
             (current, endpoints.len())
         };
 
@@ -166,8 +170,6 @@ impl RpcDispatcher {
                             "Batch submitted successfully"
                         );
                     }
-
-                    *self.current_index.lock().unwrap() = (idx + 1) % endpoints_len;
                     return Ok(result);
                 }
                 Err(e) => {
@@ -383,7 +385,7 @@ mod tests {
         let dispatcher = RpcDispatcher {
             endpoints: Arc::new(Mutex::new(Vec::new())),
             submitters: Vec::new(),
-            current_index: Arc::new(Mutex::new(0)),
+            current_index: Arc::new(AtomicUsize::new(0)),
             batch_size: 1,
         };
 
@@ -406,7 +408,7 @@ mod tests {
                 is_degraded: true,
             }])),
             submitters: vec![RpcSubmitter::new(&url, 100).expect("submitter should build")],
-            current_index: Arc::new(Mutex::new(0)),
+            current_index: Arc::new(AtomicUsize::new(0)),
             batch_size: 100,
         };
 
@@ -447,7 +449,7 @@ mod tests {
                 RpcSubmitter::new(&unhealthy_url, 100).expect("submitter should build"),
                 RpcSubmitter::new(&healthy_url, 100).expect("submitter should build"),
             ],
-            current_index: Arc::new(Mutex::new(0)),
+            current_index: Arc::new(AtomicUsize::new(0)),
             batch_size: 100,
         };
 
@@ -457,7 +459,47 @@ mod tests {
             .expect("dispatcher should skip degraded endpoint");
 
         assert_eq!(result.submitted, 1);
-        assert_eq!(*dispatcher.current_index.lock().unwrap(), 0);
+        assert_eq!(dispatcher.current_index.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_submissions_spread_across_endpoints() {
+        // Slow endpoints keep every submission in flight at once; each must
+        // still claim its own endpoint rather than the index a completed
+        // submission would have left behind.
+        let mut servers = Vec::new();
+        for _ in 0..4 {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(200))
+                        .set_body_json(serde_json::json!([
+                            {"jsonrpc": "2.0", "id": 0, "result": "0xaaaa"}
+                        ])),
+                )
+                .mount(&server)
+                .await;
+            servers.push(server);
+        }
+        let urls = servers
+            .iter()
+            .map(|server| Url::parse(&server.uri()).expect("mock URL"))
+            .collect();
+        let dispatcher = Arc::new(RpcDispatcher::new(urls, 1).expect("dispatcher"));
+
+        let submissions = (0..8u64).map(|i| {
+            let dispatcher = dispatcher.clone();
+            tokio::spawn(async move { dispatcher.submit_batch(vec![make_test_tx(i)]).await })
+        });
+        for submission in submissions.collect::<Vec<_>>() {
+            submission.await.expect("task").expect("submission");
+        }
+
+        for server in &servers {
+            let received = server.received_requests().await.expect("recording on");
+            assert_eq!(received.len(), 2, "requests per endpoint");
+        }
     }
 
     #[tokio::test]
@@ -483,7 +525,7 @@ mod tests {
         let dispatcher = RpcDispatcher::new(urls, 100).expect("Failed to create dispatcher");
 
         // Check that index advances properly
-        let idx = *dispatcher.current_index.lock().unwrap();
+        let idx = dispatcher.current_index.load(Ordering::Relaxed);
         assert!(idx < 3);
     }
 

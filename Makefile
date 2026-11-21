@@ -44,6 +44,8 @@ test: ## Run harness unit tests
 test-scripts: ## Run local launcher and diagnostics tests (not part of CI)
 	@bash $(SCRIPTS)/test-cargo-env.sh
 	@python3 scripts/tests/test_forge_launcher.py
+	@python3 scripts/tests/test_joltzu_target.py
+	@python3 scripts/tests/test_latency_proxy.py
 	@python3 $(SCRIPTS)/test_prometheus_diagnostics.py
 
 clippy: ## Run clippy

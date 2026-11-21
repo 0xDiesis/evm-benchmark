@@ -288,6 +288,11 @@ fi
 # ── Reload config after restart (picks up dynamic ports, e.g. Berachain) ─
 load_chain_config "${CHAIN}"
 
+if [[ "$(limit_chain_batch_size "${BATCH_SIZE}")" != "${BATCH_SIZE}" ]]; then
+    echo "Limiting RPC batch size to ${CHAIN_MAX_BATCH_SIZE} for ${CHAIN} (requested ${BATCH_SIZE})."
+    BATCH_SIZE="${CHAIN_MAX_BATCH_SIZE}"
+fi
+
 # ── Wait for chain readiness ─────────────────────────────────────────────
 echo "Waiting for ${CHAIN} to be ready..."
 FIRST_RPC="${CHAIN_RPC%%,*}"
@@ -300,7 +305,11 @@ fi
 # has not yet established quorum after a fresh restart.
 # Always wait after a clean restart; skip only if chain was not restarted.
 _BLOCK_ADVANCE_TIMEOUT="${BENCH_BLOCK_ADVANCE_TIMEOUT_SECS:-60}"
-wait_for_block_advance "${FIRST_RPC}" "${_BLOCK_ADVANCE_TIMEOUT}"
+if [[ "${CHAIN_EXPECT_EMPTY_BLOCKS}" == true ]]; then
+    wait_for_block_advance "${FIRST_RPC}" "${_BLOCK_ADVANCE_TIMEOUT}"
+else
+    echo "${CHAIN} produces blocks on demand; workload receipts will verify progress."
+fi
 
 # ── Build harness if needed ──────────────────────────────────────────────
 HARNESS="$(cargo_target_directory "${BENCH_REPO_DIR}/Cargo.toml")/release/evm-benchmark"

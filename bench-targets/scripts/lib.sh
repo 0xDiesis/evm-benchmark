@@ -138,7 +138,26 @@ wait_for_block_advance() {
 # CHAIN_KEYS, CHAIN_UP_CMD, CHAIN_DOWN_CMD, CHAIN_CLEAN_CMD,
 # CHAIN_STATUS_CMD, CHAIN_TYPE.
 
-_REGISTERED_CHAINS="diesis sonic sei avalanche anvil geth reth berachain bsc cosmos optimism arbitrum scroll"
+_REGISTERED_CHAINS="diesis joltzu sonic sei avalanche anvil geth reth berachain bsc cosmos optimism arbitrum scroll"
+
+chain_config_joltzu() {
+    local base_port="${JOLTZU_BASE_PORT:-30300}"
+    CHAIN_RPC="${JOLTZU_RPC:-http://127.0.0.1:$((base_port + 100))}"
+    CHAIN_WS="${JOLTZU_WS:-ws://127.0.0.1:$((base_port + 100))}"
+    CHAIN_CHAIN_ID="${JOLTZU_CHAIN_ID:-31337}"
+    # Public, valueless Hardhat development account funded by devnet.sh.
+    CHAIN_KEYS="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+    local launcher
+    printf -v launcher '%q' "${BENCH_REPO_ROOT}/bench-targets/chains/joltzu/devnet.py"
+    # The orchestrator calls down then up for a fresh state on every run.
+    CHAIN_UP_CMD="python3 ${launcher} reset"
+    CHAIN_DOWN_CMD="python3 ${launcher} down"
+    CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
+    CHAIN_STATUS_CMD="python3 ${launcher} status"
+    CHAIN_TYPE="L1 (fixed-committee ML-DSA BFT, 4 validators + observer)"
+    CHAIN_MAX_BATCH_SIZE=16
+    CHAIN_EXPECT_EMPTY_BLOCKS=false
+}
 
 chain_config_diesis() {
     CHAIN_RPC="${DIESIS_RPC:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
@@ -342,12 +361,23 @@ load_chain_config() {
     CHAIN_RPC="" CHAIN_WS="" CHAIN_CHAIN_ID="" CHAIN_KEYS=""
     CHAIN_UP_CMD="" CHAIN_DOWN_CMD="" CHAIN_CLEAN_CMD=""
     CHAIN_STATUS_CMD="" CHAIN_TYPE="" CHAIN_TOPOLOGY_ENV=""
+    CHAIN_MAX_BATCH_SIZE=""
+    CHAIN_EXPECT_EMPTY_BLOCKS=true
 
     "$func"
 }
 
 list_chains() {
     echo "$_REGISTERED_CHAINS"
+}
+
+limit_chain_batch_size() {
+    local requested="${1:?RPC batch size is required}"
+    if [[ -n "${CHAIN_MAX_BATCH_SIZE:-}" && "${requested}" -gt "${CHAIN_MAX_BATCH_SIZE}" ]]; then
+        echo "${CHAIN_MAX_BATCH_SIZE}"
+    else
+        echo "${requested}"
+    fi
 }
 
 # ── 6. Results directory helpers ─────────────────────────────────────────────
