@@ -434,6 +434,15 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
     r["unreceipted_share"] = no_receipt / n if n else None
     r["reverted_share"] = reverted_window / (n + reverted_window) if n + reverted_window else None
     r["per_type"] = type_metrics(per_type, finalized_hashes, {h: m for h, _, m in rows}, receipts, window)
+    r["invalid_reasons"] = []
+    take = r["per_type"].get("SpotTake")
+    if receipts and take is not None:
+        # A taker that matched fewer than two distinct makers still succeeds; the judged mix needs two.
+        ok, two = take["finalized_successful"], take["two_distinct_makers"]
+        r["taker_fills"] = dict(successful=ok, two_distinct_makers=two, fills=take["fills"], valid=two == ok)
+        if two < ok:
+            r["invalid_reasons"].append(f"{ok - two} of {ok} successful takers did not fill two distinct makers "
+                                        f"(fills per taker {take['fills']})")
     lag = [b["finalized"] - b["seen"] for b in in_window if "finalized" in b for _ in range(txs(b))]
     r["latest_to_finalized_s"] = spread(lag)
     ordered = sorted(in_window, key=lambda b: b["seen"])
@@ -808,6 +817,12 @@ def print_summary(m):
                   f"{fmt(t['finalized_reverted'])}  {fmt(t['submit_to_finalized_s']['p50'])}/"
                   f"{fmt(t['submit_to_finalized_s']['p99'])}  {fmt(t['submit_to_receipt_s']['p50'])}  "
                   f"{fmt(t['gas_used_avg'])}  {t['fills']}")
+    fills = m.get("taker_fills")
+    if fills:
+        print(f"  Taker fills:            {fills['two_distinct_makers']}/{fills['successful']} filled two distinct "
+              f"makers  {fills['fills']}")
+    for reason in m.get("invalid_reasons") or ():
+        print(f"  INVALID:                {reason}")
     agree = m.get("finalized_agreement") or {}
     print(f"  Finalized agreement:    {agree.get('agree')} at heights "
           f"{[c['height'] for c in agree.get('heights', [])]}")

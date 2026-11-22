@@ -148,6 +148,12 @@ Setup transactions must all succeed. `judged-mix.json` beside `report.json` reco
 **Outcome rule.** `judged.py --outcome-rule bls-only|hybrid` is required. A rule that differs
 from the fixture's genesis is refused. The rule is written to `judged.json` and `judged.md`.
 
+**Validity.** A judged run is invalid when fewer takers filled two distinct makers than succeeded:
+a taker that matches fewer makers still returns status 1, so success alone would hide a drained book.
+The observer reports `taker_fills` (successful takers, how many filled two distinct makers, fills per
+taker) on every run and adds the shortfall to `invalid_reasons`; `judged.json`/`judged.md` carry
+`valid`, the reasons and the fills either way.
+
 **File log level.** Validators' reth file log (`--log.file.filter`) runs at info in judged runs:
 reth's default, debug, wrote 61 MB in 9 idle minutes on one node and inflates CPU figures. The
 capped profile sets `FLEET_FILE_LOG_FILTER=info` and `judged.py` sets
@@ -279,6 +285,7 @@ first submission in the submit log; the observer and generator share the host cl
 | `finalized_included_tps`, `outcomes` | Every included transaction in those blocks ÷ window; successful, reverted and status-unknown counts among them |
 | `reverted_share` | Window submissions that reverted; reverted transactions are excluded from the latency populations below |
 | `per_type` | Per submit-log method: successful finalized TPS and share of successes, reverts, submit→finalized and submit→receipt p50/p95/p99, mean gas used (successful and reverted receipts), and spot-book fills per successful transaction (`two_distinct_makers` for takers) |
+| `taker_fills`, `invalid_reasons` | Successful `SpotTake` transactions, how many filled two distinct makers, and fills per taker; a shortfall is an invalid reason (judged validity, above) |
 | `submit_to_finalized_s` p50/p95/p99 | Every transaction submitted inside the window that did not revert: time from submission until all four validators' finalized head reached its block. Transactions never included, or not finalized by the end of the drain (`BENCH_DIESIS_DRAIN_SECS`, default 150), count as infinite, so a percentile that lands on them is `null`; `unfinalized_share` gives their share |
 | `submit_to_receipt_s` p50/p95/p99 | The same population, to its block's first appearance on node 1 (50 ms poll) |
 | `latest_to_finalized_s` | Per block in the window, finalized time minus first-seen time, weighted by transactions |

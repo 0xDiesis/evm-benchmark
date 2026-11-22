@@ -128,6 +128,8 @@ def summary(m, max_load):
         finalized_agreement=agree.get("agree"), agreement_heights=[h["height"] for h in agree.get("heights", [])],
         validator_exits=m.get("validator_exits"), generator_bound=m.get("generator_bound"),
         chain_saturated=m.get("chain_saturated"), host_load_1m=load,
+        taker_fills=m.get("taker_fills"), invalid_reasons=m.get("invalid_reasons") or [],
+        valid=not m.get("invalid_reasons"),
         functional_only=(load.get("max") or 0) > max_load)
 
 
@@ -153,6 +155,12 @@ def markdown(record):
     elif record["status"] == "measured":
         s = record["summary"]
         fmt = lambda d: " / ".join("-" if v is None else f"{v:.2f}" for v in d.values())
+        reasons = s.get("invalid_reasons") or []
+        lines.append("- Validity: valid" if not reasons else "- Validity: **invalid**: " + "; ".join(reasons))
+        fills = s.get("taker_fills")
+        if fills:
+            lines.append(f"- Taker fills: {fills['two_distinct_makers']} of {fills['successful']} successful takers "
+                         f"filled two distinct makers; fills per taker {fills['fills']}")
         lines += [
             f"- Finalized TPS: {s['finalized_tps']:.1f} ({s.get('finalized_basis', 'included')} transactions; "
             f"attempted {s['attempted_tps']:.1f})",

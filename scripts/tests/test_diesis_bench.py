@@ -239,6 +239,34 @@ class ObserverOutcomes(unittest.TestCase):
         o = m["outcomes"]
         self.assertIn(f"succeeded {o['finalized_successful']}  reverted {o['finalized_reverted']}", out.getvalue())
 
+    def test_takers_short_of_two_distinct_makers_invalidate_the_run(self):
+        m, _ = self.metrics()
+        take = m["per_type"]["SpotTake"]
+        self.assertEqual(m["taker_fills"], dict(successful=take["finalized_successful"],
+                                                two_distinct_makers=take["finalized_successful"],
+                                                fills={"2": take["finalized_successful"]}, valid=True))
+        self.assertEqual(m["invalid_reasons"], [])
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log, receipts = with_methods(tmp)
+            takers = [h for h, r in receipts.items() if r["makers"]]
+            short = takers[len(takers) // 2:len(takers) // 2 + 3]  # inside the window
+            receipts[short[0]] = dict(receipts[short[0]], makers=["0xa"])
+            receipts[short[1]] = dict(receipts[short[1]], makers=["0xa", "0xa"])
+            receipts[short[2]] = dict(receipts[short[2]], makers=[])
+            bad = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000, receipts=receipts)
+        fills = bad["taker_fills"]
+        self.assertFalse(fills["valid"])
+        self.assertEqual(fills["successful"] - fills["two_distinct_makers"], 3)
+        self.assertEqual(fills["fills"]["1"], 1)
+        self.assertEqual(fills["fills"]["0"], 1)
+        self.assertEqual(len(bad["invalid_reasons"]), 1)
+        self.assertIn("3 of", bad["invalid_reasons"][0])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            observer.print_summary(bad)
+        self.assertIn("INVALID", out.getvalue())
+        self.assertIn("Taker fills:", out.getvalue())
+
     def test_two_column_log_without_receipts_keeps_the_included_basis(self):
         with tempfile.TemporaryDirectory() as tmp:
             obs, log = synthetic(tmp)
@@ -603,6 +631,13 @@ class Judged(unittest.TestCase):
         self.assertIn("- Mix: judged", md)
         self.assertIn("| SpotTake |", md)
         self.assertIn("reverted", md)
+        self.assertTrue(s["valid"])
+        self.assertIn("- Validity: valid", md)
+        bad = judged.summary(dict(m, invalid_reasons=["3 of 9 successful takers did not fill two distinct makers"]), 18)
+        self.assertFalse(bad["valid"])
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="measured", image="i",
+                                  fixture_height=5100, summary=dict(bad, shared_host=False)))
+        self.assertIn("- Validity: **invalid**: 3 of 9 successful takers", md)
 
     def test_judged_fleet_logs_to_file_at_info_and_records_it(self):
         env = judged.fleet_env({"PATH": "/bin", "BENCH_DIESIS_FILE_LOG_FILTER": "debug"}, "t", "capped")
