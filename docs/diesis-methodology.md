@@ -24,6 +24,15 @@ EVM targets are judged under the **`capped`** profile:
 
 `uncapped` is for diagnosis only.
 
+**Known failure: the official capped run does not complete today.** A capped validator
+cannot start an aged chain within its 1 GiB selected encoded Work budget. After about 280
+blocks aged under load, node 6570bb686 refused at startup with
+`certified history Work admission: EncodedWorkBytes requires 1084835969, configured limit is
+1073741824`, and the other validators then lost quorum (`MPT proposal quorum deadline`). This
+is a node defect, owned by the V2 Work-admission workstream: Work charges grow with retained
+history. The procedure stays as written and is expected to fail until the node fix lands.
+Fresh capped fleets and uncapped aged fleets run.
+
 ```bash
 # Image for the node commit under test (heavy: run through the compute broker).
 # The checkout must be clean and contracts/out a real directory (see build-image.sh).
