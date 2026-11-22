@@ -200,6 +200,7 @@ class Observer:
         self.stop = threading.Event()
         self.captured = set()
         self.run_dir = None
+        self.started = time.time()
         self.sock = docker_socket()
         present = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True).stdout.split()
         self.containers = [c for c in CONTAINERS if c in present]
@@ -513,6 +514,33 @@ def reverted_receipts(obs, start, end):
                 reverted_share=reverted / total if total else None, errors=errors)
 
 
+# Reth's file log (debug by default) keeps every timeline line. Stdout at info drops some: an info
+# event right after a debug-level `enabled!` check on the same thread can miss the stdout layer.
+NODE_FILE_LOGS = "/root/.cache/reth/logs/*/reth.log*"
+
+
+def file_timeline(container, path, since_unix):
+    """Copy a validator's timeline lines from its reth file logs (all rotations) to `path`, keeping
+    lines at or after `since_unix`. Returns the line count, or None when the logs are unreadable."""
+    pattern = "round timeline|mpt vote timeline"
+    try:
+        out = subprocess.run(["docker", "exec", container, "sh", "-c", f"grep -h -E '{pattern}' {NODE_FILE_LOGS}"],
+                             capture_output=True, text=True, errors="replace", timeout=300)
+    except Exception:
+        return None
+    if out.returncode not in (0, 1):
+        return None
+    since_us = int(since_unix * 1e6)
+    kept = 0
+    with open(path, "w") as f:
+        for line in out.stdout.splitlines(keepends=True):
+            m = re.search(r"unix_us=(\d+)", line)
+            if m and int(m.group(1)) >= since_us:
+                f.write(LOG_ANSI.sub("", line))
+                kept += 1
+    return kept
+
+
 SAMPLED_TX = re.compile(r'event="tx_admitted" tx=(0x[0-9a-fA-F]{64})')
 
 
@@ -624,6 +652,11 @@ def watch(a):
     metrics["pool_pending_after_drain"] = pool
     metrics["receipts"] = reverted_receipts(obs, metrics["window_start"], metrics["window_end"])
     metrics["log_counts"] = logs.stop()
+    # Replace the stdout copies with the complete file-log timeline where readable.
+    metrics["timeline_source"] = {}
+    for name in obs.containers:
+        kept = file_timeline(name, a.run_dir / f"timeline-{name}.log", obs.started)
+        metrics["timeline_source"][name] = "stdout" if kept is None else f"file ({kept} lines)"
     metrics["timeline_sampled_txs_in_blocks"] = sampled_tx_blocks(obs, a.run_dir)
     obs.stop.set()
     (a.run_dir / "diesis-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")

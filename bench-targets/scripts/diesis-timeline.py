@@ -338,14 +338,9 @@ def probe(a):
             sampled[p["tx"]] = dict(number=p["block"], seen=p["submitted"] + p["receipt_s"], finalized=None)
             blocks[p["block"]] = dict(txs=len(block["transactions"]))
         (out / "timeline-blocks.json").write_text(json.dumps(dict(sampled=sampled, blocks=blocks)) + "\n")
-        since = f"{started:.0f}"
-        for name in containers:
-            logs = subprocess.run(["docker", "logs", "--since", since, name], capture_output=True, text=True,
-                                  errors="replace")
-            with open(out / f"timeline-{name}.log", "w") as f:
-                for line in (logs.stdout + logs.stderr).splitlines(keepends=True):
-                    if "round timeline" in line or "mpt vote timeline" in line:
-                        f.write(re.sub(r"\x1b\[[0-9;]*m", "", line))
+        observer = load_module(HERE / "diesis-observer.py", "diesis_observer")
+        record["timeline_lines"] = {name: observer.file_timeline(name, out / f"timeline-{name}.log", started)
+                                    for name in containers}
         record["host_load_end"] = os.getloadavg()
     finally:
         (out / "probes.json").write_text(json.dumps(record, indent=1) + "\n")
