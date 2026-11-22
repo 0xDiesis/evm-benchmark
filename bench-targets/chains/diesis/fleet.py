@@ -433,7 +433,8 @@ def cmd_age(a):
         time.sleep(30)
     else:
         raise SystemExit("Sender funding failed four times")
-    gen = subprocess.Popen(list(map(str, [*common, "--execution", "sustained", "--duration", max(120, a.blocks * 2),
+    # Load until the time limit; aging stops as soon as every validator passes --blocks.
+    gen = subprocess.Popen(list(map(str, [*common, "--execution", "sustained", "--duration", a.max_minutes * 60,
                                           "--tps", a.rate, "--out", out / "aging.json"])), env=env,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
