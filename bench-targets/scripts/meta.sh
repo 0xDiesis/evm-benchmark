@@ -80,6 +80,8 @@ bench_params = {
     'duration':   int(env_or('BENCH_DURATION',    '30')),
     'finality_confirmations': int(env_or('BENCH_FINALITY_CONFIRMATIONS', '0')),
     'latency_basis': env_or('BENCH_LATENCY_BASIS', 'submit_to_first_receipt'),
+    'test_mode':  env_or('BENCH_TEST_MODE',   'transfer'),
+    'mix':        env_or('BENCH_MIX',         'default'),
     'prometheus_after_settle_secs': float(env_or('BENCH_PROMETHEUS_AFTER_SETTLE_SECS', '5')),
 }
 

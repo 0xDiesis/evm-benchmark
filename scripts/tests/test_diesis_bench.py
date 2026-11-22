@@ -541,6 +541,31 @@ class Judged(unittest.TestCase):
         self.assertIn("n0", s["peak_memory_bytes_nodes"])
         self.assertFalse(judged.summary(dict(m, host_load_1m=dict(median=5, max=12)), 18)["functional_only"])
 
+    def test_outcome_rule_is_pinned_against_the_fixture(self):
+        self.assertEqual(judged.check_outcome_rule("bls-only", "bls-only"), "bls-only")
+        with self.assertRaises(SystemExit) as mismatch:
+            judged.check_outcome_rule("hybrid", "bls-only")
+        self.assertIn("bls-only", str(mismatch.exception))
+        with self.assertRaises(SystemExit):
+            judged.check_outcome_rule("bls-only", None)
+
+    def test_judged_summary_and_markdown_carry_mix_outcomes_and_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log, receipts = with_methods(tmp)
+            m = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000, receipts=receipts)
+        m["host_load_1m"] = dict(median=5, max=6)
+        s = judged.summary(m, 18)
+        self.assertEqual(s["finalized_basis"], "successful")
+        self.assertGreater(s["outcomes"]["finalized_reverted"], 0)
+        self.assertIn("SpotTake", s["per_type"])
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="measured", image="i",
+                                  fixture_height=5100, outcome_signature_rule="bls-only", mix="judged",
+                                  summary=dict(s, shared_host=False)))
+        self.assertIn("- Outcome signature rule: bls-only (pinned)", md)
+        self.assertIn("- Mix: judged", md)
+        self.assertIn("| SpotTake |", md)
+        self.assertIn("reverted", md)
+
     def test_judged_window_shared_with_another_fleet_is_functional_only(self):
         quiet = dict(functional_only=False)
         self.assertEqual(judged.mark_shared(quiet, [], []), dict(functional_only=False, shared_host=False))

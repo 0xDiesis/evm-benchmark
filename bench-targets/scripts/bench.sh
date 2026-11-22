@@ -21,7 +21,7 @@ source "${SCRIPT_DIR}/cargo-env.sh"
 # ── Defaults ──────────────────────────────────────────────────────────────
 CHAIN="diesis" MODE="burst" ENV="clean" TAG=""
 TXS=2000 TPS=200 DURATION=30 SENDERS=200 BATCH_SIZE=200 WORKERS=8
-OUT="" QUIET="true" FUND="true" TEST_MODE="transfer" REBUILD="false" DEV="false"
+OUT="" QUIET="true" FUND="true" TEST_MODE="transfer" REBUILD="false" DEV="false" MIX="default"
 TXS_SET="false" SENDERS_SET="false" BATCH_SIZE_SET="false" WORKERS_SET="false"
 FUND_SET="false"
 
@@ -45,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --rebuild)     REBUILD="true";  shift ;;
         --dev)         DEV="true";       shift ;;
         --test-mode)   TEST_MODE="$2";  shift 2 ;;
+        --mix)         MIX="$2";        shift 2 ;;
         --help|-h)
             sed -n '2,4p' "$0"; echo ""
             echo "Usage: $0 [options]"
@@ -63,6 +64,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-fund            Skip auto-funding sender accounts"
             echo "  --dev                Use debug build image (faster compile, slower runtime)"
             echo "  --test-mode <mode>   transfer|evm (default: transfer)"
+            echo "  --mix <name>         default|judged: judged is the pinned Diesis judged mix (sustained only;"
+            echo "                       sets --test-mode evm and its pinned 400 senders)"
             exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 1 ;;
     esac
@@ -92,6 +95,21 @@ if [[ "${CHAIN}" == "diesis" && "${MODE}" == "sustained" && "${WORKERS_SET}" == 
     # workers / RTT. 256 in flight delivers 3,000 TPS on loopback (docs/diesis-methodology.md).
     WORKERS="${BENCH_DIESIS_WORKERS:-256}"
 fi
+
+case "${MIX}" in
+    default) ;;
+    judged)
+        # The judged mix pins its workload: EVM calls, sustained load and 400 senders
+        # (crates/evm-benchmark/src/generators/judged_mix.rs).
+        if [[ "${MODE}" != "sustained" ]]; then
+            echo "ERROR: --mix judged runs only in sustained mode" >&2; exit 1
+        fi
+        if [[ "${SENDERS_SET}" == "true" && "${SENDERS}" != "400" ]]; then
+            echo "ERROR: --mix judged pins 400 senders; drop --senders ${SENDERS}" >&2; exit 1
+        fi
+        TEST_MODE="evm" SENDERS=400 ;;
+    *) echo "ERROR: Unknown mix '${MIX}'. Use: default, judged" >&2; exit 1 ;;
+esac
 
 RUN_TAG="${TAG:-${ENV}}"
 
@@ -445,6 +463,7 @@ if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
     # shellcheck source=meta.sh
     source "${SCRIPT_DIR}/meta.sh"
     export BENCH_TXS="${TXS}" BENCH_SENDERS="${SENDERS}" BENCH_BATCH_SIZE="${BATCH_SIZE}"
+    export BENCH_TEST_MODE="${TEST_MODE}" BENCH_MIX="${MIX}"
     export BENCH_WORKERS="${WORKERS}" BENCH_TPS="${TPS}" BENCH_DURATION="${DURATION}"
     export BENCH_FINALITY_CONFIRMATIONS="${FINALITY_CONFIRMATIONS}" BENCH_LATENCY_BASIS="${LATENCY_BASIS}"
     if [[ -n "${CHAIN_OVERRIDES}" ]]; then
@@ -458,7 +477,7 @@ HARNESS_ARGS=(
     --rpc-endpoints "${CHAIN_RPC}" --ws "${CHAIN_WS}"
     --chain-id "${CHAIN_CHAIN_ID}" --bench-name "${CHAIN}_${MODE}"
     --senders "${SENDERS}" --workers "${WORKERS}"
-    --batch-size "${BATCH_SIZE}" --test "${TEST_MODE}"
+    --batch-size "${BATCH_SIZE}" --test "${TEST_MODE}" --mix "${MIX}"
     --finality-confirmations "${FINALITY_CONFIRMATIONS}"
     --out "${RUN_DIR}/report.json"
 )
@@ -492,6 +511,7 @@ echo "Running ${CHAIN} ${MODE} benchmark (env=${ENV})..."
 echo "  RPC:     ${CHAIN_RPC}"
 [[ -n "${HARNESS_METRICS_URL}" ]] && echo "  Metrics: ${HARNESS_METRICS_URL}"
 echo "  Senders: ${SENDERS}"
+echo "  Mix:     ${MIX} (${TEST_MODE})"
 echo "  Workers: ${WORKERS}"
 echo "  Latency: ${LATENCY_BASIS}"
 echo "  Output:  ${RUN_DIR}/report.json"
