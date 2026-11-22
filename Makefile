@@ -197,11 +197,11 @@ diesis-fixture-restore: ## Restore a fixture into a new aged fleet  (FIXTURE= AS
 SPEED_FLAGS_OFF := DIESIS_HORIZON_APPEND_BEFORE_RETIRE=false+DIESIS_MPT_SINGLE_AUTHORITY_CHECK=false+DIESIS_MPT_EARLY_VOTES=false+DIESIS_MPT_PIPELINE_DEPTH=1+DIESIS_SELECTED_AGREEMENT_CAPTURE_OUTSIDE_OWNER=false+DIESIS_SELECTED_WARM_PUBLICATION_REFS=0+DIESIS_SELECTED_QUEUE_DIGEST_PER_REVISION=0
 SPEED_FLAGS_ON  := DIESIS_HORIZON_APPEND_BEFORE_RETIRE=true+DIESIS_MPT_SINGLE_AUTHORITY_CHECK=true+DIESIS_MPT_EARLY_VOTES=true+DIESIS_MPT_PIPELINE_DEPTH=2+DIESIS_SELECTED_AGREEMENT_CAPTURE_OUTSIDE_OWNER=true+DIESIS_SELECTED_WARM_PUBLICATION_REFS=1+DIESIS_SELECTED_QUEUE_DIGEST_PER_REVISION=1
 
-diesis-speed-flags: build ## Speed flags off vs on, interleaved A B B A  (NAME= FIXTURE= or AGED= or fresh, RATES=2000 ARMS=3 AB_DURATION=660 WARMUP=60 PROFILE=capped EXTRA=K=V+K=V on both sides)
+diesis-speed-flags: build ## Speed flags off vs on, interleaved A B B A  (NAME= FIXTURE= or AGED= or fresh, RATES=2000 ARMS=3 AB_DURATION=660 WARMUP=60 PROFILE=capped EXTRA=K=V+K=V on both sides, LABEL= side-name suffix, NOTE= summary line)
 	@test -n "$(NAME)" || { echo "Error: NAME is required"; exit 2; }
-	@python3 $(SCRIPTS)/ab.py --name "$(NAME)" \
-		--a "profile=$(or $(PROFILE),capped),env=$(SPEED_FLAGS_OFF)$(if $(EXTRA),+$(EXTRA)),name=flags-off" \
-		--b "profile=$(or $(PROFILE),capped),env=$(SPEED_FLAGS_ON)$(if $(EXTRA),+$(EXTRA)),name=flags-on" \
+	@python3 $(SCRIPTS)/ab.py --name "$(NAME)" $(if $(NOTE),--note "$(NOTE)") \
+		--a "profile=$(or $(PROFILE),capped),env=$(SPEED_FLAGS_OFF)$(if $(EXTRA),+$(EXTRA)),name=flags-off$(if $(LABEL),-$(LABEL))" \
+		--b "profile=$(or $(PROFILE),capped),env=$(SPEED_FLAGS_ON)$(if $(EXTRA),+$(EXTRA)),name=flags-on$(if $(LABEL),-$(LABEL))" \
 		--arms $(or $(ARMS),3) --rates "$(or $(RATES),2000)" --duration $(or $(AB_DURATION),660) \
 		--warmup $(or $(WARMUP),60) $(if $(FIXTURE),--fixture $(FIXTURE)) $(if $(AGED),--aged $(AGED)) \
 		$(if $(MAX_LOAD),--max-load $(MAX_LOAD)) $(if $(filter 1 true yes,$(NO_QUIET_WAIT)),--no-quiet-wait)

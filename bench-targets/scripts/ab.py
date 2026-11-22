@@ -10,7 +10,8 @@ A side is a comma list of:
   repo=<path>               node checkout to render (must match the image); default DIESIS_REPO_DIR
   env=K=V+K=V               validator overrides (BENCH_DIESIS_ENV)
   name=<short>              label in the summary
-With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats.
+With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats. --note
+labels the results: one line at the top of summary.md, for example a setting common to both sides.
 Each arm runs one sustained bench.sh step per rate (fresh genesis per step, or a restart of
 the aged fleet --aged on its own volumes). --probe TPS:SECONDS adds a low-rate idle probe as
 the arm's first step; --reuse-fleet runs the arm's later steps on the fleet its first step
@@ -149,7 +150,7 @@ def summarize(out, plan):
             row["finalized_agreement"] = sum(bool((s.get("finalized_agreement") or {}).get("agree")) for s in steps)
             summary[key]["rates"][str(rate)] = row
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    cols = [name for name, _ in METRICS if name != "host_load_median"]
+    cols = [name for name, _ in METRICS]
 
     def fmt(cell):
         if not cell:
@@ -157,9 +158,11 @@ def summarize(out, plan):
         f = (lambda v: f"{v:.0f}") if abs(cell["median"]) >= 100 else (lambda v: f"{v:.2f}")
         return f"{f(cell['median'])} ({f(cell['min'])}–{f(cell['max'])})"
 
-    lines = [f"# {out.name} ({time.strftime('%Y-%m-%d %H:%M %Z')})", "",
-             "Median (min–max) over arms; verdict columns count arms. A `-` in a submit→finalized percentile "
-             "means more than that share never finalized within the drain (see unfinalized_share).", ""]
+    lines = [f"# {out.name} ({time.strftime('%Y-%m-%d %H:%M %Z')})", ""]
+    if plan.get("note"):
+        lines += [f"> {plan['note']}", ""]
+    lines += ["Median (min–max) over arms; verdict columns count arms. A `-` in a submit→finalized percentile "
+              "means more than that share never finalized within the drain (see unfinalized_share).", ""]
     for key, data in summary.items():
         c = data["config"]
         lines += [f"## {key.upper()}: {c.get('name') or c['profile']} — {c['profile']} image={c.get('image') or 'HEAD'} "
@@ -266,6 +269,7 @@ def main():
     p.add_argument("--max-reruns", type=int, default=1,
                    help="Reruns per overloaded arm; one still overloaded is kept and marked functional-only")
     p.add_argument("--no-quiet-wait", action="store_true")
+    p.add_argument("--note", help="One line printed at the top of summary.md (kept in plan.json)")
     p.add_argument("--summarize-only", action="store_true")
     a = p.parse_args()
     if not re.fullmatch(r"[a-z0-9-]+", a.name):
@@ -281,7 +285,7 @@ def main():
             raise SystemExit("--probe must be TPS:SECONDS")
         plan = dict(sides=sides, order=schedule(a.arms, bool(a.b)), rates=[int(r) for r in a.rates.split(",")],
                     duration=a.duration, warmup=a.warmup, aged=a.aged, fixture=a.fixture, probe=a.probe,
-                    reuse_fleet=a.reuse_fleet,
+                    reuse_fleet=a.reuse_fleet, note=a.note,
                     max_load=a.max_load, max_reruns=a.max_reruns, created=time.time())
         plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     if a.summarize_only:

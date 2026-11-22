@@ -313,7 +313,7 @@ class AB(unittest.TestCase):
                 obs, log = synthetic(tmp2)
                 base = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000)
             plan = dict(sides={"a": ab.parse_side("profile=capped"), "b": ab.parse_side("profile=uncapped")},
-                        order=list("abba"), rates=[1000])
+                        order=list("abba"), rates=[1000], note="Both sides: DIESIS_X=2")
             for (i, key), factor in zip(enumerate(plan["order"], 1), (1.0, 1.1, 0.9, 1.2)):
                 d = out / f"arm-{i}{key}" / "1000"
                 d.mkdir(parents=True)
@@ -324,7 +324,10 @@ class AB(unittest.TestCase):
             self.assertEqual(b["n"], 2)
             self.assertAlmostEqual(b["finalized_tps"]["median"], 1000)
             self.assertAlmostEqual(b["finalized_tps"]["min"], 900)
-            self.assertIn("| 1000 |", (out / "summary.md").read_text())
+            md = (out / "summary.md").read_text()
+            self.assertIn("| 1000 |", md)
+            self.assertIn("> Both sides: DIESIS_X=2", md)
+            self.assertIn("host_load_median", md)
 
 
 class Judged(unittest.TestCase):
