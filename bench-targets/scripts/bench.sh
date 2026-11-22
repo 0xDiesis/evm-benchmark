@@ -392,7 +392,7 @@ fi
 PROMETHEUS_DIAGNOSTICS="${SCRIPT_DIR}/prometheus-diagnostics.py"
 PROMETHEUS_URL="${BENCH_PROMETHEUS_URL:-}"
 if [[ -z "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
-    PROMETHEUS_URL="http://localhost:19090"
+    PROMETHEUS_URL="${CHAIN_PROMETHEUS:-http://localhost:19090}"
 fi
 HARNESS_METRICS_URL="${BENCH_HARNESS_METRICS_URL:-}"
 if [[ -z "${HARNESS_METRICS_URL}" && -n "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
@@ -431,7 +431,10 @@ fi
 if [[ "${CHAIN}" == "diesis" && "${MODE}" == "sustained" && "${BENCH_DIESIS_OBSERVE:-true}" == "true" ]]; then
     export BENCH_SUBMIT_LOG="${RUN_DIR}/submit-log.csv"
     export BENCH_PRESIGN_HEADROOM="${BENCH_PRESIGN_HEADROOM:-1.1}"
-    python3 "${SCRIPT_DIR}/diesis-observer.py" watch --run-dir "${RUN_DIR}" --target-tps "${TPS}" \
+    # The fleet's port block (or DIESIS_RPC for an external fleet) routes the observer.
+    env "DIESIS_RPC=${CHAIN_RPC}" ${CHAIN_METRICS:+"DIESIS_METRICS=${CHAIN_METRICS}"} \
+        ${CHAIN_CONTAINERS:+"DIESIS_CONTAINERS=${CHAIN_CONTAINERS}"} \
+        python3 "${SCRIPT_DIR}/diesis-observer.py" watch --run-dir "${RUN_DIR}" --target-tps "${TPS}" \
         --duration "${DURATION}" --warmup "${BENCH_WARMUP_SECS:-0}" --drain "${BENCH_DIESIS_DRAIN_SECS:-150}" \
         > "${RUN_DIR}/observer.log" 2>&1 &
     OBSERVER_PID=$!

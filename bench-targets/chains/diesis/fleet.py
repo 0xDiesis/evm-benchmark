@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Run a four-validator Diesis fleet for benchmarks from a node image and a node checkout.
 
-  fleet.py reset            fresh genesis (removes this tool's fresh fleet first)
+  fleet.py reset            fresh genesis (removes this user's fresh fleet first)
   fleet.py up               start the fresh fleet, or the aged fleet when DIESIS_AGED_TAG is set
   fleet.py down             remove the fresh fleet; an aged fleet is only stopped
-  fleet.py stop             stop whichever fleet runs, keeping its volumes
+  fleet.py stop             stop the selected fleet, keeping its volumes
   fleet.py age --tag T      build an aged fleet: load it past --blocks, drain, stop
   fleet.py destroy-aged --tag T   remove an aged fleet and its manifest
-  fleet.py status | render | provenance
+  fleet.py status | render | provenance | ports
 
 Inputs (environment):
   DIESIS_REPO_DIR       node checkout whose docker/docker-compose.e2e.yml and
@@ -17,6 +17,8 @@ Inputs (environment):
   BENCH_DIESIS_PROFILE  capped (default; the official run rule) | uncapped (diagnosis);
                         profiles/<name>.env
   DIESIS_AGED_TAG       reuse the stopped aged fleet <tag> instead of a fresh genesis
+  BENCH_DIESIS_FLEET    this user's fresh fleet name (default diesis-bench); concurrent users
+                        on one host pick distinct names
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
@@ -25,9 +27,15 @@ Inputs (environment):
 
 The compose is rendered with `docker compose config`, then patched: validators and
 Prometheus only, the immutable image ID, host ports bound to 127.0.0.1, the profile's CPU,
-cpuset and memory limits, and the merged environment on every validator. Container names
-stay diesis-e2e-node-N so network-topology.sh works; the tool refuses to touch containers
-or ports that belong to another project (for example a `make e2e-up` cluster).
+cpuset and memory limits, and the merged environment on every validator.
+
+Port blocks: every fleet gets the first free block (block k adds 200*k to the published
+RPC 18545-18575, WS 18546, metrics 19101-19104 and Prometheus 19090 ports and owns subnet
+10.100.(100+k).0/24); a port counts as busy when anything listens on it or Docker publishes
+it, a subnet when any Docker network uses it. A project keeps its previous block while that
+block stays free. P2P ports stay inside each fleet's network. The block, container names
+(<project>-node-N) and node IPs go to <state>/<project>/ports.json and the provenance, which
+bench.sh stores with every run; lib.sh routes RPC, WS, metrics and topology from it.
 
 Aged fleets: validators bind their writer-fence journal to the datadir's device and inode,
 so volumes cannot be copied. An aged fleet is a stopped compose project
@@ -50,9 +58,11 @@ from urllib.request import Request, urlopen
 HERE = Path(__file__).resolve().parent
 BENCH_ROOT = HERE.parents[2]
 NODES = ["node-1", "node-2", "node-3", "node-4"]
-RPC_PORTS = [18545, 18555, 18565, 18575]
-METRICS_PORTS = [19101, 19102, 19103, 19104]
-FRESH_PROJECT = "diesis-bench"
+# Port blocks: block k adds 200*k to every published port and owns subnet 10.100.(100+k).
+# P2P (30303, 30334) stays inside each fleet's own network and is never published.
+BLOCK_STRIDE = 200
+MAX_BLOCKS = 20
+DEFAULT_FLEET = "diesis-bench"
 OWNER_LABEL = "local.bench.fleet"
 DEV_KEY = "0x" + "0" * 63 + "1"
 RESERVED = {"DIESIS_REPO_DIR", "DIESIS_RPC", "DIESIS_WS", "DIESIS_CHAIN_ID", "DIESIS_IMAGE_TAG", "DIESIS_AGED_TAG",
@@ -66,10 +76,75 @@ def state_dir():
     return path
 
 
+def fresh_project():
+    """This user's disposable fleet; concurrent users pick distinct BENCH_DIESIS_FLEET names."""
+    name = os.environ.get("BENCH_DIESIS_FLEET", DEFAULT_FLEET)
+    if not re.fullmatch(r"[a-z][a-z0-9-]{0,30}", name):
+        raise SystemExit("BENCH_DIESIS_FLEET must match [a-z][a-z0-9-]{0,30}")
+    return name
+
+
 def aged_project(tag):
     if not re.fullmatch(r"[a-z0-9-]{1,24}", tag):
         raise SystemExit("Aged tag must match [a-z0-9-]{1,24}")
     return f"diesis-bench-aged-{tag}"
+
+
+def selected_project():
+    tag = os.environ.get("DIESIS_AGED_TAG")
+    return aged_project(tag) if tag else fresh_project()
+
+
+def block_ports(k):
+    o = BLOCK_STRIDE * k
+    return dict(block=k, rpc=[18545 + o, 18555 + o, 18565 + o, 18575 + o], ws=18546 + o,
+                metrics=[19101 + o, 19102 + o, 19103 + o, 19104 + o], prometheus=19090 + o,
+                subnet_prefix=f"10.100.{100 + k}")
+
+
+def host_ports(block):
+    return block["rpc"] + [block["ws"]] + block["metrics"] + [block["prometheus"]]
+
+
+def busy_host_ports():
+    """Every TCP port listening on this host, plus every Docker-published host port."""
+    busy = set()
+    out = sh(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], check=False, capture=True).stdout
+    busy |= {int(m) for m in re.findall(r":(\d+) \(LISTEN\)", out)}
+    out = sh(["docker", "ps", "--format", "{{.Ports}}"], check=False, capture=True).stdout
+    busy |= {int(m) for m in re.findall(r":(\d+)->", out)}
+    return busy
+
+
+def busy_subnets(own_network=None):
+    names = sh(["docker", "network", "ls", "--format", "{{.Name}}"], check=False, capture=True).stdout.split()
+    names = [n for n in names if n != own_network]
+    if not names:
+        return set()
+    out = sh(["docker", "network", "inspect", "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}", *names],
+             check=False, capture=True).stdout
+    return {".".join(net.split("/")[0].split(".")[:3]) for net in out.split()}
+
+
+def choose_block(previous, ports_busy, subnets_busy):
+    """The project's previous block if still free, else the first free one."""
+    def free(block):
+        return not (set(host_ports(block)) & ports_busy) and block["subnet_prefix"] not in subnets_busy
+    if previous is not None and free(block_ports(previous)):
+        return block_ports(previous)
+    for k in range(MAX_BLOCKS):
+        if free(block_ports(k)):
+            return block_ports(k)
+    raise SystemExit(f"No free port block among {MAX_BLOCKS}")
+
+
+def ports_path(project):
+    return state_dir() / project / "ports.json"
+
+
+def project_ports(project):
+    path = ports_path(project)
+    return json.loads(path.read_text()) if path.exists() else block_ports(0)
 
 
 def say(text):
@@ -91,9 +166,9 @@ def rpc(port, method, params=(), timeout=5):
     return data["result"]
 
 
-def heights():
+def heights(block):
     out = []
-    for port in RPC_PORTS:
+    for port in block["rpc"]:
         try:
             out.append(int(rpc(port, "eth_blockNumber"), 16))
         except Exception:
@@ -153,7 +228,7 @@ def merged_env(profile_values, environ):
     return env
 
 
-def render(repo, image_id, tag, profile_name, environ=None, project=FRESH_PROJECT):
+def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEET, block=None):
     environ = dict(os.environ if environ is None else environ)
     profile = read_profile(profile_name)
     env = merged_env(profile, environ)
@@ -162,8 +237,14 @@ def render(repo, image_id, tag, profile_name, environ=None, project=FRESH_PROJEC
     if signing.is_file():
         files += ["-f", signing]
     head = sh(["git", "-C", repo, "rev-parse", "HEAD"], capture=True).stdout.strip()
+    block = block or block_ports(0)
+    ports_env = {f"DIESIS_E2E_NODE{i + 1}_RPC_PORT": str(p) for i, p in enumerate(block["rpc"])}
+    ports_env |= {f"DIESIS_E2E_NODE{i + 1}_METRICS_PORT": str(p) for i, p in enumerate(block["metrics"])}
+    ports_env |= dict(DIESIS_E2E_NODE1_WS_PORT=str(block["ws"]), DIESIS_E2E_PROMETHEUS_PORT=str(block["prometheus"]),
+                      DIESIS_E2E_SUBNET_PREFIX=block["subnet_prefix"])
     render_env = dict(environ, COMPOSE_DISABLE_ENV_FILE="true", COMPOSE_PROFILES="monitoring",
-                      DIESIS_IMAGE_TAG=tag, DIESIS_SOURCE_REVISION=head, DIESIS_IMAGE_PROFILE="release", **env)
+                      DIESIS_IMAGE_TAG=tag, DIESIS_SOURCE_REVISION=head, DIESIS_IMAGE_PROFILE="release", **env,
+                      **ports_env)
     rendered = json.loads(sh(["docker", "compose", *files, "config", "--format", "json"], capture=True,
                              env=render_env).stdout)
     interpolated = set()
@@ -174,7 +255,7 @@ def render(repo, image_id, tag, profile_name, environ=None, project=FRESH_PROJEC
                          validator_env=env, image_id=image_id, signing_overlay=signing.is_file())
 
 
-def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=FRESH_PROJECT):
+def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET):
     """Validators take every override except keys the compose only interpolates (log levels,
     txpool flags, Rayon thread count): the node's strict configuration rejects any DIESIS_*
     key it does not consume, so those reach the node only through the rendered values."""
@@ -203,7 +284,9 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=FR
                 service["cpuset"] = f"{i * n}-{i * n + n - 1}" if n > 1 else str(i)
         if memory:
             service["mem_limit"] = memory
-    for service in services.values():
+    for name, service in services.items():
+        # Per-project names, so fleets of different projects never collide.
+        service["container_name"] = f"{project}-{name}"
         service.setdefault("labels", {})
         if isinstance(service["labels"], list):
             service["labels"] = dict(item.partition("=")[::2] for item in service["labels"])
@@ -218,34 +301,7 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=FR
     return dict(services=services, networks=networks, volumes=volumes)
 
 
-# ---- ownership -----------------------------------------------------------------------
-
-def containers(filters):
-    out = sh(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}\t{{.State}}",
-              *sum((["--filter", f] for f in filters), [])], capture=True).stdout
-    return [tuple(line.split("\t")) for line in out.splitlines() if line]
-
-
-def foreign_fleet(project):
-    """Containers holding the validator names (or this tool's fleets) outside `project`."""
-    names = containers(["name=^diesis-e2e-node-[1-4]$"])
-    return [(n, p, s) for n, p, s in names if p != project]
-
-
-def running_project():
-    names = containers(["name=^diesis-e2e-node-[1-4]$", "status=running"])
-    projects = {p for _, p, _ in names}
-    return projects.pop() if len(projects) == 1 else None
-
-
-def port_holders():
-    busy = []
-    for port in RPC_PORTS + METRICS_PORTS:
-        out = sh(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], check=False, capture=True).stdout
-        if out.strip():
-            busy.append(port)
-    return busy
-
+# ---- lifecycle -----------------------------------------------------------------------
 
 def compose_cmd(project, path):
     return ["docker", "compose", "--project-name", project, "-f", path]
@@ -255,60 +311,70 @@ def compose_env():
     return dict(os.environ, COMPOSE_DISABLE_ENV_FILE="true")
 
 
-def wait_live(timeout=180):
+def project_running(project):
+    out = sh(["docker", "ps", "--filter", f"label=com.docker.compose.project={project}", "--format", "{{.Names}}"],
+             check=False, capture=True).stdout
+    return bool(out.split())
+
+
+def wait_live(block, timeout=180):
     deadline = time.monotonic() + timeout
     first = None
     while time.monotonic() < deadline:
-        h = heights()
+        h = heights(block)
         if first is None and all(x is not None for x in h):
             first = h
         if first and all(x is not None and x > b for x, b in zip(h, first)):
             say(f"live heights {h}")
             return h
         time.sleep(1)
-    raise SystemExit(f"Validators did not all advance within {timeout} s (heights {heights()})")
+    raise SystemExit(f"Validators did not all advance within {timeout} s (heights {heights(block)})")
 
 
-# ---- commands ------------------------------------------------------------------------
+def own_other_fleets(project):
+    """This user's other running fleets: their fresh fleet, and aged fleets they started."""
+    me = fresh_project()
+    out = []
+    for path in state_dir().glob("*/ports.json"):
+        other = path.parent.name
+        if other == project or not project_running(other):
+            continue
+        if other == me or json.loads(path.read_text()).get("owner") == me:
+            out.append(other)
+    return out
+
 
 def start(project, aged_tag=None):
-    others = foreign_fleet(project)
-    foreign = [o for o in others if not o[1].startswith(FRESH_PROJECT)]
-    if foreign:
-        raise SystemExit(f"Validator containers belong to another project: {foreign}. Stop that cluster first "
-                         f"(for example `make -C <node> e2e-down`).")
-    # Only one fleet runs at a time: stop this tool's other fleet (keeping its volumes) and
-    # remove its containers so the validator names are free.
-    for p in sorted({p for _, p, _ in others}):
-        say(f"stopping {p} to free the validator names")
-        stop_project(p)
-    for name, _, _ in others:
-        sh(["docker", "rm", "-f", name], check=False, capture=True)
-    # The e2e network has a fixed subnet, so a stopped fleet's network blocks the next one.
-    for p in sorted({p for _, p, _ in others}):
-        path = last_compose(p)
-        if path:
-            for network in json.loads(path.read_text()).get("networks", {}).values():
-                if network.get("name", "").startswith(p + "_"):
-                    sh(["docker", "network", "rm", network["name"]], check=False, capture=True)
-    if running_project() != project and port_holders():
-        raise SystemExit(f"Benchmark ports in use: {port_holders()}")
+    # bench.sh leaves a fleet running after each run; stop this user's other fleet so a
+    # fresh run and an aged run do not both load the host. Other users' fleets are untouched.
+    for other in own_other_fleets(project):
+        say(f"stopping {other} (this user's other fleet)")
+        stop_project(other)
+    previous = json.loads(ports_path(project).read_text())["block"] if ports_path(project).exists() else None
+    own_network = f"{project}_diesis-e2e"
+    block = choose_block(previous, busy_host_ports() if not project_running(project) else set(),
+                         busy_subnets(own_network))
     repo = checkout()
     ref, image_id = image_ref(repo)
     profile = os.environ.get("BENCH_DIESIS_PROFILE", "capped")
-    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project)
+    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project, block=block)
     directory = state_dir() / project
     directory.mkdir(parents=True, exist_ok=True)
+    containers = [compose["services"][n]["container_name"] for n in NODES]
+    ports = dict(block, project=project, owner=fresh_project(), containers=containers,
+                 node_ips=[f"{block['subnet_prefix']}.{11 + i}" for i in range(len(NODES))], chosen=time.time())
+    ports_path(project).write_text(json.dumps(ports, indent=2) + "\n")
     path = directory / "compose.json"
     path.write_text(json.dumps(compose, indent=2) + "\n")
-    provenance.update(project=project, image=ref, aged_tag=aged_tag,
+    provenance.update(project=project, image=ref, aged_tag=aged_tag, ports=ports,
                       compose_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), started=time.time())
     (directory / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
-    say(f"{project}: {ref} ({image_id[:19]}) profile={profile} checkout={repo}")
+    say(f"{project}: {ref} ({image_id[:19]}) profile={profile} block {block['block']} "
+        f"(RPC {block['rpc'][0]}, metrics {block['metrics'][0]}, subnet {block['subnet_prefix']}.0/24) checkout={repo}")
     sh([*compose_cmd(project, path), "up", "-d", "--no-build", "--pull", "never", "--remove-orphans"],
        env=compose_env(), timeout=600)
     try:
-        return wait_live()
+        return wait_live(block)
     except SystemExit:
         capture_failure(directory, compose)
         raise
@@ -327,26 +393,15 @@ def capture_failure(directory, compose):
     say(f"validator logs saved to {out}")
 
 
-def cmd_reset(_a):
-    path = last_compose(FRESH_PROJECT)
-    if path:
-        sh([*compose_cmd(FRESH_PROJECT, path), "down", "--volumes", "--remove-orphans"], check=False,
-           env=compose_env())
-    start(FRESH_PROJECT)
-
-
 def last_compose(project):
     path = state_dir() / project / "compose.json"
     return path if path.exists() else None
 
 
-def cmd_up(_a):
-    tag = os.environ.get("DIESIS_AGED_TAG")
-    if tag:
-        manifest(tag)
-        start(aged_project(tag), tag)
-    else:
-        start(FRESH_PROJECT)
+def remove_project(project):
+    path = last_compose(project)
+    if path:
+        sh([*compose_cmd(project, path), "down", "--volumes", "--remove-orphans"], check=False, env=compose_env())
 
 
 def stop_project(project):
@@ -355,23 +410,30 @@ def stop_project(project):
         sh([*compose_cmd(project, path), "stop", "-t", "120"], check=False, env=compose_env())
 
 
+def cmd_reset(_a):
+    remove_project(fresh_project())
+    start(fresh_project())
+
+
+def cmd_up(_a):
+    tag = os.environ.get("DIESIS_AGED_TAG")
+    if tag:
+        manifest(tag)
+        start(aged_project(tag), tag)
+    else:
+        start(fresh_project())
+
+
 def cmd_down(_a):
     tag = os.environ.get("DIESIS_AGED_TAG")
     if tag:
         stop_project(aged_project(tag))
-        return
-    path = last_compose(FRESH_PROJECT)
-    if path:
-        sh([*compose_cmd(FRESH_PROJECT, path), "down", "--volumes", "--remove-orphans"], check=False,
-           env=compose_env())
+    else:
+        remove_project(fresh_project())
 
 
 def cmd_stop(_a):
-    project = running_project()
-    if project and (project == FRESH_PROJECT or project.startswith("diesis-bench-aged-")):
-        stop_project(project)
-    elif project:
-        raise SystemExit(f"Running validators belong to {project}, not this tool")
+    stop_project(selected_project())
 
 
 def manifest_path(tag):
@@ -397,9 +459,9 @@ def harness_binary():
     return binary
 
 
-def pool_pending():
+def pool_pending(block):
     total = []
-    for port in METRICS_PORTS:
+    for port in block["metrics"]:
         with urlopen(f"http://127.0.0.1:{port}/metrics", timeout=10) as response:
             for line in response.read().decode().splitlines():
                 if line.startswith("reth_transaction_pool_pending_pool_transactions "):
@@ -413,13 +475,14 @@ def cmd_age(a):
         raise SystemExit(f"Aged fleet {a.tag} exists")
     os.environ.setdefault("BENCH_DIESIS_PROFILE", "uncapped")
     start(project, a.tag)
+    block = project_ports(project)
     harness = harness_binary()
-    urls = ",".join(f"http://127.0.0.1:{p}" for p in RPC_PORTS)
+    urls = ",".join(f"http://127.0.0.1:{p}" for p in block["rpc"])
     env = dict(os.environ, BENCH_KEY=DEV_KEY, BENCH_ASSUME_ISOLATED_BLOCKS="false", BENCH_CONFIRM_WAIT_SECS="5",
                BENCH_PRESIGN_HEADROOM="1.1", BENCH_FUND_CONFIRM_TIMEOUT_SECS="240",
                BENCH_FUND_CHAIN_READY_TIMEOUT_SECS="180", BENCH_FUND_DEPLOY_TIMEOUT_SECS="180")
     out = state_dir() / project
-    common = [harness, "--rpc-endpoints", urls, "--validators", urls, "--ws", "ws://127.0.0.1:18546",
+    common = [harness, "--rpc-endpoints", urls, "--validators", urls, "--ws", f"ws://127.0.0.1:{block['ws']}",
               "--chain-id", "19803", "--senders", str(a.senders), "--workers", "64", "--batch-size", "200",
               "--retry-profile", "off", "--finality-confirmations", "0", "--test", "transfer",
               "--bench-name", project, "--quiet"]
@@ -441,7 +504,7 @@ def cmd_age(a):
         deadline = time.monotonic() + a.max_minutes * 60
         while True:
             time.sleep(15)
-            h = heights()
+            h = heights(block)
             say(f"aging heights {h}")
             if all(x is not None for x in h) and min(h) >= a.blocks:
                 break
@@ -455,10 +518,10 @@ def cmd_age(a):
             except subprocess.TimeoutExpired:
                 gen.kill()
     deadline = time.monotonic() + 180
-    while time.monotonic() < deadline and max(pool_pending() or [0]) > 0:
+    while time.monotonic() < deadline and max(pool_pending(block) or [0]) > 0:
         time.sleep(5)
     time.sleep(10)
-    record = dict(tag=a.tag, project=project, height=min(heights()), aging_rate=a.rate, senders=a.senders,
+    record = dict(tag=a.tag, project=project, height=min(heights(block)), aging_rate=a.rate, senders=a.senders,
                   created=time.time(), provenance=json.loads((out / "provenance.json").read_text()))
     stop_project(project)
     manifest_path(a.tag).write_text(json.dumps(record, indent=2) + "\n")
@@ -474,27 +537,55 @@ def cmd_destroy_aged(a):
 
 
 def cmd_provenance(_a):
-    """Print the running fleet's provenance (bench.sh stores it beside each report)."""
-    project = running_project()
-    path = state_dir() / project / "provenance.json" if project else None
-    print(path.read_text() if path and path.exists() else "{}")
+    """Print the selected fleet's provenance, including its port block (bench.sh stores it
+    beside each report)."""
+    path = state_dir() / selected_project() / "provenance.json"
+    print(path.read_text() if path.exists() else "{}")
+
+
+def cmd_ports(_a):
+    """Print the selected fleet's port block (lib.sh reads it)."""
+    print(json.dumps(project_ports(selected_project())))
+
+
+def cmd_shell_env(_a):
+    """Shell assignments routing a run through the selected fleet's block (lib.sh evals them)."""
+    project = selected_project()
+    b = project_ports(project)
+    names = b.get("containers") or [f"{project}-{n}" for n in NODES]
+    ips = b.get("node_ips") or [f"{b['subnet_prefix']}.{11 + i}" for i in range(len(names))]
+    values = dict(
+        FLEET_RPC=",".join(f"http://127.0.0.1:{p}" for p in b["rpc"]),
+        FLEET_WS=f"ws://127.0.0.1:{b['ws']}",
+        FLEET_METRICS=",".join(f"http://127.0.0.1:{p}/metrics" for p in b["metrics"]),
+        FLEET_PROMETHEUS=f"http://127.0.0.1:{b['prometheus']}",
+        FLEET_CONTAINERS=",".join(names),
+        FLEET_BLOCK=str(b["block"]),
+        FLEET_TOPOLOGY=" ".join(f"NODE{i + 1}_CONTAINER={n} NODE{i + 1}_IP={ip}"
+                                for i, (n, ip) in enumerate(zip(names, ips))),
+    )
+    print("\n".join(f"{k}={shlex.quote(v)}" for k, v in values.items()))
 
 
 def cmd_status(_a):
-    print(json.dumps(dict(running_project=running_project(), heights=heights()), indent=2))
+    project = selected_project()
+    block = project_ports(project)
+    print(json.dumps(dict(project=project, running=project_running(project), block=block["block"],
+                          heights=heights(block)), indent=2))
 
 
 def cmd_render(_a):
     repo = checkout()
     ref, image_id = image_ref(repo)
-    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], os.environ.get("BENCH_DIESIS_PROFILE", "capped"))
+    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], os.environ.get("BENCH_DIESIS_PROFILE", "capped"),
+                                 project=selected_project(), block=project_ports(selected_project()))
     print(json.dumps(dict(provenance=provenance, compose=compose), indent=2))
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
-    for name in ("reset", "up", "down", "stop", "status", "render", "provenance"):
+    for name in ("reset", "up", "down", "stop", "status", "render", "provenance", "ports", "shell-env"):
         sub.add_parser(name)
     age = sub.add_parser("age")
     age.add_argument("--tag", required=True)

@@ -38,12 +38,16 @@ make bench CHAIN=diesis FLEET=external \
 | `DIESIS_IMAGE_TAG` / `IMAGE=` | `diesis-node-e2e` tag (default `<checkout HEAD>-release`); must exist |
 | `BENCH_DIESIS_PROFILE` / `PROFILE=` | `capped` (default, the run rule) or `uncapped` (diagnosis), from `profiles/` |
 | `DIESIS_AGED_TAG` / `AGED=` | Reuse a stopped aged fleet (`make diesis-age TAG=…`) |
+| `BENCH_DIESIS_FLEET` | This user's fresh-fleet name (default `diesis-bench`) |
 | `BENCH_DIESIS_ENV`, `E2E_*` | Validator overrides on top of the profile (ambient `DIESIS_*` only feed compose interpolation) |
 | `BENCH_WARMUP_SECS` / `WARMUP=` | Seconds of load excluded from the measured window |
 
 ## Endpoints
 
 - Chain ID `19803` (e2e genesis; discovered through `eth_chainId`).
-- RPC `127.0.0.1:18545, 18555, 18565, 18575`; WS `127.0.0.1:18546`.
-- Metrics `127.0.0.1:19101-19104`; Prometheus `127.0.0.1:19090`.
+- Every fleet takes the first free port block. Block 0 is RPC `127.0.0.1:18545, 18555, 18565,
+  18575`, WS `18546`, metrics `19101-19104` and Prometheus `19090`; block k adds 200·k. The
+  chosen block is in `$BENCH_RESULTS_BASE/fleet/<project>/ports.json`, and
+  `python3 fleet.py ports` prints it.
+- Set `BENCH_DIESIS_FLEET=<name>` when another user runs a fleet on the same host.
 - Benchmark keys: the deterministic validator keys `1-4`. `--fund` provisions more senders.

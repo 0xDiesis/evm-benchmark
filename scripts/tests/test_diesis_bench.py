@@ -165,6 +165,63 @@ class Fleet(unittest.TestCase):
         self.assertEqual(e["DIESIS_MIN_ROUND_DELAY"], "20ms")
         self.assertEqual(e["DIESIS_MPT_SERVE_EXECUTED_HEAD"], "true")
 
+    def test_port_blocks_never_overlap(self):
+        blocks = [set(fleet.host_ports(fleet.block_ports(k))) for k in range(fleet.MAX_BLOCKS)]
+        for i in range(len(blocks)):
+            for j in range(i + 1, len(blocks)):
+                self.assertFalse(blocks[i] & blocks[j], (i, j))
+        subnets = {fleet.block_ports(k)["subnet_prefix"] for k in range(fleet.MAX_BLOCKS)}
+        self.assertEqual(len(subnets), fleet.MAX_BLOCKS)
+        self.assertNotIn("10.100.0", subnets)  # the make e2e-up default
+
+    def test_choose_block_keeps_previous_and_skips_busy(self):
+        self.assertEqual(fleet.choose_block(None, set(), set())["block"], 0)
+        self.assertEqual(fleet.choose_block(3, set(), set())["block"], 3)
+        busy0 = {fleet.block_ports(0)["rpc"][2]}
+        self.assertEqual(fleet.choose_block(None, busy0, set())["block"], 1)
+        self.assertEqual(fleet.choose_block(0, busy0, set())["block"], 1)
+        self.assertEqual(fleet.choose_block(None, set(), {"10.100.100", "10.100.101"})["block"], 2)
+        everything = {p for k in range(fleet.MAX_BLOCKS) for p in fleet.host_ports(fleet.block_ports(k))}
+        with self.assertRaises(SystemExit):
+            fleet.choose_block(None, everything, set())
+
+    def test_containers_are_named_per_project(self):
+        node = lambda: dict(environment={}, ports=[], volumes=[])
+        rendered = dict(services={**{n: node() for n in fleet.NODES}, "prometheus": dict(ports=[])}, networks={},
+                        volumes={})
+        c = fleet.patch(rendered, "sha256:abc", {}, {}, project="alice-bench")
+        self.assertEqual(c["services"]["node-3"]["container_name"], "alice-bench-node-3")
+        self.assertEqual(c["services"]["prometheus"]["container_name"], "alice-bench-prometheus")
+
+    def test_shell_env_routes_through_the_selected_block(self):
+        import contextlib, io, os, shlex
+        with tempfile.TemporaryDirectory() as tmp:
+            old = dict(os.environ)
+            try:
+                os.environ.update(BENCH_RESULTS_BASE=tmp, BENCH_DIESIS_FLEET="alice-bench")
+                os.environ.pop("DIESIS_AGED_TAG", None)
+                path = fleet.ports_path("diesis-bench-aged-old")
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(dict(fleet.block_ports(4), containers=["a", "b", "c", "d"],
+                                                node_ips=["10.100.104.11", "x", "y", "z"])))
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    fleet.cmd_shell_env(None)
+                fresh = dict(line.split("=", 1) for line in out.getvalue().splitlines())
+                self.assertEqual(fresh["FLEET_BLOCK"], "0")
+                self.assertIn("alice-bench-node-1", shlex.split(fresh["FLEET_CONTAINERS"])[0])
+                os.environ["DIESIS_AGED_TAG"] = "old"
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    fleet.cmd_shell_env(None)
+                aged = {k: shlex.split(v)[0] for k, v in (l.split("=", 1) for l in out.getvalue().splitlines())}
+                self.assertEqual(aged["FLEET_BLOCK"], "4")
+                self.assertTrue(aged["FLEET_RPC"].startswith("http://127.0.0.1:19345"))
+                self.assertIn("NODE1_CONTAINER=a NODE1_IP=10.100.104.11", aged["FLEET_TOPOLOGY"])
+            finally:
+                os.environ.clear()
+                os.environ.update(old)
+
     def test_aged_tags_are_restricted(self):
         self.assertEqual(fleet.aged_project("m832-5k"), "diesis-bench-aged-m832-5k")
         with self.assertRaises(SystemExit):
