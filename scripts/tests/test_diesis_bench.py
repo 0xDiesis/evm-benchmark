@@ -252,6 +252,24 @@ class Fleet(unittest.TestCase):
         self.assertEqual(sleep.call_count, 2)
         running.assert_called_with(exclude={"diesis-bench"})
 
+    def test_hold_file_yields_the_slot_until_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            hold = Path(tmp) / "HOLD"
+            hold.touch()
+            sleeps = []
+
+            def sleep(_seconds):
+                sleeps.append(1)
+                if len(sleeps) == 2:
+                    hold.unlink()
+
+            with mock.patch.dict(os.environ, {"BENCH_DIESIS_MAX_FLEETS": "", "BENCH_DIESIS_HOLD_FILE": str(hold)}), \
+                    mock.patch.object(fleet, "running_fleets") as running, \
+                    mock.patch.object(fleet.time, "sleep", side_effect=sleep), mock.patch.object(fleet, "say"):
+                fleet.wait_for_slot("diesis-bench")
+            running.assert_not_called()
+            self.assertEqual(len(sleeps), 2)
+
     def test_fixture_name_carries_image_and_genesis(self):
         m = dict(tag="m6570-5k", genesis_hash="0x" + "ab" * 32, provenance=dict(image_id="sha256:" + "7d" * 32))
         self.assertEqual(fleet.fixture_name(m), "m6570-5k-7d7d7d7d7d7d-abababab" + "ab")

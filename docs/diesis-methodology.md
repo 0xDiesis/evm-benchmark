@@ -71,7 +71,9 @@ a busy host as diagnostic. Set `BENCH_RESULTS_BASE` to keep results off the syst
 (in this workspace, `/Volumes/Scratch/0xdiesis/reports/evm-benchmark`). Set
 `BENCH_DIESIS_MAX_FLEETS=2` to honour a shared fleet cap. Before starting any fleet, including
 each arm's restart, `fleet.py` then waits while two or more other Diesis fleets run on the host.
-It counts every user's fleets, one per compose project, matched by image ID.
+It counts every user's fleets, one per compose project, matched by image ID. To hand a running
+series' slot to another fleet, create the file named by `BENCH_DIESIS_HOLD_FILE`. The next arm
+tears its fleet down and waits until the file is removed.
 
 ## What the harness already provided
 

@@ -24,6 +24,8 @@ Inputs (environment):
   BENCH_DIESIS_MAX_FLEETS  start only while fewer than N other Diesis fleets (any user's, one per
                         compose project) run on this host; otherwise wait, polling every 30 s,
                         up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)
+  BENCH_DIESIS_HOLD_FILE   while this file exists, fleet starts wait too: creating it yields the
+                        slot at a runner's next arm, which tears its fleet down and then waits
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
@@ -349,24 +351,30 @@ def running_fleets(exclude=()):
 
 def wait_for_slot(project):
     """With BENCH_DIESIS_MAX_FLEETS=N, start only while fewer than N other Diesis fleets run on
-    this host, polling every 30 s for up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)."""
+    this host. While the file named by BENCH_DIESIS_HOLD_FILE exists, also wait: creating it yields
+    the slot at the next fleet start (a runner's next arm tears its fleet down, then waits here).
+    Polls every 30 s for up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)."""
     limit = int(os.environ.get("BENCH_DIESIS_MAX_FLEETS") or 0)
-    if limit <= 0:
+    hold = os.environ.get("BENCH_DIESIS_HOLD_FILE")
+    if limit <= 0 and not hold:
         return
     deadline = time.monotonic() + float(os.environ.get("BENCH_DIESIS_SLOT_WAIT_S") or 7200)
     shown = None
     while True:
-        others = running_fleets(exclude={project})
-        if len(others) < limit:
+        held = bool(hold) and Path(hold).exists()
+        others = running_fleets(exclude={project}) if limit > 0 else set()
+        if not held and (limit <= 0 or len(others) < limit):
             if shown is not None:
                 say(f"{project}: fleet slot free ({len(others)} other fleet(s) running)")
             return
-        if others != shown:
-            say(f"{project}: {len(others)} other Diesis fleets running ({', '.join(sorted(others))}); "
+        state = (held, others)
+        if state != shown:
+            say(f"{project}: held by {hold}; waiting until it is removed" if held else
+                f"{project}: {len(others)} other Diesis fleets running ({', '.join(sorted(others))}); "
                 f"waiting for a slot (limit {limit})")
-            shown = others
+            shown = state
         if time.monotonic() > deadline:
-            raise SystemExit(f"No fleet slot within BENCH_DIESIS_SLOT_WAIT_S: {sorted(others)} still running")
+            raise SystemExit(f"No fleet slot within BENCH_DIESIS_SLOT_WAIT_S (held {held}, running {sorted(others)})")
         time.sleep(30)
 
 
