@@ -138,8 +138,25 @@ chain_config_joltzu() {
 }
 
 chain_config_diesis() {
-    CHAIN_RPC="${DIESIS_RPC:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
-    CHAIN_WS="${DIESIS_WS:-ws://localhost:18546}"
+    # fleet.py gives each fleet a free port block and records it; route this run through the
+    # selected fleet's block (DIESIS_AGED_TAG, else this user's BENCH_DIESIS_FLEET). An
+    # external fleet uses DIESIS_RPC / DIESIS_WS when set, else the selected fleet's block.
+    local fleet FLEET_RPC="" FLEET_WS="" FLEET_METRICS="" FLEET_PROMETHEUS="" FLEET_CONTAINERS="" FLEET_BLOCK="" FLEET_TOPOLOGY=""
+    printf -v fleet '%q' "${BENCH_REPO_ROOT}/bench-targets/chains/diesis/fleet.py"
+    eval "$(BENCH_RESULTS_BASE="${RESULTS_BASE}" python3 "${BENCH_REPO_ROOT}/bench-targets/chains/diesis/fleet.py" shell-env 2>/dev/null)"
+    local _rpc="${FLEET_RPC}" _ws="${FLEET_WS}" _metrics="${FLEET_METRICS}" _prom="${FLEET_PROMETHEUS}"
+    local _containers="${FLEET_CONTAINERS}" _block="${FLEET_BLOCK}"
+    if [[ "${DIESIS_FLEET:-}" == "external" && -n "${DIESIS_RPC:-}" ]]; then
+        CHAIN_RPC="${DIESIS_RPC}"
+        CHAIN_WS="${DIESIS_WS:-ws://localhost:18546}"
+    else
+        CHAIN_RPC="${_rpc:-http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575}"
+        CHAIN_WS="${_ws:-ws://localhost:18546}"
+        CHAIN_METRICS="${_metrics}"
+        CHAIN_PROMETHEUS="${_prom}"
+        CHAIN_CONTAINERS="${_containers}"
+        CHAIN_PORT_BLOCK="${_block}"
+    fi
     # DIESIS_CHAIN_ID wins; otherwise ask the first endpoint, falling back to the e2e
     # chain ID while a managed cluster is still down (bench.sh reloads after starting it).
     CHAIN_CHAIN_ID="${DIESIS_CHAIN_ID:-$(rpc_chain_id "${CHAIN_RPC%%,*}")}"
@@ -149,19 +166,18 @@ chain_config_diesis() {
     # (DIESIS_IMAGE_TAG, default <checkout HEAD>-release) under a resource profile
     # (BENCH_DIESIS_PROFILE=capped|uncapped). With DIESIS_AGED_TAG set, down only stops and
     # up restarts the aged fleet on its own volumes. See docs/diesis-methodology.md.
-    local fleet
-    printf -v fleet '%q' "${BENCH_REPO_ROOT}/bench-targets/chains/diesis/fleet.py"
-    CHAIN_UP_CMD="DIESIS_REPO_DIR=${DIESIS_REPO_DIR} python3 ${fleet} up"
-    CHAIN_DOWN_CMD="DIESIS_REPO_DIR=${DIESIS_REPO_DIR} python3 ${fleet} down"
+    CHAIN_UP_CMD="DIESIS_REPO_DIR=${DIESIS_REPO_DIR} BENCH_RESULTS_BASE=${RESULTS_BASE} python3 ${fleet} up"
+    CHAIN_DOWN_CMD="DIESIS_REPO_DIR=${DIESIS_REPO_DIR} BENCH_RESULTS_BASE=${RESULTS_BASE} python3 ${fleet} down"
     CHAIN_CLEAN_CMD="${CHAIN_DOWN_CMD} && ${CHAIN_UP_CMD}"
-    CHAIN_FLEET_PROVENANCE_CMD="python3 ${fleet} provenance"
+    CHAIN_FLEET_PROVENANCE_CMD="BENCH_RESULTS_BASE=${RESULTS_BASE} python3 ${fleet} provenance"
     CHAIN_STATUS_CMD="curl -sf ${CHAIN_RPC%%,*} -X POST -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"method\":\"eth_blockNumber\",\"params\":[],\"id\":1}'"
     CHAIN_TYPE="L1 (Mysticeti BFT, 4 validators)"
     # Topology overrides — container names and static IPs for network-topology.sh
-    CHAIN_TOPOLOGY_ENV="NODE1_CONTAINER=diesis-e2e-node-1 NODE1_IP=10.100.0.11 NODE2_CONTAINER=diesis-e2e-node-2 NODE2_IP=10.100.0.12 NODE3_CONTAINER=diesis-e2e-node-3 NODE3_IP=10.100.0.13 NODE4_CONTAINER=diesis-e2e-node-4 NODE4_IP=10.100.0.14"
+    CHAIN_TOPOLOGY_ENV="${FLEET_TOPOLOGY}"
+    CHAIN_TOPOLOGY_ENV="${CHAIN_TOPOLOGY_ENV:-NODE1_CONTAINER=diesis-e2e-node-1 NODE1_IP=10.100.0.11 NODE2_CONTAINER=diesis-e2e-node-2 NODE2_IP=10.100.0.12 NODE3_CONTAINER=diesis-e2e-node-3 NODE3_IP=10.100.0.13 NODE4_CONTAINER=diesis-e2e-node-4 NODE4_IP=10.100.0.14}"
     if [[ "${DIESIS_FLEET:-}" == "external" ]]; then
-        # Use an already-running fleet at DIESIS_RPC / DIESIS_WS: never start, stop,
-        # rebuild or restart it. compare.sh needs a start command, so up/down are no-ops.
+        # Use an already-running fleet: never start, stop, rebuild or restart it.
+        # compare.sh needs a start command, so up/down are no-ops.
         CHAIN_UP_CMD=":"
         CHAIN_DOWN_CMD=":"
         CHAIN_CLEAN_CMD=""
@@ -357,6 +373,7 @@ load_chain_config() {
     CHAIN_UP_CMD="" CHAIN_DOWN_CMD="" CHAIN_CLEAN_CMD=""
     CHAIN_STATUS_CMD="" CHAIN_TYPE="" CHAIN_TOPOLOGY_ENV=""
     CHAIN_REBUILD_CMD="" CHAIN_REBUILD_DEV_CMD="" CHAIN_FLEET_PROVENANCE_CMD=""
+    CHAIN_METRICS="" CHAIN_PROMETHEUS="" CHAIN_CONTAINERS="" CHAIN_PORT_BLOCK=""
     CHAIN_MAX_BATCH_SIZE=""
     CHAIN_EXPECT_EMPTY_BLOCKS=true
 

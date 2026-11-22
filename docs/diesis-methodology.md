@@ -114,10 +114,19 @@ Fixes made along the way:
   The rendered compose and its provenance (checkout HEAD, image ID, profile, validator
   environment) go to `$BENCH_RESULTS_BASE/fleet/<project>/`. `bench.sh` copies the
   provenance to `fleet-provenance.json` in each run directory.
-- **Ownership.** Container names stay `diesis-e2e-node-N`, so `network-topology.sh` works.
-  The launcher refuses to start if those names belong to another compose project (for
-  example a `make e2e-up` cluster) or if the ports are in use. `down` removes only its own
-  fresh project (`diesis-bench`).
+- **Port blocks.** Each fleet takes the first free block: block k adds 200·k to the published
+  RPC (18545–18575), WS (18546), metrics (19101–19104) and Prometheus (19090) ports, and owns
+  subnet `10.100.(100+k).0/24`. A port is busy when anything listens on it or Docker publishes
+  it; a subnet is busy when any Docker network uses it. A project keeps its previous block
+  while that block stays free. P2P ports stay inside each fleet's network.
+  - The block, container names (`<project>-node-N`) and node IPs go to
+    `$BENCH_RESULTS_BASE/fleet/<project>/ports.json` and the provenance that `bench.sh`
+    stores with every run.
+  - `lib.sh` routes RPC, WS, metrics, Prometheus and the topology container names and IPs from
+    that record, so concurrent fleets never collide.
+  - Concurrent users on one host set distinct `BENCH_DIESIS_FLEET` names for their fresh
+    fleets. Starting a fleet stops only the same user's other fleet.
+  - `down` removes only that user's fresh project.
 - **Aged fleets.** Copying volumes does not work: each validator binds its writer-fence
   journal to its datadir's device and inode (diesis-reth
   `crates/engine/tree/src/writer_fence.rs`), and a copy is refused at startup. An aged fleet
