@@ -227,6 +227,39 @@ class Fleet(unittest.TestCase):
         with self.assertRaises(SystemExit):
             fleet.aged_project("../x")
 
+    def test_outcome_rule_defaults_to_bls_only_with_its_epoch_zero_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # A checkout before the genesis control gets no rule keys its node would refuse.
+            self.assertEqual(fleet.outcome_rule_env(repo, {}), ({}, None))
+            with self.assertRaises(SystemExit):
+                fleet.outcome_rule_env(repo, {"BENCH_DIESIS_OUTCOME_RULE": "bls-only"})
+            (repo / "docker" / "epoch").mkdir(parents=True)
+            (repo / "docker" / "epoch" / fleet.BLS_ONLY_EPOCH_ZERO).write_text("0x00\n")
+            bls_only = {"DIESIS_DEV_OUTCOME_SIGNATURE_RULE": "bls-only",
+                        "DIESIS_EPOCH_ZERO_CALLDATA_FILE": "/etc/diesis/epoch/epoch-zero-4v-bls-only.calldata"}
+            self.assertEqual(fleet.outcome_rule_env(repo, {}), (bls_only, "bls-only"))
+            self.assertEqual(fleet.outcome_rule_env(repo, {"BENCH_DIESIS_OUTCOME_RULE": "hybrid"}),
+                             ({"DIESIS_DEV_OUTCOME_SIGNATURE_RULE": "hybrid"}, "hybrid"))
+            # An aged fleet's recorded rule is the default, and an explicit request still wins.
+            self.assertEqual(fleet.outcome_rule_env(repo, {}, "hybrid")[1], "hybrid")
+            self.assertEqual(fleet.outcome_rule_env(repo, {"BENCH_DIESIS_OUTCOME_RULE": "bls-only"}, "hybrid"),
+                             (bls_only, "bls-only"))
+            for unknown in ("BLS-only", "bls_only", "true"):
+                with self.assertRaises(SystemExit):
+                    fleet.outcome_rule_env(repo, {"BENCH_DIESIS_OUTCOME_RULE": unknown})
+
+    def test_outcome_rule_artifact_replaces_the_compose_default(self):
+        node = lambda: dict(environment={"DIESIS_EPOCH_ZERO_CALLDATA_FILE": "/etc/diesis/epoch/epoch-zero-4v.calldata"},
+                            ports=[], volumes=[])
+        rendered = dict(services={**{n: node() for n in fleet.NODES}, "prometheus": dict(ports=[])}, networks={},
+                        volumes={})
+        env = {"DIESIS_DEV_OUTCOME_SIGNATURE_RULE": "bls-only",
+               "DIESIS_EPOCH_ZERO_CALLDATA_FILE": "/etc/diesis/epoch/epoch-zero-4v-bls-only.calldata"}
+        c = fleet.patch(rendered, "sha256:abc", env, {}, {"DIESIS_E2E_CHAIN"})
+        for name in fleet.NODES:
+            self.assertEqual({k: c["services"][name]["environment"][k] for k in env}, env)
+
 
 class AB(unittest.TestCase):
     def test_schedule_interleaves(self):

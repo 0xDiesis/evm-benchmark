@@ -39,6 +39,7 @@ make bench CHAIN=diesis FLEET=external \
 | `BENCH_DIESIS_PROFILE` / `PROFILE=` | `capped` (default, the run rule) or `uncapped` (diagnosis), from `profiles/` |
 | `DIESIS_AGED_TAG` / `AGED=` | Reuse a stopped aged fleet (`make diesis-age TAG=…`) |
 | `BENCH_DIESIS_FLEET` | This user's fresh-fleet name (default `diesis-bench`) |
+| `BENCH_DIESIS_OUTCOME_RULE` | Genesis outcome signature rule: `bls-only` (default) or `hybrid`. Hybrid fleets stop within a few blocks until the node's live validator path signs ML-DSA halves. Checkouts without `docker/epoch/epoch-zero-4v-bls-only.calldata` predate the control and get no rule keys |
 | `BENCH_DIESIS_ENV`, `E2E_*` | Validator overrides on top of the profile (ambient `DIESIS_*` only feed compose interpolation) |
 | `BENCH_WARMUP_SECS` / `WARMUP=` | Seconds of load excluded from the measured window |
 

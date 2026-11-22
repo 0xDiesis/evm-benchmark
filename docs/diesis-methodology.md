@@ -114,6 +114,14 @@ Fixes made along the way:
   The rendered compose and its provenance (checkout HEAD, image ID, profile, validator
   environment) go to `$BENCH_RESULTS_BASE/fleet/<project>/`. `bench.sh` copies the
   provenance to `fleet-provenance.json` in each run directory.
+- **Outcome signature rule.** Fleets run a BLS-only genesis by default
+  (`BENCH_DIESIS_OUTCOME_RULE=bls-only`): the node's live validator path does not yet sign
+  the ML-DSA halves that hybrid outcome messages need, so a hybrid fleet stops within a few
+  blocks. The fleet sets `DIESIS_DEV_OUTCOME_SIGNATURE_RULE` on every validator, and for
+  BLS-only also the epoch-zero artifact signed for that genesis. The rule is recorded in the
+  provenance, and an aged fleet keeps the rule it was built with. `hybrid` selects the
+  production genesis. Checkouts without `docker/epoch/epoch-zero-4v-bls-only.calldata`
+  predate the control and get neither key.
 - **Port blocks.** Each fleet takes the first free block: block k adds 200·k to the published
   RPC (18545–18575), WS (18546), metrics (19101–19104) and Prometheus (19090) ports, and owns
   subnet `10.100.(100+k).0/24`. A port is busy when anything listens on it or Docker publishes
