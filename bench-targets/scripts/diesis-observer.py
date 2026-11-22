@@ -161,6 +161,8 @@ class Observer:
         self.exited = []
         self.errors = []
         self.stop = threading.Event()
+        self.captured = set()
+        self.run_dir = None
         self.sock = docker_socket()
         present = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True).stdout.split()
         self.containers = [c for c in CONTAINERS if c in present]
@@ -228,9 +230,24 @@ class Observer:
                 gone = [line for line in state.splitlines() if line.split()[1:2] in (["exited"], ["dead"])]
                 if gone:
                     self.exited = gone
+                    self.capture_exit_logs(gone)
             except Exception as error:
                 self.err(f"exits: {error}")
             self.stop.wait(5)
+
+    def capture_exit_logs(self, gone):
+        """Keep each exited validator's log tail and state the first time it is seen exited,
+        before any teardown removes the container."""
+        for line in gone:
+            name = line.split()[0].lstrip("/")
+            if name in self.captured or self.run_dir is None:
+                continue
+            self.captured.add(name)
+            logs = subprocess.run(["docker", "logs", "--tail", "500", name], capture_output=True, text=True, timeout=60)
+            (self.run_dir / f"exit-{name}.log").write_text(logs.stdout + logs.stderr)
+            state = subprocess.run(["docker", "inspect", "--format", "{{json .State}}", name], capture_output=True,
+                                   text=True, timeout=30)
+            (self.run_dir / f"exit-{name}.state.json").write_text(state.stdout)
 
     def run(self):
         threads = [threading.Thread(target=f, daemon=True) for f in (self.blocks_loop, self.heads_loop,
@@ -367,6 +384,7 @@ def agreement(obs, start, end):
 
 def watch(a):
     obs = Observer()
+    obs.run_dir = a.run_dir
     done = threading.Event()
     signal.signal(signal.SIGUSR1, lambda *_: done.set())
     signal.signal(signal.SIGTERM, lambda *_: done.set())
