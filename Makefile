@@ -189,6 +189,25 @@ diesis-fixture-save: ## Archive a stopped aged fleet as a fixture  (TAG=)
 diesis-fixture-restore: ## Restore a fixture into a new aged fleet  (FIXTURE= AS=)
 	@python3 bench-targets/chains/diesis/fleet.py restore-fixture --fixture "$(FIXTURE)" --as "$(AS)"
 
+# The node's built speed flags (main 9ba6562b2), all off against all on. Booleans take only
+# true/false; the two selected warm-preparation flags are 0/1 integers; pipeline depth is 1..3.
+# Excluded: DIESIS_SELECTED_APPEND_DURABLE_DUPLICATE_REPLAY (rejected) and
+# DIESIS_MPT_SERVE_EXECUTED_HEAD (stays off).
+SPEED_FLAGS_OFF := DIESIS_HORIZON_APPEND_BEFORE_RETIRE=false+DIESIS_MPT_SINGLE_AUTHORITY_CHECK=false+DIESIS_MPT_EARLY_VOTES=false+DIESIS_MPT_PIPELINE_DEPTH=1+DIESIS_SELECTED_AGREEMENT_CAPTURE_OUTSIDE_OWNER=false+DIESIS_SELECTED_WARM_PUBLICATION_REFS=0+DIESIS_SELECTED_QUEUE_DIGEST_PER_REVISION=0
+SPEED_FLAGS_ON  := DIESIS_HORIZON_APPEND_BEFORE_RETIRE=true+DIESIS_MPT_SINGLE_AUTHORITY_CHECK=true+DIESIS_MPT_EARLY_VOTES=true+DIESIS_MPT_PIPELINE_DEPTH=2+DIESIS_SELECTED_AGREEMENT_CAPTURE_OUTSIDE_OWNER=true+DIESIS_SELECTED_WARM_PUBLICATION_REFS=1+DIESIS_SELECTED_QUEUE_DIGEST_PER_REVISION=1
+
+diesis-speed-flags: build ## Speed flags off vs on, interleaved A B B A  (NAME= FIXTURE= or AGED= or fresh, RATES=2000 ARMS=3 AB_DURATION=660 WARMUP=60 PROFILE=capped)
+	@test -n "$(NAME)" || { echo "Error: NAME is required"; exit 2; }
+	@python3 $(SCRIPTS)/ab.py --name "$(NAME)" \
+		--a "profile=$(or $(PROFILE),capped),env=$(SPEED_FLAGS_OFF),name=flags-off" \
+		--b "profile=$(or $(PROFILE),capped),env=$(SPEED_FLAGS_ON),name=flags-on" \
+		--arms $(or $(ARMS),3) --rates "$(or $(RATES),2000)" --duration $(or $(AB_DURATION),660) \
+		--warmup $(or $(WARMUP),60) $(if $(FIXTURE),--fixture $(FIXTURE)) $(if $(AGED),--aged $(AGED)) \
+		$(if $(MAX_LOAD),--max-load $(MAX_LOAD)) $(if $(filter 1 true yes,$(NO_QUIET_WAIT)),--no-quiet-wait)
+
+diesis-idle: ## Idle CPU and first-transaction latency per DIESIS_IDLE_STRETCH  (STRETCH=4,1 PROFILE=capped)
+	@python3 $(SCRIPTS)/diesis-idle.py --stretch "$(or $(STRETCH),4,1)" --profile $(or $(PROFILE),capped)
+
 diesis-age: build ## Build an aged Diesis fleet  (TAG= BLOCKS=5100 RATE=400)
 	@test -n "$(TAG)" || { echo "Error: TAG is required"; exit 2; }
 	@python3 bench-targets/chains/diesis/fleet.py age --tag "$(TAG)" --blocks $(or $(BLOCKS),5100) --rate $(or $(RATE),400)

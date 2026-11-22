@@ -175,7 +175,7 @@ def summarize(out, plan):
     (out / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def run_step(out, i, key, side, step, plan, log, external=False):
+def run_step(out, i, key, side, step, plan, log, external=False, aged=None):
     name, rate, duration, warmup = step
     step_dir = out / f"arm-{i}{key}" / name
     if (step_dir / "diesis-metrics.json").exists():
@@ -188,8 +188,8 @@ def run_step(out, i, key, side, step, plan, log, external=False):
         env["DIESIS_IMAGE_TAG"] = side["image"]
     if side.get("repo"):
         env["DIESIS_REPO_DIR"] = side["repo"]
-    if plan.get("aged"):
-        env["DIESIS_AGED_TAG"] = plan["aged"]
+    if aged or plan.get("aged"):
+        env["DIESIS_AGED_TAG"] = aged or plan["aged"]
     if external:
         env["DIESIS_FLEET"] = "external"
     cmd = ["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained", "--tps", str(rate),
@@ -212,14 +212,30 @@ def run_arm(out, i, key, plan, log, attempt, no_quiet_wait):
     arm_dir = out / f"arm-{i}{key}"
     arm_dir.mkdir(exist_ok=True)
     (arm_dir / f"host-{attempt}.json").write_text(json.dumps(host) + "\n")
-    # The first step run in this pass starts a fresh fleet; with --reuse-fleet the rest use it.
-    for n, step in enumerate(pending):
-        external = bool(plan.get("reuse_fleet")) and n > 0
-        ok = run_step(out, i, key, side, step, plan, log, external=external)
-        log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {step[0]}: {'ok' if ok else 'FAILED'}\n")
-        log.flush()
-        if not ok and plan.get("reuse_fleet"):
-            break
+    # A saved fixture is restored into a throwaway aged fleet for this arm and destroyed after,
+    # so every arm starts from the same fixture and the fixture itself is never modified.
+    aged = None
+    fleet = str(HERE.parent / "chains" / "diesis" / "fleet.py")
+    if plan.get("fixture"):
+        aged = f"ab{int(plan['created']) % 100000}-{i}{key}"
+        subprocess.run([sys.executable, "-B", fleet, "destroy-aged", "--tag", aged], capture_output=True)
+        restore = subprocess.run([sys.executable, "-B", fleet, "restore-fixture", "--fixture", plan["fixture"],
+                                  "--as", aged], stdout=log, stderr=subprocess.STDOUT)
+        if restore.returncode:
+            log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key}: fixture restore failed\n")
+            return True
+    try:
+        # The first step run in this pass starts a fresh fleet; with --reuse-fleet the rest use it.
+        for n, step in enumerate(pending):
+            external = bool(plan.get("reuse_fleet")) and n > 0
+            ok = run_step(out, i, key, side, step, plan, log, external=external, aged=aged)
+            log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {step[0]}: {'ok' if ok else 'FAILED'}\n")
+            log.flush()
+            if not ok and plan.get("reuse_fleet"):
+                break
+    finally:
+        if aged:
+            subprocess.run([sys.executable, "-B", fleet, "destroy-aged", "--tag", aged], capture_output=True)
     return True
 
 
@@ -242,7 +258,8 @@ def main():
     p.add_argument("--rates", default="2000")
     p.add_argument("--duration", type=int, default=660, help="Load seconds per step (warmup + window)")
     p.add_argument("--warmup", type=int, default=60)
-    p.add_argument("--aged", help="Aged fleet tag (fleet.py age); default fresh genesis per step")
+    p.add_argument("--aged", help="Aged fleet tag (fleet.py age), used in place; default fresh genesis per step")
+    p.add_argument("--fixture", help="Saved fixture (fleet.py save-fixture), restored into a fresh copy per arm")
     p.add_argument("--probe", help="TPS:SECONDS idle probe as each arm's first step, e.g. 2:30")
     p.add_argument("--reuse-fleet", action="store_true", help="Run each arm's later steps on its first step's fleet")
     p.add_argument("--max-load", type=float, help="Rerun an arm whose windows saw a higher 1-minute host load")
@@ -263,7 +280,8 @@ def main():
         if a.probe and not re.fullmatch(r"\d+:\d+", a.probe):
             raise SystemExit("--probe must be TPS:SECONDS")
         plan = dict(sides=sides, order=schedule(a.arms, bool(a.b)), rates=[int(r) for r in a.rates.split(",")],
-                    duration=a.duration, warmup=a.warmup, aged=a.aged, probe=a.probe, reuse_fleet=a.reuse_fleet,
+                    duration=a.duration, warmup=a.warmup, aged=a.aged, fixture=a.fixture, probe=a.probe,
+                    reuse_fleet=a.reuse_fleet,
                     max_load=a.max_load, max_reruns=a.max_reruns, created=time.time())
         plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     if a.summarize_only:
