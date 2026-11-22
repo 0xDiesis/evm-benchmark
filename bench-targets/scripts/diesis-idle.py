@@ -19,7 +19,8 @@ Arms run the stretch values interleaved (4,1 with --arms 2 runs 4 1 1 4), each o
   3. per probe, whether each validator logged leaving idle mode when it arrived; at the end, every
      validator's block hash at the lowest finalized head and any validator container that is no
      longer running.
-The 1-minute host load is recorded throughout; CPU share is the contention-tolerant measure.
+The 1-minute host load is recorded for every window and probe. Idle CPU and cadence move with host
+load, so compare arms only at similar load.
 Results: $BENCH_RESULTS_BASE/idle/<stamp>/idle.json, idle.md.
 """
 import argparse
