@@ -105,6 +105,10 @@ METRICS = [
     ("cpu_ms_per_tx", lambda s: s["cpu_s_per_tx_median"] * 1000),
     ("pool_slope_tx_per_s", lambda s: s["pool_slope_tx_per_s"]),
     ("empty_block_share", lambda s: s["empty_block_share"]),
+    ("unknown_parent_vertex", lambda s: sum(c["unknown_parent_vertex"] for c in s["log_counts"].values())),
+    ("work_refusals", lambda s: sum(n for c in s["log_counts"].values() for by in c["work_refused"].values()
+                                    for n in by.values())),
+    ("peak_memory_gib_max", lambda s: max(s["peak_memory_bytes_nodes"].values(), default=None) / 2**30),
     ("host_load_median", lambda s: s["host_load_1m"]["median"]),
 ]
 

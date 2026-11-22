@@ -396,8 +396,56 @@ def agreement(obs, start, end):
     return dict(agree=all(c["agree"] for c in checked), finalized_head=head, heights=checked)
 
 
+LOG_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+WORK_REFUSED = re.compile(r'Work refused; (retrying once Work frees|not retrying) operation="?(\w+)')
+
+
+def count_log_line(line, counts):
+    """Tally one validator log line: unknown parent vertex errors, selected-owner Work refusals by
+    operation (retried or not), and Work-admission limit errors."""
+    line = LOG_ANSI.sub("", line)
+    if "unknown parent vertex" in line:
+        counts["unknown_parent_vertex"] += 1
+    m = WORK_REFUSED.search(line)
+    if m:
+        kind = "retried" if m[1].startswith("retrying") else "not_retried"
+        by = counts["work_refused"].setdefault(m[2], dict(retried=0, not_retried=0))
+        by[kind] += 1
+    if "Work admission:" in line and "configured limit" in line:
+        counts["work_admission_limit_errors"] += 1
+
+
+class LogCounts:
+    """Follow every validator container's log for the run (docker logs -f from the observer's
+    start) and count lines with count_log_line. Streaming survives the fleet's log rotation and the
+    containers' removal at teardown."""
+
+    def __init__(self, containers):
+        self.counts = {c: dict(unknown_parent_vertex=0, work_refused={}, work_admission_limit_errors=0)
+                       for c in containers}
+        self.procs = []
+        since = f"{time.time() - 1:.3f}"
+        for name in containers:
+            proc = subprocess.Popen(["docker", "logs", "-f", "--since", since, name], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, errors="replace")
+            self.procs.append(proc)
+            threading.Thread(target=self.read, args=(proc, self.counts[name]), daemon=True).start()
+
+    @staticmethod
+    def read(proc, counts):
+        for line in proc.stdout:
+            count_log_line(line, counts)
+
+    def stop(self):
+        for proc in self.procs:
+            proc.terminate()
+        time.sleep(0.5)
+        return self.counts
+
+
 def watch(a):
     obs = Observer()
+    logs = LogCounts(obs.containers)
     obs.run_dir = a.run_dir
     done = threading.Event()
     signal.signal(signal.SIGUSR1, lambda *_: done.set())
@@ -426,6 +474,7 @@ def watch(a):
     metrics["drain_s"] = time.time() - load_end
     metrics["finalized_agreement"] = agreement(obs, metrics["window_start"], metrics["window_end"])
     metrics["pool_pending_after_drain"] = pool
+    metrics["log_counts"] = logs.stop()
     obs.stop.set()
     (a.run_dir / "diesis-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     if not a.keep_raw:

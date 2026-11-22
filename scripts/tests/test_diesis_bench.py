@@ -113,6 +113,19 @@ class ObserverMetrics(unittest.TestCase):
         self.assertIsNotNone(full["pool_full_at_s"])
         self.assertTrue(full["chain_saturated"])
 
+    def test_log_lines_count_parents_and_work_refusals_by_operation(self):
+        counts = dict(unknown_parent_vertex=0, work_refused={}, work_admission_limit_errors=0)
+        for line in ["\x1b[33mWARN\x1b[0m x: graph recovery: unknown parent vertex 0xab (absent) of vertex 0xcd round 9",
+                     'WARN selected owner Work refused; retrying once Work frees operation="append" attempt=1',
+                     'WARN selected owner Work refused; not retrying operation="retire" attempt=16',
+                     'WARN selected owner Work refused; retrying once Work frees operation="append" attempt=2',
+                     "ERROR cause=certified history Work admission: EncodedWorkBytes requires 1077411095, configured limit is 1073741824",
+                     "INFO committed block 12"]:
+            observer.count_log_line(line, counts)
+        self.assertEqual(counts, dict(unknown_parent_vertex=1, work_admission_limit_errors=1,
+                                      work_refused={"append": dict(retried=2, not_retried=0),
+                                                    "retire": dict(retried=0, not_retried=1)}))
+
     def test_prometheus_subset_parse(self):
         text = ('# HELP x\nreth_sync_checkpoint{stage="Finish"} 7\nreth_other 3\n'
                 'reth_diesis_mpt_certify_phase_ms{phase="quorum_wait",quantile="0.5"} 9.5\n')
