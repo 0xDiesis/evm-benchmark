@@ -726,7 +726,7 @@ def cmd_destroy_aged(a):
 # A fixture is a tar archive of every volume of a stopped aged fleet (each node's data and
 # signing volumes) plus fixture.json, under $BENCH_DIESIS_FIXTURES/<name>, named
 # <tag>-<image id 12>-<genesis hash 10>. Restoring extracts the archives into a new aged
-# project and never modifies the archives. Note: validators bind their writer-fence journal
+# project, drops each datadir's persisted peer list, and never modifies the archives. Note: validators bind their writer-fence journal
 # to the datadir's device and inode, and node 6570bb686 refuses a copied datadir at startup
 # ("journal datadir identity mismatch"); a restored fixture starts only once that is resolved.
 
@@ -785,6 +785,12 @@ def cmd_restore_fixture(a):
             "--label", f"com.docker.compose.volume={key}", "--label", f"{OWNER_LABEL}=true", name], capture=True)
         sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "tar", "-v", f"{name}:/v",
             "-v", f"{src}:/in:ro", record["image_id"], "-C", "/v", "-xpf", f"/in/{info['archive']}"], timeout=3600)
+        # The persisted peer list names the aging fleet's addresses, and the restored fleet
+        # runs on its own subnet. Its stale entries for the same peer IDs kept nodes from
+        # reaching each other's current addresses (only a node with an empty list reached
+        # everyone), so every node starts from fresh peer state and its bootnodes.
+        sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "rm", "-v", f"{name}:/v",
+            record["image_id"], "-f", "/v/known-peers.json"], timeout=600)
     m = dict(record["source_manifest"], tag=a.as_tag, project=project, restored_from=record["name"],
              restored=time.time())
     manifest_path(a.as_tag).write_text(json.dumps(m, indent=2) + "\n")
