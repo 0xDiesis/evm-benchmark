@@ -12,7 +12,8 @@ A side is a comma list of:
   outcome=hybrid|bls-only   genesis outcome signature rule (BENCH_DIESIS_OUTCOME_RULE); default:
                             the harness default for the checkout
   name=<short>              label in the summary
-With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats.
+With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats. --note
+labels the results: one line at the top of summary.md, for example a setting common to both sides.
 Each arm runs one sustained bench.sh step per rate (fresh genesis per step, or a restart of
 the aged fleet --aged on its own volumes). --probe TPS:SECONDS adds a low-rate idle probe as
 the arm's first step; --reuse-fleet runs the arm's later steps on the fleet its first step
@@ -108,6 +109,10 @@ METRICS = [
     ("cpu_ms_per_tx", lambda s: s["cpu_s_per_tx_median"] * 1000),
     ("pool_slope_tx_per_s", lambda s: s["pool_slope_tx_per_s"]),
     ("empty_block_share", lambda s: s["empty_block_share"]),
+    ("unknown_parent_vertex", lambda s: sum(c["unknown_parent_vertex"] for c in s["log_counts"].values())),
+    ("work_refusals", lambda s: sum(n for c in s["log_counts"].values() for by in c["work_refused"].values()
+                                    for n in by.values())),
+    ("peak_memory_gib_max", lambda s: max(s["peak_memory_bytes_nodes"].values(), default=None) / 2**30),
     ("host_load_median", lambda s: s["host_load_1m"]["median"]),
 ]
 
@@ -153,7 +158,7 @@ def summarize(out, plan):
             row["finalized_agreement"] = sum(bool((s.get("finalized_agreement") or {}).get("agree")) for s in steps)
             summary[key]["rates"][str(rate)] = row
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    cols = [name for name, _ in METRICS if name != "host_load_median"]
+    cols = [name for name, _ in METRICS]
 
     def fmt(cell):
         if not cell:
@@ -161,9 +166,11 @@ def summarize(out, plan):
         f = (lambda v: f"{v:.0f}") if abs(cell["median"]) >= 100 else (lambda v: f"{v:.2f}")
         return f"{f(cell['median'])} ({f(cell['min'])}–{f(cell['max'])})"
 
-    lines = [f"# {out.name} ({time.strftime('%Y-%m-%d %H:%M %Z')})", "",
-             "Median (min–max) over arms; verdict columns count arms. A `-` in a submit→finalized percentile "
-             "means more than that share never finalized within the drain (see unfinalized_share).", ""]
+    lines = [f"# {out.name} ({time.strftime('%Y-%m-%d %H:%M %Z')})", ""]
+    if plan.get("note"):
+        lines += [f"> {plan['note']}", ""]
+    lines += ["Median (min–max) over arms; verdict columns count arms. A `-` in a submit→finalized percentile "
+              "means more than that share never finalized within the drain (see unfinalized_share).", ""]
     for key, data in summary.items():
         c = data["config"]
         lines += [f"## {key.upper()}: {c.get('name') or c['profile']} — {c['profile']} image={c.get('image') or 'HEAD'} "
@@ -179,7 +186,7 @@ def summarize(out, plan):
     (out / "summary.md").write_text("\n".join(lines) + "\n")
 
 
-def run_step(out, i, key, side, step, plan, log, external=False):
+def run_step(out, i, key, side, step, plan, log, external=False, aged=None):
     name, rate, duration, warmup = step
     step_dir = out / f"arm-{i}{key}" / name
     if (step_dir / "diesis-metrics.json").exists():
@@ -194,8 +201,8 @@ def run_step(out, i, key, side, step, plan, log, external=False):
         env["DIESIS_REPO_DIR"] = side["repo"]
     if side.get("outcome"):
         env["BENCH_DIESIS_OUTCOME_RULE"] = side["outcome"]
-    if plan.get("aged"):
-        env["DIESIS_AGED_TAG"] = plan["aged"]
+    if aged or plan.get("aged"):
+        env["DIESIS_AGED_TAG"] = aged or plan["aged"]
     if external:
         env["DIESIS_FLEET"] = "external"
     cmd = ["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained", "--tps", str(rate),
@@ -218,14 +225,30 @@ def run_arm(out, i, key, plan, log, attempt, no_quiet_wait):
     arm_dir = out / f"arm-{i}{key}"
     arm_dir.mkdir(exist_ok=True)
     (arm_dir / f"host-{attempt}.json").write_text(json.dumps(host) + "\n")
-    # The first step run in this pass starts a fresh fleet; with --reuse-fleet the rest use it.
-    for n, step in enumerate(pending):
-        external = bool(plan.get("reuse_fleet")) and n > 0
-        ok = run_step(out, i, key, side, step, plan, log, external=external)
-        log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {step[0]}: {'ok' if ok else 'FAILED'}\n")
-        log.flush()
-        if not ok and plan.get("reuse_fleet"):
-            break
+    # A saved fixture is restored into a throwaway aged fleet for this arm and destroyed after,
+    # so every arm starts from the same fixture and the fixture itself is never modified.
+    aged = None
+    fleet = str(HERE.parent / "chains" / "diesis" / "fleet.py")
+    if plan.get("fixture"):
+        aged = f"ab{int(plan['created']) % 100000}-{i}{key}"
+        subprocess.run([sys.executable, "-B", fleet, "destroy-aged", "--tag", aged], capture_output=True)
+        restore = subprocess.run([sys.executable, "-B", fleet, "restore-fixture", "--fixture", plan["fixture"],
+                                  "--as", aged], stdout=log, stderr=subprocess.STDOUT)
+        if restore.returncode:
+            log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key}: fixture restore failed\n")
+            return True
+    try:
+        # The first step run in this pass starts a fresh fleet; with --reuse-fleet the rest use it.
+        for n, step in enumerate(pending):
+            external = bool(plan.get("reuse_fleet")) and n > 0
+            ok = run_step(out, i, key, side, step, plan, log, external=external, aged=aged)
+            log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {step[0]}: {'ok' if ok else 'FAILED'}\n")
+            log.flush()
+            if not ok and plan.get("reuse_fleet"):
+                break
+    finally:
+        if aged:
+            subprocess.run([sys.executable, "-B", fleet, "destroy-aged", "--tag", aged], capture_output=True)
     return True
 
 
@@ -248,13 +271,15 @@ def main():
     p.add_argument("--rates", default="2000")
     p.add_argument("--duration", type=int, default=660, help="Load seconds per step (warmup + window)")
     p.add_argument("--warmup", type=int, default=60)
-    p.add_argument("--aged", help="Aged fleet tag (fleet.py age); default fresh genesis per step")
+    p.add_argument("--aged", help="Aged fleet tag (fleet.py age), used in place; default fresh genesis per step")
+    p.add_argument("--fixture", help="Saved fixture (fleet.py save-fixture), restored into a fresh copy per arm")
     p.add_argument("--probe", help="TPS:SECONDS idle probe as each arm's first step, e.g. 2:30")
     p.add_argument("--reuse-fleet", action="store_true", help="Run each arm's later steps on its first step's fleet")
     p.add_argument("--max-load", type=float, help="Rerun an arm whose windows saw a higher 1-minute host load")
     p.add_argument("--max-reruns", type=int, default=1,
                    help="Reruns per overloaded arm; one still overloaded is kept and marked functional-only")
     p.add_argument("--no-quiet-wait", action="store_true")
+    p.add_argument("--note", help="One line printed at the top of summary.md (kept in plan.json)")
     p.add_argument("--summarize-only", action="store_true")
     a = p.parse_args()
     if not re.fullmatch(r"[a-z0-9-]+", a.name):
@@ -269,7 +294,8 @@ def main():
         if a.probe and not re.fullmatch(r"\d+:\d+", a.probe):
             raise SystemExit("--probe must be TPS:SECONDS")
         plan = dict(sides=sides, order=schedule(a.arms, bool(a.b)), rates=[int(r) for r in a.rates.split(",")],
-                    duration=a.duration, warmup=a.warmup, aged=a.aged, probe=a.probe, reuse_fleet=a.reuse_fleet,
+                    duration=a.duration, warmup=a.warmup, aged=a.aged, fixture=a.fixture, probe=a.probe,
+                    reuse_fleet=a.reuse_fleet, note=a.note,
                     max_load=a.max_load, max_reruns=a.max_reruns, created=time.time())
         plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     if a.summarize_only:

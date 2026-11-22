@@ -140,7 +140,8 @@ def docker_socket():
     return context["Endpoints"]["docker"]["Host"].removeprefix("unix://")
 
 
-def cpu_ns(name, sock):
+def container_stats(name, sock):
+    """(CPU nanoseconds, working-set bytes: usage minus inactive file cache) for one container."""
     conn = DockerConnection(sock)
     try:
         conn.request("GET", f"/{os.environ.get('DIESIS_DOCKER_API', 'v1.47')}/containers/{name}/stats"
@@ -148,9 +149,13 @@ def cpu_ns(name, sock):
         response = conn.getresponse()
         if response.status != 200:
             raise RuntimeError(f"docker stats {response.status}")
-        return json.load(response)["cpu_stats"]["cpu_usage"]["total_usage"]
+        data = json.load(response)
     finally:
         conn.close()
+    memory = data.get("memory_stats", {})
+    stats = memory.get("stats", {})
+    inactive = stats.get("inactive_file", stats.get("total_inactive_file", 0))
+    return data["cpu_stats"]["cpu_usage"]["total_usage"], max(0, memory.get("usage", 0) - inactive)
 
 
 class Observer:
@@ -215,12 +220,13 @@ class Observer:
                 except Exception as error:
                     nodes.append(None)
                     self.err(f"prom {url}: {error}")
+            memory = {}
             for name in self.containers:
                 try:
-                    cpu[name] = cpu_ns(name, self.sock)
+                    cpu[name], memory[name] = container_stats(name, self.sock)
                 except Exception as error:
                     self.err(f"cpu {name}: {error}")
-            self.samples.append((wall, nodes, cpu, os.getloadavg()[0]))
+            self.samples.append((wall, nodes, cpu, os.getloadavg()[0], memory))
             try:
                 if not self.containers:
                     self.stop.wait(5)
@@ -331,6 +337,9 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
             if name in first[2] and finalized_txs:
                 cpu[name] = (ns - first[2][name]) / 1e9 / finalized_txs
         r["cpu_s_per_tx_nodes"] = cpu
+        span = last[0] - first[0]
+        r["cpu_cores_nodes"] = {name: (ns - first[2][name]) / 1e9 / span for name, ns in last[2].items()
+                                if name in first[2] and span > 0}
         r["cpu_s_per_tx_median"] = statistics.median(cpu.values()) if cpu else None
         r["bounds_s"] = [first[0] - start, last[0] - end]
     r["per_block_nodes"] = nodes
@@ -350,6 +359,11 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
     r["pool_pending_start_end"] = [pool[0][1], pool[-1][1]] if pool else None
     r["pool_slope_tx_per_s"] = slope([(t, v) for t, v in pool if full_at is None or t < full_at])
     r["pool_full_at_s"] = full_at
+    peaks = {}
+    for sample in inner:
+        for name, used in (sample[4] if len(sample) > 4 else {}).items():
+            peaks[name] = max(peaks.get(name, 0), used)
+    r["peak_memory_bytes_nodes"] = peaks
     loads = [s[3] for s in inner]
     r["host_load_1m"] = dict(median=statistics.median(loads), max=max(loads)) if loads else None
     r["generator_bound"] = r["attempted_tps"] < 0.95 * target_tps
@@ -382,8 +396,56 @@ def agreement(obs, start, end):
     return dict(agree=all(c["agree"] for c in checked), finalized_head=head, heights=checked)
 
 
+LOG_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+WORK_REFUSED = re.compile(r'Work refused; (retrying once Work frees|not retrying) operation="?(\w+)')
+
+
+def count_log_line(line, counts):
+    """Tally one validator log line: unknown parent vertex errors, selected-owner Work refusals by
+    operation (retried or not), and Work-admission limit errors."""
+    line = LOG_ANSI.sub("", line)
+    if "unknown parent vertex" in line:
+        counts["unknown_parent_vertex"] += 1
+    m = WORK_REFUSED.search(line)
+    if m:
+        kind = "retried" if m[1].startswith("retrying") else "not_retried"
+        by = counts["work_refused"].setdefault(m[2], dict(retried=0, not_retried=0))
+        by[kind] += 1
+    if "Work admission:" in line and "configured limit" in line:
+        counts["work_admission_limit_errors"] += 1
+
+
+class LogCounts:
+    """Follow every validator container's log for the run (docker logs -f from the observer's
+    start) and count lines with count_log_line. Streaming survives the fleet's log rotation and the
+    containers' removal at teardown."""
+
+    def __init__(self, containers):
+        self.counts = {c: dict(unknown_parent_vertex=0, work_refused={}, work_admission_limit_errors=0)
+                       for c in containers}
+        self.procs = []
+        since = f"{time.time() - 1:.3f}"
+        for name in containers:
+            proc = subprocess.Popen(["docker", "logs", "-f", "--since", since, name], stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True, errors="replace")
+            self.procs.append(proc)
+            threading.Thread(target=self.read, args=(proc, self.counts[name]), daemon=True).start()
+
+    @staticmethod
+    def read(proc, counts):
+        for line in proc.stdout:
+            count_log_line(line, counts)
+
+    def stop(self):
+        for proc in self.procs:
+            proc.terminate()
+        time.sleep(0.5)
+        return self.counts
+
+
 def watch(a):
     obs = Observer()
+    logs = LogCounts(obs.containers)
     obs.run_dir = a.run_dir
     done = threading.Event()
     signal.signal(signal.SIGUSR1, lambda *_: done.set())
@@ -412,6 +474,7 @@ def watch(a):
     metrics["drain_s"] = time.time() - load_end
     metrics["finalized_agreement"] = agreement(obs, metrics["window_start"], metrics["window_end"])
     metrics["pool_pending_after_drain"] = pool
+    metrics["log_counts"] = logs.stop()
     obs.stop.set()
     (a.run_dir / "diesis-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     if not a.keep_raw:

@@ -24,6 +24,9 @@ EVM targets are judged under the **`capped`** profile:
 
 `uncapped` is for diagnosis only.
 
+Judged runs run alone. `judged.py` starts its fleet only while no other Diesis fleet runs, and a
+window with another fleet up at its start or end is marked functional-only.
+
 **Known failure: the official capped run does not complete today.** A capped validator
 cannot start an aged chain within its 1 GiB selected encoded Work budget. After about 280
 blocks aged under load, node 6570bb686 refused at startup with
@@ -49,6 +52,16 @@ make ab NAME=<change> AGED=m6570-5k RATES=2000 \
 # Baseline under both profiles:
 make ab NAME=baseline-<sha> AGED=m6570-5k RATES=500,1000,2000,3000 A="profile=capped" B="profile=uncapped"
 
+# Save a stopped aged fleet as a fixture, then the judged run on a fresh copy of it:
+make diesis-fixture-save TAG=m6570-5k
+make diesis-judged FIXTURE=<fixture> RATE=2000
+
+# The node's built speed flags all off against all on, A B B A (FIXTURE= or AGED=, or fresh):
+make diesis-speed-flags NAME=<name> FIXTURE=<fixture> RATES=2000
+
+# Idle CPU, cadence and resume latency per DIESIS_IDLE_STRETCH, interleaved 4 1 1 4:
+make diesis-idle STRETCH=4,1 ARMS=2
+
 # One ad-hoc run (fresh genesis unless AGED is set):
 make bench CHAIN=diesis MODE=sustained TPS=2000 DURATION=660 WARMUP=60 PROFILE=capped
 ```
@@ -58,7 +71,12 @@ and development comes first. Before each arm, `ab.py` waits up to 10 minutes for
 quiet (1-minute load below 8, no compiler or docker build) and records the outcome in
 `arm-*/host-*.json`. The observer records the host load for every window. Treat arms run on
 a busy host as diagnostic. Set `BENCH_RESULTS_BASE` to keep results off the system disk
-(in this workspace, `/Volumes/Scratch/0xdiesis/reports/evm-benchmark`).
+(in this workspace, `/Volumes/Scratch/0xdiesis/reports/evm-benchmark`). Set
+`BENCH_DIESIS_MAX_FLEETS=2` to honour a shared fleet cap. Before starting any fleet, including
+each arm's restart, `fleet.py` then waits while two or more other Diesis fleets run on the host.
+It counts every user's fleets, one per compose project, matched by image ID. To hand a running
+series' slot to another fleet, create the file named by `BENCH_DIESIS_HOLD_FILE`. The next arm
+tears its fleet down and waits until the file is removed.
 
 ## What the harness already provided
 
@@ -89,6 +107,9 @@ lacked geo profiles, ceiling search, analytics, cross-chain comparison and sweep
 | Diesis attribution | Per-node Prometheus deltas: selected-owner hold, MPT quorum wait, rounds/block, tx/block, interval; also empty-block share, CPU-seconds per tx (Docker), pool backlog slope |
 | Env and round timer | `BENCH_DIESIS_ENV="K=V ..."` for any node flag, or the node-Makefile `E2E_*` spellings (for example `E2E_MIN_ROUND_DELAY=20ms`). Ambient `DIESIS_*` values only feed the compose's own interpolation and are never injected: the node's strict configuration rejects any `DIESIS_*` key it does not consume, and workspace tooling exports such names |
 | Interleaved A/B | `ab.py` / `make ab`: A B B A …, medians and ranges, resumable |
+| Fixtures and the judged run | `fleet.py save-fixture` archives a stopped aged fleet; `judged.py` restores a fresh copy, records a refusal (with Work-admission bytes) or one 600 s window, and never modifies the fixture |
+| Speed flags | `make diesis-speed-flags`: the node's built speed flags all off against all on, through `ab.py` |
+| Idle stretch | `diesis-idle.py` / `make diesis-idle`: per `DIESIS_IDLE_STRETCH` arm, CPU % per validator over an idle window, blocks and consensus rounds per second, idle block intervals, and submit→first block, receipt and finalized for single transfers after long idle gaps, with every validator's idle-mode exit, head progress and hash agreement |
 | Verdicts | `generator_bound` and `chain_saturated` per run |
 
 Fixes made along the way:
@@ -136,6 +157,12 @@ Fixes made along the way:
   - Concurrent users on one host set distinct `BENCH_DIESIS_FLEET` names for their fresh
     fleets. Starting a fleet stops only the same user's other fleet.
   - `down` removes only that user's fresh project.
+- **CPU pinning.** The capped profile pins validator i to 2 consecutive CPUs from a base, so a
+  lone capped fleet keeps CPUs 0–7 and its results stay comparable. A capped fleet that starts
+  while another Diesis fleet pins CPUs takes whichever of base 0 and (Docker CPUs − 8) overlaps
+  those CPUs least: CPUs 4–11 on the M2's 12-CPU Docker VM. Two capped fleets there still share
+  CPUs 4–7, so concurrent fleets are functional runs only. The base and each validator's cpuset
+  go to the provenance, which `bench.sh` copies into every run directory.
 - **Aged fleets.** Copying volumes does not work: each validator binds its writer-fence
   journal to its datadir's device and inode (diesis-reth
   `crates/engine/tree/src/writer_fence.rs`), and a copy is refused at startup. An aged fleet
@@ -167,6 +194,8 @@ first submission in the submit log; the observer and generator share the host cl
 | `generator_bound` | Attempted below 95% of target, the same threshold as the harness's `target hit`. The run measures the client, not the chain |
 | `chain_saturated` | Finalized below 95% of attempted, or rejections above 0.1%, or the pool reached its cap |
 | `validator_exits`, `host_load_1m` | Any validator that exited during the run; the median and max 1-minute host load in the window |
+| `peak_memory_bytes_nodes` | Each validator container's largest memory use over the 5 s samples (Docker stats: usage minus inactive file) |
+| `log_counts` | Per validator, from its log followed for the whole run: `unknown parent vertex` errors, selected-owner Work refusals by `operation` (retried or not) and Work-admission limit errors |
 
 The generator delivers 3,000 TPS on M2 loopback at about 1.1 cores, with requests even
 across all ports. It runs on the benchmark host, and its CPU is part of the recorded host

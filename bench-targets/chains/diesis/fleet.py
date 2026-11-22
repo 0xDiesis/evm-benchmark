@@ -7,6 +7,8 @@
   fleet.py stop             stop the selected fleet, keeping its volumes
   fleet.py age --tag T      build an aged fleet: load it past --blocks, drain, stop
   fleet.py destroy-aged --tag T   remove an aged fleet and its manifest
+  fleet.py save-fixture --tag T   archive a stopped aged fleet's volumes (fixture, never modified)
+  fleet.py restore-fixture --fixture NAME --as T   extract a fixture into a new aged fleet T
   fleet.py status | render | provenance | ports
 
 Inputs (environment):
@@ -24,6 +26,11 @@ Inputs (environment):
                         outcomes need, so a hybrid fleet stops within a few blocks. Checkouts
                         without docker/epoch/epoch-zero-4v-bls-only.calldata predate the
                         control and get no rule keys (their strict configuration refuses them)
+  BENCH_DIESIS_MAX_FLEETS  start only while fewer than N other Diesis fleets (any user's, one per
+                        compose project) run on this host; otherwise wait, polling every 30 s,
+                        up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)
+  BENCH_DIESIS_HOLD_FILE   while this file exists, fleet starts wait too: creating it yields the
+                        slot at a runner's next arm, which tears its fleet down and then waits
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
@@ -41,6 +48,12 @@ it, a subnet when any Docker network uses it. A project keeps its previous block
 block stays free. P2P ports stay inside each fleet's network. The block, container names
 (<project>-node-N) and node IPs go to <state>/<project>/ports.json and the provenance, which
 bench.sh stores with every run; lib.sh routes RPC, WS, metrics and topology from it.
+
+CPU pinning: a profile with FLEET_PIN_CPUS=true pins validator i to FLEET_CPUS consecutive CPUs
+from a base. A lone pinned fleet uses base 0 (CPUs 0-7 under the capped profile), so results
+stay comparable with earlier runs. A fleet that starts while other Diesis fleets pin CPUs takes
+whichever of base 0 and <Docker CPUs> - width overlaps those CPUs least: CPUs 4-11 beside a
+capped fleet on a 12-CPU Docker VM. The base and every validator's cpuset go to the provenance.
 
 Aged fleets: validators bind their writer-fence journal to the datadir's device and inode,
 so volumes cannot be copied. An aged fleet is a stopped compose project
@@ -257,7 +270,7 @@ def outcome_rule_env(repo, environ, default=DEFAULT_OUTCOME_RULE):
 
 
 def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEET, block=None,
-           outcome_rule=DEFAULT_OUTCOME_RULE):
+           outcome_rule=DEFAULT_OUTCOME_RULE, cpu_base=0):
     environ = dict(os.environ if environ is None else environ)
     profile = read_profile(profile_name)
     env = merged_env(profile, environ)
@@ -284,13 +297,14 @@ def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEE
     interpolated = set()
     for path in files[1::2]:
         interpolated |= set(re.findall(r"\$\{([A-Z0-9_]+)", Path(path).read_text()))
-    compose = patch(rendered, image_id, env, profile, interpolated, project)
+    compose = patch(rendered, image_id, env, profile, interpolated, project, cpu_base)
     return compose, dict(checkout=str(repo), checkout_head=head, profile=profile_name, profile_values=profile,
                          validator_env=env, image_id=image_id, signing_overlay=signing.is_file(),
-                         outcome_signature_rule=rule)
+                         outcome_signature_rule=rule, cpu_base=cpu_base,
+                         cpusets={name: compose["services"][name].get("cpuset") for name in NODES})
 
 
-def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET):
+def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET, cpu_base=0):
     """Validators take every override except keys the compose only interpolates (log levels,
     txpool flags, Rayon thread count): the node's strict configuration rejects any DIESIS_*
     key it does not consume, so those reach the node only through the rendered values."""
@@ -316,7 +330,8 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DE
             service["cpus"] = float(cpus)
             if pin:
                 n = int(float(cpus))
-                service["cpuset"] = f"{i * n}-{i * n + n - 1}" if n > 1 else str(i)
+                first = cpu_base + i * n
+                service["cpuset"] = f"{first}-{first + n - 1}" if n > 1 else str(first)
         if memory:
             service["mem_limit"] = memory
     for name, service in services.items():
@@ -352,6 +367,96 @@ def project_running(project):
     return bool(out.split())
 
 
+def fleet_containers(inspect_lines, image_ids):
+    """(fleet, cpuset) for each `docker inspect` line "<image id>\t<compose project>\t<name>\t<cpuset>"
+    whose image ID is a Diesis node image; the fleet is the compose project, or the bare container
+    name outside compose."""
+    out = []
+    for line in inspect_lines.splitlines():
+        image, project, name, cpuset = (line.split("\t") + ["", "", ""])[:4]
+        if image in image_ids:
+            out.append((project if project and project != "<no value>" else name.lstrip("/"), cpuset))
+    return out
+
+
+def fleet_projects(inspect_lines, image_ids):
+    return {fleet for fleet, _ in fleet_containers(inspect_lines, image_ids)}
+
+
+def running_containers():
+    """(fleet, cpuset) for every running Diesis validator on this host, any user's, matched by
+    image ID because fleets started from an immutable image ID show no tag."""
+    ids = set(sh(["docker", "images", "--no-trunc", "--format", "{{.ID}}", "--filter", "reference=diesis-node*"],
+                 check=False, capture=True).stdout.split())
+    running = sh(["docker", "ps", "-q"], check=False, capture=True).stdout.split()
+    if not ids or not running:
+        return []
+    out = sh(["docker", "inspect", "--format",
+              '{{.Image}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{.Name}}\t{{.HostConfig.CpusetCpus}}',
+              *running], check=False, capture=True).stdout
+    return fleet_containers(out, ids)
+
+
+def running_fleets(exclude=()):
+    """Every running Diesis fleet on this host, by compose project."""
+    return {fleet for fleet, _ in running_containers()} - set(exclude)
+
+
+def cpuset_cpus(text):
+    """The CPUs of a cpuset such as "0-1,4"."""
+    cpus = set()
+    for part in filter(None, (text or "").split(",")):
+        low, _, high = part.partition("-")
+        cpus |= set(range(int(low), int(high or low) + 1))
+    return cpus
+
+
+def pinned_cpus(exclude=()):
+    """CPUs pinned by the validators of other running Diesis fleets."""
+    return set().union(*[cpuset_cpus(cpuset) for fleet, cpuset in running_containers() if fleet not in set(exclude)])
+
+
+def docker_cpus():
+    out = sh(["docker", "info", "--format", "{{.NCPU}}"], check=False, capture=True).stdout.strip()
+    return int(out) if out.isdigit() else 0
+
+
+def choose_cpu_base(busy, cpus, width):
+    """First CPU for a fleet pinned to `width` CPUs: 0 unless CPUs other fleets pin overlap it, then
+    whichever of 0 and cpus - width overlaps them least (a tie keeps 0)."""
+    bases = [0] + ([cpus - width] if cpus > width else [])
+    return min(bases, key=lambda base: (len(busy & set(range(base, base + width))), base))
+
+
+def wait_for_slot(project):
+    """With BENCH_DIESIS_MAX_FLEETS=N, start only while fewer than N other Diesis fleets run on
+    this host. While the file named by BENCH_DIESIS_HOLD_FILE exists, also wait: creating it yields
+    the slot at the next fleet start (a runner's next arm tears its fleet down, then waits here).
+    Polls every 30 s for up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)."""
+    limit = int(os.environ.get("BENCH_DIESIS_MAX_FLEETS") or 0)
+    hold = os.environ.get("BENCH_DIESIS_HOLD_FILE")
+    if limit <= 0 and not hold:
+        return
+    deadline = time.monotonic() + float(os.environ.get("BENCH_DIESIS_SLOT_WAIT_S") or 7200)
+    shown = None
+    while True:
+        held = bool(hold) and Path(hold).exists()
+        others = running_fleets(exclude={project}) if limit > 0 else set()
+        if not held and (limit <= 0 or len(others) < limit):
+            if shown is not None:
+                say(f"{project}: fleet slot free ({len(others)} other fleet(s) running)")
+            return
+        state = (held, others)
+        if state != shown:
+            say(f"{project}: held by {hold}; waiting until it is removed" if held else
+                f"{project}: {len(others)} other Diesis fleets running ({', '.join(sorted(others))}); "
+                f"waiting for a slot (limit {limit})")
+            shown = state
+        if time.monotonic() > deadline:
+            raise SystemExit(f"No fleet slot within BENCH_DIESIS_SLOT_WAIT_S (held {held}, running {sorted(others)})")
+        time.sleep(30)
+
+
 def wait_live(block, timeout=180):
     deadline = time.monotonic() + timeout
     first = None
@@ -385,6 +490,7 @@ def start(project, aged_tag=None):
     for other in own_other_fleets(project):
         say(f"stopping {other} (this user's other fleet)")
         stop_project(other)
+    wait_for_slot(project)
     previous = json.loads(ports_path(project).read_text())["block"] if ports_path(project).exists() else None
     own_network = f"{project}_diesis-e2e"
     block = choose_block(previous, busy_host_ports() if not project_running(project) else set(),
@@ -392,9 +498,16 @@ def start(project, aged_tag=None):
     repo = checkout()
     ref, image_id = image_ref(repo)
     profile = os.environ.get("BENCH_DIESIS_PROFILE", "capped")
+    values = read_profile(profile)
+    cpu_base = 0
+    if values.get("FLEET_PIN_CPUS") == "true" and values.get("FLEET_CPUS"):
+        busy = pinned_cpus(exclude={project})
+        cpu_base = choose_cpu_base(busy, docker_cpus(), int(float(values["FLEET_CPUS"])) * len(NODES))
+        if busy:
+            say(f"{project}: other fleets pin CPUs {sorted(busy)}; pinning validators from CPU {cpu_base}")
     aged_rule = aged_outcome_rule(aged_tag)
     compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project, block=block,
-                                 outcome_rule=aged_rule or DEFAULT_OUTCOME_RULE)
+                                 outcome_rule=aged_rule or DEFAULT_OUTCOME_RULE, cpu_base=cpu_base)
     if aged_rule and provenance["outcome_signature_rule"] != aged_rule:
         raise SystemExit(f"Aged fleet {aged_tag} has a {aged_rule} genesis, not "
                          f"{provenance['outcome_signature_rule']}")
@@ -545,10 +658,22 @@ def cmd_age(a):
         time.sleep(30)
     else:
         raise SystemExit("Sender funding failed four times")
-    # Load until the time limit; aging stops as soon as every validator passes --blocks.
-    gen = subprocess.Popen(list(map(str, [*common, "--execution", "sustained", "--duration", a.max_minutes * 60,
-                                          "--tps", a.rate, "--out", out / "aging.json"])), env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Load in 600 s chunks until every validator passes --blocks or --max-minutes runs out
+    # (sustained mode pre-signs rate x duration, so one run per chunk keeps that bounded). The
+    # EVM workload (default) deploys token, pair and NFT contracts (--fund) and mixes transfers,
+    # ERC-20, AMM and NFT calls, so state grows as it would under real use.
+    def chunk(n):
+        load = [*common, "--execution", "sustained", "--duration", 600, "--tps", a.rate,
+                "--out", out / f"aging-{n}.json"]
+        if a.workload == "evm":
+            load[load.index("--test") + 1] = "evm"
+            load.append("--fund")
+        log = (out / "aging-generator.log").open("a")
+        return subprocess.Popen(list(map(str, load)), env=env, stdout=log, stderr=subprocess.STDOUT)
+
+    aging_started = time.time()
+    chunks = 1
+    gen = chunk(chunks)
     try:
         deadline = time.monotonic() + a.max_minutes * 60
         while True:
@@ -557,8 +682,13 @@ def cmd_age(a):
             say(f"aging heights {h}")
             if all(x is not None for x in h) and min(h) >= a.blocks:
                 break
-            if gen.poll() is not None or time.monotonic() > deadline:
-                raise SystemExit(f"Aging stopped short at {h}")
+            if time.monotonic() > deadline:
+                raise SystemExit(f"Aging stopped short at {h} after {a.max_minutes} min")
+            if gen.poll() is not None:
+                if gen.returncode not in (0, 1) or any(x is None for x in h):
+                    raise SystemExit(f"Aging load exited {gen.returncode} at heights {h}")
+                chunks += 1
+                gen = chunk(chunks)
     finally:
         if gen.poll() is None:
             gen.send_signal(signal.SIGINT)
@@ -571,6 +701,8 @@ def cmd_age(a):
         time.sleep(5)
     time.sleep(10)
     record = dict(tag=a.tag, project=project, height=min(heights(block)), aging_rate=a.rate, senders=a.senders,
+                  workload=a.workload, aging_seconds=time.time() - aging_started, aging_chunks=chunks,
+                  genesis_hash=rpc(block["rpc"][0], "eth_getBlockByNumber", ["0x0", False])["hash"],
                   created=time.time(), provenance=json.loads((out / "provenance.json").read_text()))
     stop_project(project)
     manifest_path(a.tag).write_text(json.dumps(record, indent=2) + "\n")
@@ -582,7 +714,90 @@ def cmd_destroy_aged(a):
     path = last_compose(project)
     if path:
         sh([*compose_cmd(project, path), "down", "--volumes", "--remove-orphans"], env=compose_env())
+    # A restored fleet that never started has volumes but no compose file yet.
+    leftover = sh(["docker", "volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={project}"],
+                  check=False, capture=True).stdout.split()
+    if leftover:
+        sh(["docker", "volume", "rm", *leftover], check=False, capture=True)
     manifest_path(a.tag).unlink(missing_ok=True)
+
+
+# ---- saved fixtures ----------------------------------------------------------------------
+# A fixture is a tar archive of every volume of a stopped aged fleet (each node's data and
+# signing volumes) plus fixture.json, under $BENCH_DIESIS_FIXTURES/<name>, named
+# <tag>-<image id 12>-<genesis hash 10>. Restoring extracts the archives into a new aged
+# project, drops each datadir's persisted peer list, and never modifies the archives. Note: validators bind their writer-fence journal
+# to the datadir's device and inode, and node 6570bb686 refuses a copied datadir at startup
+# ("journal datadir identity mismatch"); a restored fixture starts only once that is resolved.
+
+def fixtures_dir():
+    path = Path(os.environ.get("BENCH_DIESIS_FIXTURES", state_dir().parent / "fixtures"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def fixture_name(manifest):
+    image = manifest["provenance"]["image_id"].removeprefix("sha256:")[:12]
+    genesis = manifest["genesis_hash"].removeprefix("0x")[:10]
+    return f"{manifest['tag']}-{image}-{genesis}"
+
+
+def cmd_save_fixture(a):
+    """Archive a stopped aged fleet's volumes as a fixture."""
+    m = manifest(a.tag)
+    project = aged_project(a.tag)
+    if project_running(project):
+        raise SystemExit(f"{project} is running; stop it first (DIESIS_AGED_TAG={a.tag} fleet.py down)")
+    compose = json.loads(last_compose(project).read_text())
+    name = fixture_name(m)
+    out = fixtures_dir() / name
+    if out.exists():
+        raise SystemExit(f"Fixture {name} exists at {out}")
+    out.mkdir(parents=True)
+    image = m["provenance"]["image_id"]
+    volumes = {}
+    for key, definition in compose["volumes"].items():
+        sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "tar", "-v", f"{definition['name']}:/v:ro",
+            "-v", f"{out}:/out", image, "-C", "/v", "-cf", f"/out/{key}.tar", "."], timeout=3600)
+        volumes[key] = dict(archive=f"{key}.tar", bytes=(out / f"{key}.tar").stat().st_size)
+    record = dict(name=name, tag=a.tag, image=m["provenance"]["image"], image_id=image,
+                  genesis_hash=m["genesis_hash"], height=m["height"], workload=m.get("workload"),
+                  aging_rate=m.get("aging_rate"), senders=m.get("senders"), aging_seconds=m.get("aging_seconds"),
+                  volumes=volumes, total_bytes=sum(v["bytes"] for v in volumes.values()), saved=time.time(),
+                  source_manifest=m)
+    (out / "fixture.json").write_text(json.dumps(record, indent=2) + "\n")
+    say(f"fixture {name}: {record['total_bytes'] / 2**30:.2f} GiB in {out}")
+    print(json.dumps(dict(name=name, path=str(out), total_bytes=record["total_bytes"])))
+
+
+def cmd_restore_fixture(a):
+    """Extract a fixture into a new aged fleet <as> (stopped); start it with DIESIS_AGED_TAG=<as>."""
+    src = fixtures_dir() / a.fixture
+    record = json.loads((src / "fixture.json").read_text())
+    project = aged_project(a.as_tag)
+    if manifest_path(a.as_tag).exists():
+        raise SystemExit(f"Aged fleet {a.as_tag} exists; destroy it first (fleet.py destroy-aged --tag {a.as_tag})")
+    for key, info in record["volumes"].items():
+        name = f"{project}_{key}"
+        if sh(["docker", "volume", "inspect", name], check=False, capture=True).returncode == 0:
+            raise SystemExit(f"Volume {name} exists")
+        sh(["docker", "volume", "create", "--label", f"com.docker.compose.project={project}",
+            "--label", f"com.docker.compose.volume={key}", "--label", f"{OWNER_LABEL}=true", name], capture=True)
+        sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "tar", "-v", f"{name}:/v",
+            "-v", f"{src}:/in:ro", record["image_id"], "-C", "/v", "-xpf", f"/in/{info['archive']}"], timeout=3600)
+        # The persisted peer list names the aging fleet's addresses, and the restored fleet
+        # runs on its own subnet. Its stale entries for the same peer IDs kept nodes from
+        # reaching each other's current addresses (only a node with an empty list reached
+        # everyone), so every node starts from fresh peer state and its bootnodes.
+        sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "rm", "-v", f"{name}:/v",
+            record["image_id"], "-f", "/v/known-peers.json"], timeout=600)
+    m = dict(record["source_manifest"], tag=a.as_tag, project=project, restored_from=record["name"],
+             restored=time.time())
+    manifest_path(a.as_tag).write_text(json.dumps(m, indent=2) + "\n")
+    # The restored project starts from the fixture's own compose shape on its next `up`.
+    (state_dir() / project).mkdir(parents=True, exist_ok=True)
+    say(f"restored {record['name']} as aged fleet {a.as_tag} (height {record['height']}); "
+        f"start it with DIESIS_AGED_TAG={a.as_tag}")
 
 
 def cmd_provenance(_a):
@@ -642,9 +857,15 @@ def main():
     age.add_argument("--blocks", type=int, default=5100)
     age.add_argument("--rate", type=int, default=400)
     age.add_argument("--senders", type=int, default=512)
-    age.add_argument("--max-minutes", type=int, default=120)
+    age.add_argument("--max-minutes", type=int, default=360)
+    age.add_argument("--workload", choices=["evm", "transfer"], default="evm")
     destroy = sub.add_parser("destroy-aged")
     destroy.add_argument("--tag", required=True)
+    save = sub.add_parser("save-fixture")
+    save.add_argument("--tag", required=True)
+    restore = sub.add_parser("restore-fixture")
+    restore.add_argument("--fixture", required=True)
+    restore.add_argument("--as", dest="as_tag", required=True)
     a = p.parse_args()
     globals()["cmd_" + a.cmd.replace("-", "_")](a)
 
