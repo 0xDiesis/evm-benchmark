@@ -425,8 +425,9 @@ def cmd_age(a):
               "--bench-name", project, "--quiet"]
     for attempt in range(1, 5):
         target = out / f"fund-{attempt}.json"
+        # The 4-transaction check after funding must outlast receipt latency on a busy host.
         result = sh([*common, "--fund", "--execution", "burst", "--txs", "4", "--waves", "1", "--out", target],
-                    check=False, env=env, timeout=900)
+                    check=False, env=dict(env, BENCH_CONFIRM_WAIT_SECS="90"), timeout=900)
         if result.returncode == 0 and json.loads(target.read_text())["results"]["confirmed"] == 4:
             break
         time.sleep(30)
