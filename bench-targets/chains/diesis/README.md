@@ -38,7 +38,7 @@ make bench CHAIN=diesis FLEET=external \
 | `DIESIS_IMAGE_TAG` / `IMAGE=` | `diesis-node-e2e` tag (default `<checkout HEAD>-release`); must exist |
 | `BENCH_DIESIS_PROFILE` / `PROFILE=` | `capped` (default, the run rule) or `uncapped` (diagnosis), from `profiles/` |
 | `DIESIS_AGED_TAG` / `AGED=` | Reuse a stopped aged fleet (`make diesis-age TAG=…`) |
-| `DIESIS_*`, `RAYON_*`, `E2E_*`, `BENCH_DIESIS_ENV` | Validator overrides on top of the profile |
+| `BENCH_DIESIS_ENV`, `E2E_*` | Validator overrides on top of the profile (ambient `DIESIS_*` only feed compose interpolation) |
 | `BENCH_WARMUP_SECS` / `WARMUP=` | Seconds of load excluded from the measured window |
 
 ## Endpoints

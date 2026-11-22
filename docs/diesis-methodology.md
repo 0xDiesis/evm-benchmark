@@ -78,7 +78,7 @@ lacked geo profiles, ceiling search, analytics, cross-chain comparison and sweep
 | Aged-chain reuse | `fleet.py age`; `AGED=<tag>` restarts the stopped aged fleet on its own volumes |
 | Per-transaction latency | The harness logs each accepted hash with its submit time (`BENCH_SUBMIT_LOG`). `diesis-observer.py` joins that log with node 1's block trace and the all-four finalized head |
 | Diesis attribution | Per-node Prometheus deltas: selected-owner hold, MPT quorum wait, rounds/block, tx/block, interval; also empty-block share, CPU-seconds per tx (Docker), pool backlog slope |
-| Env and round timer | Any `DIESIS_*` / `RAYON_*`, the node-Makefile `E2E_*` spellings (for example `E2E_MIN_ROUND_DELAY=20ms`), or `BENCH_DIESIS_ENV="K=V ..."` |
+| Env and round timer | `BENCH_DIESIS_ENV="K=V ..."` for any node flag, or the node-Makefile `E2E_*` spellings (for example `E2E_MIN_ROUND_DELAY=20ms`). Ambient `DIESIS_*` values only feed the compose's own interpolation and are never injected: the node's strict configuration rejects any `DIESIS_*` key it does not consume, and workspace tooling exports such names |
 | Interleaved A/B | `ab.py` / `make ab`: A B B A …, medians and ranges, resumable |
 | Verdicts | `generator_bound` and `chain_saturated` per run |
 

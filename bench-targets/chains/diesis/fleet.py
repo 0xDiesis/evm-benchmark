@@ -17,9 +17,11 @@ Inputs (environment):
   BENCH_DIESIS_PROFILE  capped (default; the official run rule) | uncapped (diagnosis);
                         profiles/<name>.env
   DIESIS_AGED_TAG       reuse the stopped aged fleet <tag> instead of a fresh genesis
-  DIESIS_*, RAYON_*     validator environment overrides (win over the profile)
-  E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME>
-  BENCH_DIESIS_ENV      extra "K=V K=V" validator overrides
+  BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
+  E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
+  DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
+                        are never injected (workspace tooling exports DIESIS_* names the
+                        node's strict configuration would reject)
 
 The compose is rendered with `docker compose config`, then patched: validators and
 Prometheus only, the immutable image ID, host ports bound to 127.0.0.1, the profile's CPU,
@@ -138,14 +140,11 @@ def read_profile(name):
 
 
 def merged_env(profile_values, environ):
-    """Validator environment: profile, then E2E_* spellings, then DIESIS_*/RAYON_*, then BENCH_DIESIS_ENV."""
+    """Explicit validator overrides: profile, then E2E_* spellings, then BENCH_DIESIS_ENV."""
     env = {k: v for k, v in profile_values.items() if not k.startswith("FLEET_")}
     for key, value in environ.items():
         if key.startswith("E2E_") and value != "":
             env["DIESIS_" + key[4:]] = value
-    for key, value in environ.items():
-        if re.fullmatch(r"(DIESIS|RAYON)_[A-Z0-9_]+", key) and key not in RESERVED and value != "":
-            env[key] = value
     for item in shlex.split(environ.get("BENCH_DIESIS_ENV", "")):
         key, sep, value = item.partition("=")
         if not sep or not re.fullmatch(r"(DIESIS|RAYON)_[A-Z0-9_]+", key):
@@ -154,7 +153,7 @@ def merged_env(profile_values, environ):
     return env
 
 
-def render(repo, image_id, tag, profile_name, environ=None):
+def render(repo, image_id, tag, profile_name, environ=None, project=FRESH_PROJECT):
     environ = dict(os.environ if environ is None else environ)
     profile = read_profile(profile_name)
     env = merged_env(profile, environ)
@@ -170,12 +169,12 @@ def render(repo, image_id, tag, profile_name, environ=None):
     interpolated = set()
     for path in files[1::2]:
         interpolated |= set(re.findall(r"\$\{([A-Z0-9_]+)", Path(path).read_text()))
-    compose = patch(rendered, image_id, env, profile, interpolated)
+    compose = patch(rendered, image_id, env, profile, interpolated, project)
     return compose, dict(checkout=str(repo), checkout_head=head, profile=profile_name, profile_values=profile,
                          validator_env=env, image_id=image_id, signing_overlay=signing.is_file())
 
 
-def patch(rendered, image_id, env, profile, interpolated=frozenset()):
+def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=FRESH_PROJECT):
     """Validators take every override except keys the compose only interpolates (log levels,
     txpool flags, Rayon thread count): the node's strict configuration rejects any DIESIS_*
     key it does not consume, so those reach the node only through the rendered values."""
@@ -212,8 +211,10 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset()):
         for port in service.get("ports", []):
             port["host_ip"] = "127.0.0.1"
     used = {v["source"] for s in services.values() for v in s.get("volumes", []) if v.get("type") == "volume"}
-    return dict(services=services, networks=rendered["networks"],
-                volumes={k: v for k, v in rendered.get("volumes", {}).items() if k in used})
+    # The render names volumes after its own default project ("docker_..."), shared with any
+    # `make e2e-up` cluster; give each fleet project its own.
+    volumes = {k: dict(v, name=f"{project}_{k}") for k, v in rendered.get("volumes", {}).items() if k in used}
+    return dict(services=services, networks=rendered["networks"], volumes=volumes)
 
 
 # ---- ownership -----------------------------------------------------------------------
@@ -284,7 +285,7 @@ def start(project, aged_tag=None):
     repo = checkout()
     ref, image_id = image_ref(repo)
     profile = os.environ.get("BENCH_DIESIS_PROFILE", "capped")
-    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile)
+    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project)
     directory = state_dir() / project
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "compose.json"

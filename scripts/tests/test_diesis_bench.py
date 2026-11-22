@@ -123,12 +123,13 @@ class Fleet(unittest.TestCase):
         self.assertNotIn("FLEET_CPUS", uncapped)
         self.assertEqual(uncapped["DIESIS_SELECTED_ENCODED_WORK_BYTES"], "17179869184")
 
-    def test_env_precedence(self):
+    def test_env_precedence_and_no_ambient_injection(self):
         env = fleet.merged_env({"FLEET_CPUS": "2", "DIESIS_A": "profile", "DIESIS_B": "profile"},
-                               {"E2E_MIN_ROUND_DELAY": "20ms", "DIESIS_B": "env", "DIESIS_REPO_DIR": "/x",
-                                "BENCH_DIESIS_ENV": "DIESIS_C=extra RAYON_NUM_THREADS=4", "PATH": "/bin"})
-        self.assertEqual(env, {"DIESIS_A": "profile", "DIESIS_B": "env", "DIESIS_MIN_ROUND_DELAY": "20ms",
-                               "DIESIS_C": "extra", "RAYON_NUM_THREADS": "4"})
+                               {"E2E_MIN_ROUND_DELAY": "20ms", "DIESIS_CARGO_TARGET_DIR": "/scratch",
+                                "DIESIS_B": "ambient", "BENCH_DIESIS_ENV": "DIESIS_B=explicit RAYON_NUM_THREADS=4",
+                                "PATH": "/bin"})
+        self.assertEqual(env, {"DIESIS_A": "profile", "DIESIS_B": "explicit", "DIESIS_MIN_ROUND_DELAY": "20ms",
+                               "RAYON_NUM_THREADS": "4"})
         with self.assertRaises(SystemExit):
             fleet.merged_env({}, {"BENCH_DIESIS_ENV": "PATH=/tmp"})
 
@@ -147,7 +148,7 @@ class Fleet(unittest.TestCase):
         self.assertEqual(n4["environment"]["DIESIS_A"], "2")
         self.assertEqual(n4["ports"][0]["host_ip"], "127.0.0.1")
         self.assertNotIn("build", n4)
-        self.assertEqual(list(c["volumes"]), ["data"])
+        self.assertEqual(c["volumes"], {"data": {"name": "diesis-bench_data"}})
         free = fleet.patch(json.loads(json.dumps(rendered)), "sha256:abc", {}, {})
         self.assertNotIn("cpus", free["services"]["node-1"])
 
