@@ -21,6 +21,7 @@ def load(path):
 observer = load(ROOT / "bench-targets/scripts/diesis-observer.py")
 fleet = load(ROOT / "bench-targets/chains/diesis/fleet.py")
 ab = load(ROOT / "bench-targets/scripts/ab.py")
+judged = load(ROOT / "bench-targets/scripts/judged.py")
 
 W0 = 1.795e9
 
@@ -54,7 +55,8 @@ def synthetic(tmp, pending=100, unfinalized_from=None):
     rows.insert(0, ("0xfirst", int((W0 - 2) * 1e6)))
     rows.append(("0xdead", int((W0 + 20) * 1e6)))
     for k in range(14):
-        obs.samples.append((W0 + k * 5, [prom(k, pending)] * 4, {f"n{i}": int(k * 5e9) for i in range(4)}, 4.0))
+        obs.samples.append((W0 + k * 5, [prom(k, pending)] * 4, {f"n{i}": int(k * 5e9) for i in range(4)}, 4.0,
+                            {f"n{i}": (i + 1) * 1000 + k for i in range(4)}))
     log = Path(tmp) / "submit-log.csv"
     log.write_text("hash,submit_unix_us\n" + "".join(f"{h},{u}\n" for h, u in rows))
     return obs, log
@@ -95,6 +97,8 @@ class ObserverMetrics(unittest.TestCase):
         self.assertAlmostEqual(m["empty_block_share"], 11 / 101)
         self.assertAlmostEqual(m["pool_slope_tx_per_s"], 20.0)
         self.assertGreater(m["cpu_s_per_tx_median"], 0)
+        self.assertAlmostEqual(m["cpu_cores_nodes"]["n0"], 1.0)
+        self.assertEqual(m["peak_memory_bytes_nodes"]["n3"], 4000 + 11)  # samples 1-11 fall in the window
 
     def test_verdicts(self):
         self.assertFalse(self.metrics()["generator_bound"])
@@ -273,6 +277,37 @@ class AB(unittest.TestCase):
             self.assertAlmostEqual(b["finalized_tps"]["median"], 1000)
             self.assertAlmostEqual(b["finalized_tps"]["min"], 900)
             self.assertIn("| 1000 |", (out / "summary.md").read_text())
+
+
+class Judged(unittest.TestCase):
+    def test_refusal_records_work_admission_and_exit_reasons(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "node-3.log").write_text(
+                "x INFO start\n\x1b[31mERROR\x1b[0m reth::cli: shutting down due to error err=start selected certified "
+                "runtime: certified history Work admission: EncodedWorkBytes requires 1084835969, configured limit is "
+                "1073741824\nError: start selected certified runtime: certified history Work admission: EncodedWorkBytes "
+                "requires 1084835969, configured limit is 1073741824\n")
+            (d / "node-3.state.json").write_text(json.dumps(dict(ExitCode=1, OOMKilled=False)))
+            (d / "node-1.log").write_text("y ERROR reth::cli: shutting down due to error err=MPT proposal quorum deadline\n")
+            (d / "node-1.state.json").write_text("")
+            r = judged.refusal(d)
+        self.assertEqual(r["work_admission"], dict(node="node-3", admission="certified history Work admission",
+                                                   kind="EncodedWorkBytes", requested_bytes=1084835969,
+                                                   limit_bytes=1073741824))
+        self.assertEqual(r["nodes"]["node-3"]["exit_code"], 1)
+        self.assertIn("quorum deadline", r["nodes"]["node-1"]["exit_reason"])
+
+    def test_summary_marks_busy_windows_functional(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log = synthetic(tmp)
+            m = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000)
+        m["host_load_1m"] = dict(median=10, max=25)
+        s = judged.summary(m, 18)
+        self.assertTrue(s["functional_only"])
+        self.assertEqual(s["submit_to_finalized_s"]["p50"], 3.0)
+        self.assertIn("n0", s["peak_memory_bytes_nodes"])
+        self.assertFalse(judged.summary(dict(m, host_load_1m=dict(median=5, max=12)), 18)["functional_only"])
 
 
 if __name__ == "__main__":

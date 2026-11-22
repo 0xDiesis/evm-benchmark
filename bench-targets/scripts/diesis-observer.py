@@ -140,7 +140,8 @@ def docker_socket():
     return context["Endpoints"]["docker"]["Host"].removeprefix("unix://")
 
 
-def cpu_ns(name, sock):
+def container_stats(name, sock):
+    """(CPU nanoseconds, working-set bytes: usage minus inactive file cache) for one container."""
     conn = DockerConnection(sock)
     try:
         conn.request("GET", f"/{os.environ.get('DIESIS_DOCKER_API', 'v1.47')}/containers/{name}/stats"
@@ -148,9 +149,13 @@ def cpu_ns(name, sock):
         response = conn.getresponse()
         if response.status != 200:
             raise RuntimeError(f"docker stats {response.status}")
-        return json.load(response)["cpu_stats"]["cpu_usage"]["total_usage"]
+        data = json.load(response)
     finally:
         conn.close()
+    memory = data.get("memory_stats", {})
+    stats = memory.get("stats", {})
+    inactive = stats.get("inactive_file", stats.get("total_inactive_file", 0))
+    return data["cpu_stats"]["cpu_usage"]["total_usage"], max(0, memory.get("usage", 0) - inactive)
 
 
 class Observer:
@@ -215,12 +220,13 @@ class Observer:
                 except Exception as error:
                     nodes.append(None)
                     self.err(f"prom {url}: {error}")
+            memory = {}
             for name in self.containers:
                 try:
-                    cpu[name] = cpu_ns(name, self.sock)
+                    cpu[name], memory[name] = container_stats(name, self.sock)
                 except Exception as error:
                     self.err(f"cpu {name}: {error}")
-            self.samples.append((wall, nodes, cpu, os.getloadavg()[0]))
+            self.samples.append((wall, nodes, cpu, os.getloadavg()[0], memory))
             try:
                 if not self.containers:
                     self.stop.wait(5)
@@ -331,6 +337,9 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
             if name in first[2] and finalized_txs:
                 cpu[name] = (ns - first[2][name]) / 1e9 / finalized_txs
         r["cpu_s_per_tx_nodes"] = cpu
+        span = last[0] - first[0]
+        r["cpu_cores_nodes"] = {name: (ns - first[2][name]) / 1e9 / span for name, ns in last[2].items()
+                                if name in first[2] and span > 0}
         r["cpu_s_per_tx_median"] = statistics.median(cpu.values()) if cpu else None
         r["bounds_s"] = [first[0] - start, last[0] - end]
     r["per_block_nodes"] = nodes
@@ -350,6 +359,11 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
     r["pool_pending_start_end"] = [pool[0][1], pool[-1][1]] if pool else None
     r["pool_slope_tx_per_s"] = slope([(t, v) for t, v in pool if full_at is None or t < full_at])
     r["pool_full_at_s"] = full_at
+    peaks = {}
+    for sample in inner:
+        for name, used in (sample[4] if len(sample) > 4 else {}).items():
+            peaks[name] = max(peaks.get(name, 0), used)
+    r["peak_memory_bytes_nodes"] = peaks
     loads = [s[3] for s in inner]
     r["host_load_1m"] = dict(median=statistics.median(loads), max=max(loads)) if loads else None
     r["generator_bound"] = r["attempted_tps"] < 0.95 * target_tps

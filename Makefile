@@ -178,6 +178,11 @@ ab: build ## Interleaved A/B/B/A Diesis runs  (NAME= A= B= ARMS=3 RATES=2000 AB_
 		--warmup $(or $(WARMUP),60) $(if $(AGED),--aged $(AGED)) $(if $(PROBE),--probe $(PROBE)) \
 		$(if $(filter 1 true yes,$(REUSE_FLEET)),--reuse-fleet) $(if $(MAX_LOAD),--max-load $(MAX_LOAD)) $(if $(MAX_RERUNS),--max-reruns $(MAX_RERUNS))
 
+diesis-judged: build ## The judged run on an aged fixture  (TAG= RATE= PROFILE=capped WINDOW=600 MAX_LOAD=18)
+	@test -n "$(TAG)" -a -n "$(RATE)" || { echo "Error: TAG and RATE are required"; exit 2; }
+	@python3 $(SCRIPTS)/judged.py --tag "$(TAG)" --rate $(RATE) --profile $(or $(PROFILE),capped) \
+		--window $(or $(WINDOW),600) --max-load $(or $(MAX_LOAD),18)
+
 diesis-age: build ## Build an aged Diesis fleet  (TAG= BLOCKS=5100 RATE=400)
 	@test -n "$(TAG)" || { echo "Error: TAG is required"; exit 2; }
 	@python3 bench-targets/chains/diesis/fleet.py age --tag "$(TAG)" --blocks $(or $(BLOCKS),5100) --rate $(or $(RATE),400)
