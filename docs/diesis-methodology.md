@@ -193,6 +193,8 @@ first submission in the submit log; the observer and generator share the host cl
 | `generator_bound` | Attempted below 95% of target, the same threshold as the harness's `target hit`. The run measures the client, not the chain |
 | `chain_saturated` | Finalized below 95% of attempted, or rejections above 0.1%, or the pool reached its cap |
 | `validator_exits`, `host_load_1m` | Any validator that exited during the run; the median and max 1-minute host load in the window |
+| `peak_memory_bytes_nodes` | Each validator container's largest memory use over the 5 s samples (Docker stats: usage minus inactive file) |
+| `log_counts` | Per validator, from its log followed for the whole run: `unknown parent vertex` errors, selected-owner Work refusals by `operation` (retried or not) and Work-admission limit errors |
 
 The generator delivers 3,000 TPS on M2 loopback at about 1.1 cores, with requests even
 across all ports. It runs on the benchmark host, and its CPU is part of the recorded host
