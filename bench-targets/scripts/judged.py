@@ -91,6 +91,27 @@ def check_outcome_rule(requested, recorded):
     return requested
 
 
+# Judged validators log to file at info: reth's default (debug) wrote 61 MB in 9 idle minutes on one
+# node and inflates the CPU figures. Diagnostic arms keep debug through BENCH_DIESIS_FILE_LOG_FILTER.
+JUDGED_FILE_LOG_FILTER = "info"
+
+
+def fleet_env(environ, tag, profile):
+    """Fleet environment for a judged run: the aged fleet, its profile, the run alone on the host,
+    and the judged file-log level, set explicitly over any ambient choice."""
+    return dict(environ, DIESIS_AGED_TAG=tag, BENCH_DIESIS_PROFILE=profile, BENCH_DIESIS_MAX_FLEETS="1",
+                BENCH_DIESIS_FILE_LOG_FILTER=JUDGED_FILE_LOG_FILTER)
+
+
+def check_file_log_filter(provenance):
+    """The file-log level the started fleet records; a judged run refuses any other."""
+    value = provenance.get("file_log_filter")
+    if value != JUDGED_FILE_LOG_FILTER:
+        raise SystemExit(f"the judged fleet logs to file at {value!r} "
+                         f"({provenance.get('file_log_filter_source')}), not {JUDGED_FILE_LOG_FILTER}")
+    return value
+
+
 def summary(m, max_load):
     f, r, iv = m["submit_to_finalized_s"], m["submit_to_receipt_s"], m["block_interval_ms"]
     load = m.get("host_load_1m") or {}
@@ -115,6 +136,7 @@ def markdown(record):
              f"- Status: **{record['status']}**", f"- Image: {record.get('image')}",
              f"- Outcome signature rule: {record.get('outcome_signature_rule')} (pinned)",
              f"- Mix: {record.get('mix')}",
+             f"- Validator file log level: {record.get('file_log_filter')}",
              f"- Fixture height at start: {record.get('fixture_height')}"]
     if record.get("cpusets"):
         lines.append("- Validator cpusets: " + ", ".join(f"{k} {v}" for k, v in record["cpusets"].items()))
@@ -194,7 +216,7 @@ def main():
     out = results_base() / "judged" / f"{time.strftime('%Y%m%d-%H%M%S')}-{a.fixture or a.tag}-{a.profile}-{a.rate}"
     out.mkdir(parents=True)
     # Judged runs run alone: the fleet starts only while no other Diesis fleet runs (fleet.py waits).
-    env = dict(os.environ, DIESIS_AGED_TAG=a.tag, BENCH_DIESIS_PROFILE=a.profile, BENCH_DIESIS_MAX_FLEETS="1")
+    env = fleet_env(os.environ, a.tag, a.profile)
     record = dict(tag=a.tag, fixture=a.fixture, restored_copy=restored, profile=a.profile, rate=a.rate,
                   outcome_signature_rule=rule, mix=a.mix,
                   window_s=a.window, warmup_s=a.warmup,
@@ -213,7 +235,9 @@ def main():
             fleet = load_fleet()
             provenance = json.loads((state / "provenance.json").read_text())
             record.update(cpu_base=provenance.get("cpu_base"), cpusets=provenance.get("cpusets"),
+                          file_log_filter=provenance.get("file_log_filter"),
                           other_fleets_at_start=sorted(fleet.running_fleets(exclude={project})))
+            check_file_log_filter(provenance)
             run_dir = out / "run"
             bench = subprocess.run(["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained",
                                     "--tps", str(a.rate), "--duration", str(a.window + a.warmup), "--out", str(run_dir),
@@ -231,6 +255,8 @@ def main():
                     record["other_fleets_at_end"]))
             else:
                 record.update(status="failed", bench_exit=bench.returncode)
+    except SystemExit as error:
+        record.update(status="failed", error=str(error))
     finally:
         subprocess.run([sys.executable, "-B", str(FLEET), "down"], env=env, capture_output=True, text=True)
         if restored:

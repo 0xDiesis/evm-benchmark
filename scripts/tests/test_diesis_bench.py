@@ -299,6 +299,30 @@ class Fleet(unittest.TestCase):
                              cpu_base=4)
         self.assertEqual([beside["services"][n]["cpuset"] for n in fleet.NODES], ["4-5", "6-7", "8-9", "10-11"])
 
+    def test_file_log_filter_is_set_on_validators_only_when_chosen(self):
+        node = lambda: dict(image="x", environment={}, command=["node", "--http", "--log.file.filter=debug"])
+        rendered = lambda: dict(services={**{n: node() for n in fleet.NODES}, "prometheus": dict(ports=[])},
+                                networks={}, volumes={})
+        c = fleet.patch(rendered(), "sha256:abc", {}, {}, file_log_filter="info")
+        for n in fleet.NODES:
+            self.assertEqual(c["services"][n]["command"], ["node", "--http", "--log.file.filter=info"])
+            self.assertNotIn("FLEET_FILE_LOG_FILTER", c["services"][n]["environment"])
+        # Unchosen: the rendered command, so reth's own default (debug) applies.
+        c = fleet.patch(rendered(), "sha256:abc", {}, {})
+        self.assertEqual(c["services"]["node-1"]["command"], ["node", "--http", "--log.file.filter=debug"])
+
+    def test_file_log_filter_comes_from_the_override_then_the_profile(self):
+        self.assertEqual(fleet.read_profile("capped").get("FLEET_FILE_LOG_FILTER"), "info")
+        self.assertIsNone(fleet.read_profile("uncapped").get("FLEET_FILE_LOG_FILTER"))
+        self.assertEqual(fleet.file_log_filter({"FLEET_FILE_LOG_FILTER": "info"}, {}), "info")
+        self.assertEqual(fleet.file_log_filter({"FLEET_FILE_LOG_FILTER": "info"},
+                                               {"BENCH_DIESIS_FILE_LOG_FILTER": "debug"}), "debug")
+        self.assertIsNone(fleet.file_log_filter({}, {}))
+        self.assertEqual(fleet.file_log_filter_record(None), dict(file_log_filter="debug", file_log_filter_source="reth default"))
+        self.assertEqual(fleet.file_log_filter_record("info"), dict(file_log_filter="info", file_log_filter_source="fleet"))
+        with self.assertRaises(SystemExit):
+            fleet.file_log_filter({}, {"BENCH_DIESIS_FILE_LOG_FILTER": "info --http"})
+
     def test_cpu_base_keeps_a_lone_fleet_on_0_to_7(self):
         self.assertEqual(fleet.cpuset_cpus("0-1,4"), {0, 1, 4})
         self.assertEqual(fleet.cpuset_cpus(""), set())
@@ -579,6 +603,19 @@ class Judged(unittest.TestCase):
         self.assertIn("- Mix: judged", md)
         self.assertIn("| SpotTake |", md)
         self.assertIn("reverted", md)
+
+    def test_judged_fleet_logs_to_file_at_info_and_records_it(self):
+        env = judged.fleet_env({"PATH": "/bin", "BENCH_DIESIS_FILE_LOG_FILTER": "debug"}, "t", "capped")
+        self.assertEqual(env["BENCH_DIESIS_FILE_LOG_FILTER"], "info")
+        self.assertEqual((env["DIESIS_AGED_TAG"], env["BENCH_DIESIS_PROFILE"], env["BENCH_DIESIS_MAX_FLEETS"]),
+                         ("t", "capped", "1"))
+        self.assertEqual(judged.check_file_log_filter(dict(file_log_filter="info")), "info")
+        with self.assertRaises(SystemExit):
+            judged.check_file_log_filter(dict(file_log_filter="debug", file_log_filter_source="reth default"))
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="refused", image="i",
+                                  fixture_height=5100, file_log_filter="info",
+                                  refusal=dict(nodes={}, work_admission=None)))
+        self.assertIn("- Validator file log level: info", md)
 
     def test_judged_window_shared_with_another_fleet_is_functional_only(self):
         quiet = dict(functional_only=False)

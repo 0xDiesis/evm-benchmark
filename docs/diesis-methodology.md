@@ -9,7 +9,7 @@ covers:
 ## The official benchmark
 
 EVM targets are judged under the **`capped`** profile:
-- 4 validators, each with 2 pinned CPUs and 4 GiB;
+- 4 validators, each with 2 pinned CPUs and 4 GiB, logging to file at info;
 - 600 s measured windows (after 60 s of warmup);
 - a chain aged past 5,000 blocks;
 - interleaved A B B A arms, at least 3 per side;
@@ -147,6 +147,14 @@ Setup transactions must all succeed. `judged-mix.json` beside `report.json` reco
 
 **Outcome rule.** `judged.py --outcome-rule bls-only|hybrid` is required. A rule that differs
 from the fixture's genesis is refused. The rule is written to `judged.json` and `judged.md`.
+
+**File log level.** Validators' reth file log (`--log.file.filter`) runs at info in judged runs:
+reth's default, debug, wrote 61 MB in 9 idle minutes on one node and inflates CPU figures. The
+capped profile sets `FLEET_FILE_LOG_FILTER=info` and `judged.py` sets
+`BENCH_DIESIS_FILE_LOG_FILTER=info` explicitly, then refuses a fleet that records any other level.
+Diagnostic arms keep debug with `BENCH_DIESIS_FILE_LOG_FILTER=debug`, which wins over the profile.
+The level is recorded in the fleet provenance, in `judged.json`/`judged.md`, and as
+`chain_config.validator_file_log_filter` in each run's `meta.json`.
 
 On the shared M2, do not reserve the host: there is no `compute measure begin --host local`,
 and development comes first. Before each arm, `ab.py` waits up to 10 minutes for 60 s of
