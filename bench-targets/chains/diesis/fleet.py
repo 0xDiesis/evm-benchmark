@@ -33,8 +33,9 @@ Inputs (environment):
                         slot at a runner's next arm, which tears its fleet down and then waits
   BENCH_DIESIS_FILE_LOG_FILTER  validators' reth file-log filter (`--log.file.filter`); wins over the
                         profile's FLEET_FILE_LOG_FILTER. Unset in both, reth's default (debug)
-                        applies. The capped (judged) profile logs to file at info: debug wrote
-                        61 MB in 9 idle minutes on one node and inflates CPU figures
+                        applies. Both profiles log to file at info: debug wrote 61 MB in 9
+                        idle minutes on one node and inflates CPU figures; debug is an explicit
+                        override for diagnostic arms
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they

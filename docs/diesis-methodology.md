@@ -24,7 +24,7 @@ EVM targets are judged under the **`capped`** profile:
 
 **Secondary:** latest→finalized, then the per-block and resource attribution below.
 
-`uncapped` is for diagnosis only.
+`uncapped` is for diagnosis only. Both profiles log to file at info (see File log level).
 
 Judged runs run alone. `judged.py` starts its fleet only while no other Diesis fleet runs, and a
 window with another fleet up at its start or end is marked functional-only.
@@ -154,11 +154,15 @@ The observer reports `taker_fills` (successful takers, how many filled two disti
 taker) on every run and adds the shortfall to `invalid_reasons`; `judged.json`/`judged.md` carry
 `valid`, the reasons and the fills either way.
 
-**File log level.** Validators' reth file log (`--log.file.filter`) runs at info in judged runs:
-reth's default, debug, wrote 61 MB in 9 idle minutes on one node and inflates CPU figures. The
-capped profile sets `FLEET_FILE_LOG_FILTER=info` and `judged.py` sets
-`BENCH_DIESIS_FILE_LOG_FILTER=info` explicitly, then refuses a fleet that records any other level.
-Diagnostic arms keep debug with `BENCH_DIESIS_FILE_LOG_FILTER=debug`, which wins over the profile.
+**File log level.** Validators' reth file log (`--log.file.filter`) runs at info by default:
+reth's own default, debug, wrote 61 MB in 9 idle minutes on one node, keeps debug-gated probe work
+running and inflates CPU figures, and its mismatch with stdout at info makes stdout drop lines. Both
+profiles set `FLEET_FILE_LOG_FILTER=info`, so capped and uncapped differ only in capacity, and
+`judged.py` sets `BENCH_DIESIS_FILE_LOG_FILTER=info` explicitly, then refuses a fleet that records any
+other level. Debug is an explicit override for diagnostic arms: `BENCH_DIESIS_FILE_LOG_FILTER=debug`,
+which wins over the profile, or `filelog=debug` on an `ab.py` side (default `filelog=info`; `+`
+separates several directives). `ab.py` records each side's level in `plan.json` and the levels its
+steps reported in `summary.json`/`summary.md`.
 The level is recorded in the fleet provenance, in `judged.json`/`judged.md`, and as
 `chain_config.validator_file_log_filter` in each run's `meta.json`.
 Timeline marks are info events, so they still land in the file log at info: a 4-validator check with

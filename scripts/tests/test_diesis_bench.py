@@ -341,7 +341,7 @@ class Fleet(unittest.TestCase):
 
     def test_file_log_filter_comes_from_the_override_then_the_profile(self):
         self.assertEqual(fleet.read_profile("capped").get("FLEET_FILE_LOG_FILTER"), "info")
-        self.assertIsNone(fleet.read_profile("uncapped").get("FLEET_FILE_LOG_FILTER"))
+        self.assertEqual(fleet.read_profile("uncapped").get("FLEET_FILE_LOG_FILTER"), "info")
         self.assertEqual(fleet.file_log_filter({"FLEET_FILE_LOG_FILTER": "info"}, {}), "info")
         self.assertEqual(fleet.file_log_filter({"FLEET_FILE_LOG_FILTER": "info"},
                                                {"BENCH_DIESIS_FILE_LOG_FILTER": "debug"}), "debug")
@@ -541,6 +541,16 @@ class AB(unittest.TestCase):
         with self.assertRaises(SystemExit):
             ab.parse_side("outcome=ml-dsa")
 
+    def test_side_file_log_level_defaults_to_info_and_reaches_the_fleet(self):
+        self.assertEqual(ab.parse_side("")["filelog"], "info")
+        self.assertEqual(ab.parse_side("filelog=debug")["filelog"], "debug")
+        with self.assertRaises(SystemExit):
+            ab.parse_side("filelog=info --http")
+        self.assertEqual(ab.parse_side("filelog=info+diesis_node=debug")["filelog"], "info,diesis_node=debug")
+        self.assertEqual(ab.side_env({}, ab.parse_side("filelog=debug"), 0)["BENCH_DIESIS_FILE_LOG_FILTER"], "debug")
+        self.assertEqual(ab.side_env({"BENCH_DIESIS_FILE_LOG_FILTER": "debug"}, ab.parse_side(""), 0)
+                         ["BENCH_DIESIS_FILE_LOG_FILTER"], "info")
+
     def test_probe_step_and_overload(self):
         plan = dict(rates=[1000], duration=300, warmup=0, probe="2:30", max_load=40)
         self.assertEqual(ab.steps_of(plan), [("probe", 2, 30, 0), ("1000", 1000, 300, 0)])
@@ -561,12 +571,17 @@ class AB(unittest.TestCase):
                 base = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000)
             plan = dict(sides={"a": ab.parse_side("profile=capped"), "b": ab.parse_side("profile=uncapped")},
                         order=list("abba"), rates=[1000], note="Both sides: DIESIS_X=2")
+            plan["sides"]["b"] = ab.parse_side("profile=uncapped,filelog=debug")
             for (i, key), factor in zip(enumerate(plan["order"], 1), (1.0, 1.1, 0.9, 1.2)):
                 d = out / f"arm-{i}{key}" / "1000"
                 d.mkdir(parents=True)
                 (d / "diesis-metrics.json").write_text(json.dumps(dict(base, finalized_tps=1000 * factor)))
+                level = plan["sides"][key]["filelog"]
+                (d / "meta.json").write_text(json.dumps(dict(chain_config=dict(validator_file_log_filter=level))))
             ab.summarize(out, plan)
             summary = json.loads((out / "summary.json").read_text())
+            self.assertEqual(summary["a"]["file_log_levels"], ["info"])
+            self.assertEqual(summary["b"]["file_log_levels"], ["debug"])
             b = summary["b"]["rates"]["1000"]
             self.assertEqual(b["n"], 2)
             self.assertAlmostEqual(b["finalized_tps"]["median"], 1000)
@@ -575,6 +590,8 @@ class AB(unittest.TestCase):
             self.assertIn("| 1000 |", md)
             self.assertIn("> Both sides: DIESIS_X=2", md)
             self.assertIn("host_load_median", md)
+            self.assertIn("file log debug", md)
+            self.assertIn("file log info", md)
 
 
 class Judged(unittest.TestCase):
