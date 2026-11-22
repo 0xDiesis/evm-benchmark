@@ -1,26 +1,23 @@
-.PHONY: up down restart bench bench-sustained bench-ceiling status
+.PHONY: up down restart image bench bench-sustained bench-ceiling status
 
 SCRIPT_DIR := $(shell cd "$(dir $(lastword $(MAKEFILE_LIST)))" && pwd)
 BENCH_REPO_DIR := $(shell cd "$(SCRIPT_DIR)/../../.." && pwd)
 DIESIS_REPO_DIR ?= $(abspath $(BENCH_REPO_DIR)/../diesis)
 
-up: ## Start the Diesis e2e cluster (requires the Diesis source repo at $(DIESIS_REPO_DIR))
-	@if [ ! -d "$(DIESIS_REPO_DIR)" ]; then \
-	  echo "ERROR: Diesis source repo not found at $(DIESIS_REPO_DIR)."; \
-	  echo "       Set DIESIS_REPO_DIR to a checkout of the Diesis repository,"; \
-	  echo "       or bring up your own Diesis cluster manually before running benchmarks."; \
-	  exit 2; \
-	fi
-	$(MAKE) -C "$(DIESIS_REPO_DIR)" e2e-up-release
+FLEET := python3 "$(SCRIPT_DIR)/fleet.py"
+export DIESIS_REPO_DIR
 
-down: ## Stop the Diesis e2e cluster (requires the Diesis source repo at $(DIESIS_REPO_DIR))
-	@if [ ! -d "$(DIESIS_REPO_DIR)" ]; then \
-	  echo "ERROR: Diesis source repo not found at $(DIESIS_REPO_DIR)."; \
-	  exit 2; \
-	fi
-	$(MAKE) -C "$(DIESIS_REPO_DIR)" e2e-down
+up: ## Start a fresh Diesis fleet from an existing image (DIESIS_IMAGE_TAG, BENCH_DIESIS_PROFILE)
+	$(FLEET) reset
 
-restart: down up ## Restart the Diesis e2e cluster
+down: ## Remove the fresh fleet (an aged fleet, DIESIS_AGED_TAG, is only stopped)
+	$(FLEET) down
+
+restart: ## Restart the fleet from a fresh genesis
+	$(FLEET) reset
+
+image: ## Build diesis-node-e2e:<HEAD>-release from a clean node checkout (run through the compute broker)
+	bash "$(SCRIPT_DIR)/build-image.sh" "$(DIESIS_REPO_DIR)"
 
 bench: ## Run the default burst benchmark against Diesis
 	@bash ./run-bench.sh

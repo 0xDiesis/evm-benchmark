@@ -87,6 +87,12 @@ if [[ "${CHAIN}" == "scroll" || "${CHAIN}" == "arbitrum" ]]; then
     [[ "${FUND_SET}" == "false" ]] && FUND="false"
 fi
 
+if [[ "${CHAIN}" == "diesis" && "${MODE}" == "sustained" && "${WORKERS_SET}" == "false" ]]; then
+    # Sustained workers each wait for their RPC reply, so delivery is capped near
+    # workers / RTT. 256 in flight delivers 3,000 TPS on loopback (docs/diesis-methodology.md).
+    WORKERS="${BENCH_DIESIS_WORKERS:-256}"
+fi
+
 RUN_TAG="${TAG:-${ENV}}"
 
 default_finality_confirmations_for_env() {
@@ -254,6 +260,16 @@ geo_chain_overrides() {
 # Always restart to ensure a clean state between runs. This prevents warm-cache
 # effects and leftover TC rules from skewing results across profiles.
 BASE_OVERRIDES="$(default_chain_overrides "${CHAIN}")"
+if [[ "${CHAIN}" == "diesis" ]]; then
+    # The fleet's resource profile (BENCH_DIESIS_PROFILE, chains/diesis/profiles/) owns the
+    # validator configuration; E2E_*/DIESIS_* in the environment still override it.
+    BASE_OVERRIDES=""
+    if [[ "${REBUILD}" == "true" ]]; then
+        echo "ERROR: fleet.py never builds. Build the image with bench-targets/chains/diesis/build-image.sh" >&2
+        echo "       through the compute broker, then set DIESIS_IMAGE_TAG (default <checkout HEAD>-release)." >&2
+        exit 2
+    fi
+fi
 GEO_OVERRIDES=""
 if [[ "${CHAIN}" == "diesis" ]]; then
     GEO_OVERRIDES="$(geo_chain_overrides "${ENV}")"
@@ -376,7 +392,7 @@ fi
 PROMETHEUS_DIAGNOSTICS="${SCRIPT_DIR}/prometheus-diagnostics.py"
 PROMETHEUS_URL="${BENCH_PROMETHEUS_URL:-}"
 if [[ -z "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
-    PROMETHEUS_URL="http://localhost:9090"
+    PROMETHEUS_URL="http://localhost:19090"
 fi
 HARNESS_METRICS_URL="${BENCH_HARNESS_METRICS_URL:-}"
 if [[ -z "${HARNESS_METRICS_URL}" && -n "${PROMETHEUS_URL}" && "${CHAIN}" == "diesis" ]]; then
@@ -403,6 +419,23 @@ fi
 # isolated-block fallback can over-count confirmations when a chain produces
 # non-benchmark transactions or when block transaction metadata lags receipts.
 export BENCH_ASSUME_ISOLATED_BLOCKS="${BENCH_ASSUME_ISOLATED_BLOCKS:-false}"
+
+# ── Diesis chain-side observer (sustained) ──────────────────────────────
+# The harness logs every accepted transaction's submission time; the observer samples
+# blocks, finality, Prometheus and container CPU, and joins them after the load
+# (docs/diesis-methodology.md). BENCH_WARMUP_SECS excludes the start of the load.
+OBSERVER_PID=""
+if [[ "${CHAIN}" == "diesis" ]]; then
+    [[ -n "${CHAIN_FLEET_PROVENANCE_CMD:-}" ]] && eval "${CHAIN_FLEET_PROVENANCE_CMD}" > "${RUN_DIR}/fleet-provenance.json" 2>/dev/null || true
+fi
+if [[ "${CHAIN}" == "diesis" && "${MODE}" == "sustained" && "${BENCH_DIESIS_OBSERVE:-true}" == "true" ]]; then
+    export BENCH_SUBMIT_LOG="${RUN_DIR}/submit-log.csv"
+    export BENCH_PRESIGN_HEADROOM="${BENCH_PRESIGN_HEADROOM:-1.1}"
+    python3 "${SCRIPT_DIR}/diesis-observer.py" watch --run-dir "${RUN_DIR}" --target-tps "${TPS}" \
+        --duration "${DURATION}" --warmup "${BENCH_WARMUP_SECS:-0}" --drain "${BENCH_DIESIS_DRAIN_SECS:-150}" \
+        > "${RUN_DIR}/observer.log" 2>&1 &
+    OBSERVER_PID=$!
+fi
 
 # ── Generate metadata ────────────────────────────────────────────────────
 if [[ -f "${SCRIPT_DIR}/meta.sh" ]]; then
@@ -469,6 +502,13 @@ else
         | tee "${RUN_DIR}/console.log"
 fi
 HARNESS_EXIT=${PIPESTATUS[0]}
+
+if [[ -n "${OBSERVER_PID}" ]]; then
+    echo "Waiting for the chain-side observer (finality drain up to ${BENCH_DIESIS_DRAIN_SECS:-150}s)..."
+    kill -USR1 "${OBSERVER_PID}" 2>/dev/null || true
+    wait "${OBSERVER_PID}" || echo "WARNING: chain-side observer failed; see ${RUN_DIR}/observer.log" >&2
+    cat "${RUN_DIR}/observer.log"
+fi
 
 if [[ "${HARNESS_EXIT}" -ne 0 ]]; then
     echo "ERROR: Harness exited with code ${HARNESS_EXIT}" >&2

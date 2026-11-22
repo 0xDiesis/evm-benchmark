@@ -368,11 +368,11 @@ make compare CHAINS="diesis sonic" ENV=geo-global
 
 ## Registered Chains
 
-View with `make chains`. Currently registered:
+View with `make chains`. Currently registered (Diesis fleet, profiles, aged chains, A/B and the official run rule: [docs/diesis-methodology.md](docs/diesis-methodology.md)):
 
 | Chain | Type | Validators | Port Range |
 |-------|------|------------|------------|
-| `diesis` | L1 — Mysticeti BFT | 4 | 8545-8575 |
+| `diesis` | L1 — Mysticeti BFT | 4 | 18545-18575 |
 | `sonic` | L1 — Lachesis aBFT | 4 | 18545-18845 |
 | `sei` | L1 — sei-tendermint BFT | 4 | 28545-28551 |
 | `avalanche` | L1 — Snowman consensus | 5 | 9650 |

@@ -49,7 +49,7 @@ if ! curl -sf "${DIESIS_RPC%%,*}" \
     -X POST -H "Content-Type: application/json" \
     -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' >/dev/null 2>&1; then
     echo "Diesis node is not reachable at ${DIESIS_RPC%%,*}"
-    echo "Start it with: make -C \"${DIESIS_REPO_DIR}\" e2e-up-release"
+    echo "Start it with: python3 ${SCRIPT_DIR}/fleet.py reset   (see docs/diesis-methodology.md)"
     exit 1
 fi
 

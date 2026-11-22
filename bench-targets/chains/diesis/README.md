@@ -1,20 +1,17 @@
 # Diesis — Benchmark Target
 
-This target adapter runs the chain-agnostic benchmark harness against a Diesis network.
+The Diesis target runs the harness against a four-validator fleet started by `fleet.py`. The
+fleet comes from an existing `diesis-node-e2e` image and the node checkout that matches it.
+Methodology, the official run rule and metric definitions:
+[docs/diesis-methodology.md](../../../docs/diesis-methodology.md).
 
-Operational playbooks for the Diesis chain (cluster bring-up, sweeps, geo profiles) require the Diesis source repository. If you have access, set `DIESIS_REPO_DIR` to its path; otherwise, scripts in this directory will exit with a clear error.
-
-## Assumptions
-
-- If you have a checkout of the Diesis source repository, place it at `../diesis/` (or set `DIESIS_REPO_DIR` to its path). Without it, only the chain-targeting scripts that talk to an already-running cluster will work.
-- Diesis e2e validators expose RPC on `18545, 18555, 18565, 18575`
-- The default benchmark keys are the deterministic validator keys from Diesis genesis
-
-## Quick Start
+## Quick start
 
 ```bash
-make up
-make bench
+# Image for the checkout's HEAD (heavy; run through the compute broker on shared hosts)
+make image DIESIS_REPO_DIR=<node-checkout>
+# One sustained run under the official profile, from a fresh genesis
+make -C ../../.. bench CHAIN=diesis MODE=sustained TPS=1000 DURATION=60
 make status
 make down
 ```
@@ -31,13 +28,22 @@ make bench CHAIN=diesis FLEET=external \
   DIESIS_WS=ws://127.0.0.1:38546 MODE=sustained TPS=1000 DURATION=60
 ```
 
-## Defaults
+## Inputs
 
-- Chain ID: `DIESIS_CHAIN_ID` (`CHAIN_ID=` from make), else the first endpoint's `eth_chainId` (e2e: `19803`)
-- RPC endpoints: `http://localhost:18545,http://localhost:18555,http://localhost:18565,http://localhost:18575`
-- WS endpoint: `ws://localhost:18546`
-- Benchmark keys: deterministic validator keys `1-4`
+| Variable | Meaning |
+|---|---|
+| `DIESIS_FLEET` / `FLEET=` | `external` targets a running fleet at `DIESIS_RPC` / `DIESIS_WS`; unset runs `fleet.py` |
+| `DIESIS_CHAIN_ID` / `CHAIN_ID=` | Chain ID; default the first endpoint's `eth_chainId` |
+| `DIESIS_REPO_DIR` | Node checkout rendered for the fleet (default `../diesis` beside this repository) |
+| `DIESIS_IMAGE_TAG` / `IMAGE=` | `diesis-node-e2e` tag (default `<checkout HEAD>-release`); must exist |
+| `BENCH_DIESIS_PROFILE` / `PROFILE=` | `capped` (default, the run rule) or `uncapped` (diagnosis), from `profiles/` |
+| `DIESIS_AGED_TAG` / `AGED=` | Reuse a stopped aged fleet (`make diesis-age TAG=…`) |
+| `BENCH_DIESIS_ENV`, `E2E_*` | Validator overrides on top of the profile (ambient `DIESIS_*` only feed compose interpolation) |
+| `BENCH_WARMUP_SECS` / `WARMUP=` | Seconds of load excluded from the measured window |
 
-Override `DIESIS_REPO_DIR`, `DIESIS_RPC`, `DIESIS_WS`, `DIESIS_CHAIN_ID`, `BENCH_KEY`, `BENCH_NAME`, or `BENCH_OUT` as needed.
+## Endpoints
 
-This README intentionally stays adapter-focused. Diesis comparison methodology and benchmarking recommendations are maintained in the Diesis repo docs.
+- Chain ID `19803` (e2e genesis; discovered through `eth_chainId`).
+- RPC `127.0.0.1:18545, 18555, 18565, 18575`; WS `127.0.0.1:18546`.
+- Metrics `127.0.0.1:19101-19104`; Prometheus `127.0.0.1:19090`.
+- Benchmark keys: the deterministic validator keys `1-4`. `--fund` provisions more senders.

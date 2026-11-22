@@ -113,10 +113,9 @@ for value in ${SWEEP_VALUES}; do
 
     # Export the parameter and restart Diesis
     export "${SWEEP_PARAM}=${value}"
-    log_info "Stopping Diesis..."
-    make -C "${DIESIS_REPO_DIR}" e2e-down 2>&1 | tail -3 || true
-    log_info "Starting Diesis with ${SWEEP_PARAM}=${value}..."
-    if ! make -C "${DIESIS_REPO_DIR}" e2e-up-release 2>&1 | tail -5; then
+    log_info "Restarting Diesis with ${SWEEP_PARAM}=${value}..."
+    eval "${CHAIN_DOWN_CMD}" 2>&1 | tail -3 || true
+    if ! eval "${CHAIN_UP_CMD}" 2>&1 | tail -5; then
         log_error "Failed to start Diesis with ${SWEEP_PARAM}=${value}, skipping"
         FAILED_VALUES+=("${value}")
         continue
