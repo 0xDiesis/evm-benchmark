@@ -15,7 +15,8 @@ Each arm runs one sustained bench.sh step per rate (fresh genesis per step, or a
 the aged fleet --aged on its own volumes). --probe TPS:SECONDS adds a low-rate idle probe as
 the arm's first step; --reuse-fleet runs the arm's later steps on the fleet its first step
 started (DIESIS_FLEET=external). --max-load reruns an arm, on a fresh fleet, when any of its
-windows saw a 1-minute host load above the limit (up to two reruns, all recorded). Before each arm the host must be quiet for 60 s
+windows saw a 1-minute host load above the limit (--max-reruns, default 1); an arm still
+over the limit after that is kept and counted as functional-only in the summary. Before each arm the host must be quiet for 60 s
 (1-minute load below 8, no compiler or docker build) within 10 minutes; the outcome is
 recorded, never forced: no exclusive measurement window is taken. Re-running with the same
 --name skips completed steps and retries failed ones once. Results:
@@ -143,6 +144,8 @@ def summarize(out, plan):
             for verdict in ("generator_bound", "chain_saturated"):
                 row[verdict] = sum(bool(s.get(verdict)) for s in steps)
             row["pool_full"] = sum(s.get("pool_full_at_s") is not None for s in steps)
+            row["functional_only"] = sum((out / f"arm-{i}{key}" / "functional-only.json").exists() for i in arms
+                                         if step_metrics(out, i, key, rate))
             row["finalized_agreement"] = sum(bool((s.get("finalized_agreement") or {}).get("agree")) for s in steps)
             summary[key]["rates"][str(rate)] = row
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
@@ -161,12 +164,13 @@ def summarize(out, plan):
         c = data["config"]
         lines += [f"## {key.upper()}: {c.get('name') or c['profile']} — {c['profile']} image={c.get('image') or 'HEAD'} "
                   f"{' '.join(c['env'])}", "",
-                  "| offered | " + " | ".join(cols) + " | gen-bound | saturated | pool full | agree |",
-                  "|---" * (len(cols) + 5) + "|"]
+                  "| offered | " + " | ".join(cols) + " | gen-bound | saturated | pool full | agree | functional-only |",
+                  "|---" * (len(cols) + 6) + "|"]
         for rate, row in data["rates"].items():
             lines.append(f"| {rate} | " + " | ".join(fmt(row[c]) for c in cols)
                          + f" | {row['generator_bound']}/{row['n']} | {row['chain_saturated']}/{row['n']}"
-                         f" | {row['pool_full']}/{row['n']} | {row['finalized_agreement']}/{row['n']} |")
+                         f" | {row['pool_full']}/{row['n']} | {row['finalized_agreement']}/{row['n']}"
+                         f" | {row['functional_only']}/{row['n']} |")
         lines.append("")
     (out / "summary.md").write_text("\n".join(lines) + "\n")
 
@@ -242,6 +246,8 @@ def main():
     p.add_argument("--probe", help="TPS:SECONDS idle probe as each arm's first step, e.g. 2:30")
     p.add_argument("--reuse-fleet", action="store_true", help="Run each arm's later steps on its first step's fleet")
     p.add_argument("--max-load", type=float, help="Rerun an arm whose windows saw a higher 1-minute host load")
+    p.add_argument("--max-reruns", type=int, default=1,
+                   help="Reruns per overloaded arm; one still overloaded is kept and marked functional-only")
     p.add_argument("--no-quiet-wait", action="store_true")
     p.add_argument("--summarize-only", action="store_true")
     a = p.parse_args()
@@ -258,18 +264,25 @@ def main():
             raise SystemExit("--probe must be TPS:SECONDS")
         plan = dict(sides=sides, order=schedule(a.arms, bool(a.b)), rates=[int(r) for r in a.rates.split(",")],
                     duration=a.duration, warmup=a.warmup, aged=a.aged, probe=a.probe, reuse_fleet=a.reuse_fleet,
-                    max_load=a.max_load, created=time.time())
+                    max_load=a.max_load, max_reruns=a.max_reruns, created=time.time())
         plan_path.write_text(json.dumps(plan, indent=2) + "\n")
     if a.summarize_only:
         return summarize(out, plan)
     with (out / "ab.log").open("a") as log:
         for attempt in (1, 2):
             for i, key in enumerate(plan["order"], 1):
-                for rerun in range(3):
+                reruns = plan.get("max_reruns", 1)
+                for rerun in range(reruns + 1):
                     if not run_arm(out, i, key, plan, log, attempt, a.no_quiet_wait):
                         break
                     hot = overloaded(out, i, key, plan)
-                    if not hot or rerun == 2:
+                    if hot and rerun == reruns:
+                        # Kept, but not a performance result: the host stayed busy.
+                        (out / f"arm-{i}{key}" / "functional-only.json").write_text(
+                            json.dumps(dict(host_load_max=hot, limit=plan["max_load"])) + "\n")
+                        log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} host load {hot:.0f} above "
+                                  f"{plan['max_load']} after {reruns} rerun(s): kept as functional-only\n")
+                    if not hot or rerun == reruns:
                         break
                     arm_dir = out / f"arm-{i}{key}"
                     log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} host load {hot:.0f} above "

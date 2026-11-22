@@ -176,7 +176,7 @@ ab: build ## Interleaved A/B/B/A Diesis runs  (NAME= A= B= ARMS=3 RATES=2000 AB_
 	@python3 $(SCRIPTS)/ab.py --name "$(NAME)" --a "$(or $(A),profile=capped)" $(if $(B),--b "$(B)") \
 		--arms $(or $(ARMS),3) --rates "$(or $(RATES),2000)" --duration $(or $(AB_DURATION),660) \
 		--warmup $(or $(WARMUP),60) $(if $(AGED),--aged $(AGED)) $(if $(PROBE),--probe $(PROBE)) \
-		$(if $(filter 1 true yes,$(REUSE_FLEET)),--reuse-fleet) $(if $(MAX_LOAD),--max-load $(MAX_LOAD))
+		$(if $(filter 1 true yes,$(REUSE_FLEET)),--reuse-fleet) $(if $(MAX_LOAD),--max-load $(MAX_LOAD)) $(if $(MAX_RERUNS),--max-reruns $(MAX_RERUNS))
 
 diesis-age: build ## Build an aged Diesis fleet  (TAG= BLOCKS=5100 RATE=400)
 	@test -n "$(TAG)" || { echo "Error: TAG is required"; exit 2; }
