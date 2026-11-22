@@ -149,6 +149,7 @@ class Fleet(unittest.TestCase):
         self.assertEqual(n4["ports"][0]["host_ip"], "127.0.0.1")
         self.assertNotIn("build", n4)
         self.assertEqual(c["volumes"], {"data": {"name": "diesis-bench_data"}})
+        self.assertEqual(c["networks"], {"n": {"name": "diesis-bench_n"}})
         free = fleet.patch(json.loads(json.dumps(rendered)), "sha256:abc", {}, {})
         self.assertNotIn("cpus", free["services"]["node-1"])
 

@@ -214,7 +214,8 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=FR
     # The render names volumes after its own default project ("docker_..."), shared with any
     # `make e2e-up` cluster; give each fleet project its own.
     volumes = {k: dict(v, name=f"{project}_{k}") for k, v in rendered.get("volumes", {}).items() if k in used}
-    return dict(services=services, networks=rendered["networks"], volumes=volumes)
+    networks = {k: dict(v, name=f"{project}_{k}") for k, v in rendered["networks"].items()}
+    return dict(services=services, networks=networks, volumes=volumes)
 
 
 # ---- ownership -----------------------------------------------------------------------
@@ -283,6 +284,13 @@ def start(project, aged_tag=None):
         stop_project(p)
     for name, _, _ in others:
         sh(["docker", "rm", "-f", name], check=False, capture=True)
+    # The e2e network has a fixed subnet, so a stopped fleet's network blocks the next one.
+    for p in sorted({p for _, p, _ in others}):
+        path = last_compose(p)
+        if path:
+            for network in json.loads(path.read_text()).get("networks", {}).values():
+                if network.get("name", "").startswith(p + "_"):
+                    sh(["docker", "network", "rm", network["name"]], check=False, capture=True)
     if running_project() != project and port_holders():
         raise SystemExit(f"Benchmark ports in use: {port_holders()}")
     repo = checkout()
@@ -299,7 +307,24 @@ def start(project, aged_tag=None):
     say(f"{project}: {ref} ({image_id[:19]}) profile={profile} checkout={repo}")
     sh([*compose_cmd(project, path), "up", "-d", "--no-build", "--pull", "never", "--remove-orphans"],
        env=compose_env(), timeout=600)
-    return wait_live()
+    try:
+        return wait_live()
+    except SystemExit:
+        capture_failure(directory, compose)
+        raise
+
+
+def capture_failure(directory, compose):
+    """Keep each validator's log tail and container state when a fleet does not come up."""
+    out = directory / f"failed-start-{time.strftime('%Y%m%d-%H%M%S')}"
+    out.mkdir(parents=True, exist_ok=True)
+    for name in NODES:
+        container = compose["services"][name].get("container_name", name)
+        logs = sh(["docker", "logs", "--tail", "400", container], check=False, capture=True)
+        (out / f"{name}.log").write_text(logs.stdout + logs.stderr)
+        state = sh(["docker", "inspect", "--format", "{{json .State}}", container], check=False, capture=True)
+        (out / f"{name}.state.json").write_text(state.stdout)
+    say(f"validator logs saved to {out}")
 
 
 def cmd_reset(_a):
