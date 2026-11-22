@@ -4,8 +4,8 @@ use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
 use crate::submission::{BlockTracker, LatencyTracker, Submitter};
 use crate::types::{
-    SubmissionErrorSummary, SustainedResult, TestMode, WindowEntry, benchmark_validity,
-    merge_submission_error_summaries,
+    Mix, SubmissionErrorSummary, SustainedResult, TestMode, TransactionType, WindowEntry,
+    benchmark_validity, merge_submission_error_summaries,
 };
 use alloy_primitives::{Address, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
@@ -65,7 +65,7 @@ fn presign_tx_count(target_tps: usize, duration_secs: u64, headroom: f64) -> usi
 /// Accepted transactions with their submission wall-clock time, written when
 /// `BENCH_SUBMIT_LOG` names a file, so an external observer can join each hash
 /// to the block that included it and the time that block finalized.
-type SubmitLog = Arc<std::sync::Mutex<Vec<(B256, u64)>>>;
+type SubmitLog = Arc<std::sync::Mutex<Vec<(B256, u64, TransactionType)>>>;
 
 fn unix_micros(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
@@ -73,12 +73,17 @@ fn unix_micros(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn write_submit_log(path: &std::path::Path, entries: &[(B256, u64)]) -> std::io::Result<()> {
+/// Write every accepted transaction's hash, wall-clock submit time and method.
+/// The Diesis observer joins it with the chain's blocks and receipts.
+fn write_submit_log(
+    path: &std::path::Path,
+    entries: &[(B256, u64, TransactionType)],
+) -> std::io::Result<()> {
     use std::io::Write;
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(out, "hash,submit_unix_us")?;
-    for (hash, micros) in entries {
-        writeln!(out, "{hash:?},{micros}")?;
+    writeln!(out, "hash,submit_unix_us,method")?;
+    for (hash, micros, method) in entries {
+        writeln!(out, "{hash:?},{micros},{method:?}")?;
     }
     out.flush()
 }
@@ -200,66 +205,79 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         );
     }
 
-    let recipient = Address::with_last_byte(0x42);
-    let mut sender_batches = Vec::new();
-    let evm_contracts = if config.test_mode == TestMode::Evm {
-        Some(super::evm_contracts(config)?)
+    // The judged mix sets up its own state and signs one plan in order; the
+    // other workloads sign per sender and interleave.
+    let pre_signed = if config.mix == Mix::Judged {
+        let (pool, record) =
+            super::judged::prepare(config, &client, &sender_keys, gas_price, total_txs).await?;
+        let path = config.output.with_file_name("judged-mix.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&record)?)
+            .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", path.display(), e))?;
+        pool
     } else {
-        None
-    };
+        let recipient = Address::with_last_byte(0x42);
+        let mut sender_batches = Vec::new();
+        let evm_contracts = if config.test_mode == TestMode::Evm {
+            Some(super::evm_contracts(config)?)
+        } else {
+            None
+        };
 
-    for (i, key) in sender_keys.iter().enumerate() {
-        let count = signer_transaction_count(total_txs, num_keys, i);
-        if count == 0 {
-            continue;
+        for (i, key) in sender_keys.iter().enumerate() {
+            let count = signer_transaction_count(total_txs, num_keys, i);
+            if count == 0 {
+                continue;
+            }
+
+            let signer = PrivateKeySigner::from_str(key)
+                .map_err(|e| anyhow::anyhow!("Failed to parse sender key {}: {}", i, e))?;
+            let account = signer.address();
+
+            let nonce_payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getTransactionCount",
+                "params": [format!("{:?}", account), "pending"],
+                "id": 1
+            });
+            let resp = client
+                .post(config.rpc.as_str())
+                .json(&nonce_payload)
+                .send()
+                .await?;
+            let result: serde_json::Value = resp.json().await?;
+            let nonce_hex = result
+                .get("result")
+                .and_then(|r| r.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Failed to get nonce for sender {}", i))?;
+            let nonce = u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16)?;
+
+            let signed = if let Some(ref contracts) = evm_contracts {
+                let mut generator = EvmMixGenerator::new(
+                    contracts.clone(),
+                    super::evm_mix_config(contracts),
+                    vec![account],
+                    config.chain_id,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
+                let descs = generator.generate_batch(count);
+                EvmMixGenerator::sign_batch(&descs, &signer, nonce, gas_price, config.chain_id)
+                    .map_err(|e| {
+                        anyhow::anyhow!("EVM pre-signing failed for sender {}: {}", i, e)
+                    })?
+            } else {
+                let tx_data: Vec<(Address, U256)> =
+                    (0..count).map(|_| (recipient, U256::from(1u32))).collect();
+                let batch_signer =
+                    BatchSigner::new_with_gas_price(signer, nonce, gas_price, config.chain_id);
+                batch_signer
+                    .sign_batch_parallel(tx_data)
+                    .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?
+            };
+            sender_batches.push(signed);
         }
 
-        let signer = PrivateKeySigner::from_str(key)
-            .map_err(|e| anyhow::anyhow!("Failed to parse sender key {}: {}", i, e))?;
-        let account = signer.address();
-
-        let nonce_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_getTransactionCount",
-            "params": [format!("{:?}", account), "pending"],
-            "id": 1
-        });
-        let resp = client
-            .post(config.rpc.as_str())
-            .json(&nonce_payload)
-            .send()
-            .await?;
-        let result: serde_json::Value = resp.json().await?;
-        let nonce_hex = result
-            .get("result")
-            .and_then(|r| r.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Failed to get nonce for sender {}", i))?;
-        let nonce = u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16)?;
-
-        let signed = if let Some(ref contracts) = evm_contracts {
-            let mut generator = EvmMixGenerator::new(
-                contracts.clone(),
-                super::evm_mix_config(contracts),
-                vec![account],
-                config.chain_id,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
-            let descs = generator.generate_batch(count);
-            EvmMixGenerator::sign_batch(&descs, &signer, nonce, gas_price, config.chain_id)
-                .map_err(|e| anyhow::anyhow!("EVM pre-signing failed for sender {}: {}", i, e))?
-        } else {
-            let tx_data: Vec<(Address, U256)> =
-                (0..count).map(|_| (recipient, U256::from(1u32))).collect();
-            let batch_signer =
-                BatchSigner::new_with_gas_price(signer, nonce, gas_price, config.chain_id);
-            batch_signer
-                .sign_batch_parallel(tx_data)
-                .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?
-        };
-        sender_batches.push(signed);
-    }
-
-    let pre_signed = interleave_sender_batches(sender_batches);
+        interleave_sender_batches(sender_batches)
+    };
 
     if !config.quiet {
         println!("Pre-signing complete. Starting benchmark...");
@@ -419,7 +437,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         let summaries = submission_errors.lock().await.clone();
         merge_submission_error_summaries(summaries)
     };
-    let (valid, invalid_reason) = benchmark_validity(attempted, sent, errors, confirmed, pending);
+    let outcomes = tracker.outcome_counts();
+    let (valid, invalid_reason) = crate::types::with_revert_reason(
+        benchmark_validity(attempted, sent, errors, confirmed, pending),
+        outcomes,
+    );
 
     let actual_tps = actual_tps(confirmed, total_duration);
 
@@ -436,6 +458,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         confirmed,
         pending,
         errors,
+        outcomes,
         valid,
         invalid_reason,
         submission_errors,
@@ -525,9 +548,12 @@ async fn run_worker(
                     }
                     if let Some(log) = &submit_log {
                         let micros = unix_micros(submit_wall);
-                        log.lock()
-                            .unwrap()
-                            .extend(result.accepted_txs.iter().map(|tx| (tx.hash, micros)));
+                        log.lock().unwrap().extend(
+                            result
+                                .accepted_txs
+                                .iter()
+                                .map(|tx| (tx.hash, micros, tx.method)),
+                        );
                     }
                     metrics.inc_transactions_submitted(accepted as u64);
                     sent_count.fetch_add(accepted, Ordering::SeqCst);
@@ -592,8 +618,8 @@ async fn update_timeline(
 mod tests {
     use super::*;
     use crate::config::{Config, SubmissionMethod};
+    use crate::types::SignedTxWithMetadata;
     use crate::types::{ExecutionMode, TestMode};
-    use crate::types::{SignedTxWithMetadata, TransactionType};
     use alloy_primitives::B256;
     use prometheus::Registry;
     use std::sync::atomic::Ordering;
@@ -787,6 +813,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         }
     }
 
@@ -846,6 +873,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         };
         let _ = config;
     }
@@ -895,6 +923,7 @@ mod tests {
             accepted: 500,
             confirmed: 480,
             pending: 10,
+            outcomes: Default::default(),
             errors: 10,
             valid: false,
             invalid_reason: Some("10 transaction submissions failed".into()),
@@ -1000,13 +1029,20 @@ mod tests {
     fn test_submit_log_writes_hash_and_micros() {
         let path =
             std::env::temp_dir().join(format!("evm-bench-submit-log-{}.csv", std::process::id()));
-        write_submit_log(&path, &[(B256::with_last_byte(7), 1_795_000_000_123_456)])
-            .expect("write");
+        write_submit_log(
+            &path,
+            &[(
+                B256::with_last_byte(7),
+                1_795_000_000_123_456,
+                TransactionType::ERC20Transfer,
+            )],
+        )
+        .expect("write");
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(
             text,
             format!(
-                "hash,submit_unix_us\n{:?},1795000000123456\n",
+                "hash,submit_unix_us,method\n{:?},1795000000123456,ERC20Transfer\n",
                 B256::with_last_byte(7)
             )
         );
@@ -1124,6 +1160,7 @@ mod tests {
             accepted: 950,
             confirmed: 900,
             pending: 50,
+            outcomes: Default::default(),
             errors: 50,
             valid: false,
             invalid_reason: Some("50 transaction submissions failed".into()),
@@ -1159,6 +1196,7 @@ mod tests {
             accepted: 100,
             confirmed: 90,
             pending: 5,
+            outcomes: Default::default(),
             errors: 5,
             valid: false,
             invalid_reason: Some("5 transaction submissions failed".into()),

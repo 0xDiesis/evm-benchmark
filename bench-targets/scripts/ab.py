@@ -12,6 +12,8 @@ A side is a comma list of:
   test=transfer|evm         load generator mode (bench.sh --test-mode); default transfer
   outcome=hybrid|bls-only   genesis outcome signature rule (BENCH_DIESIS_OUTCOME_RULE); default:
                             the harness default for the checkout
+  filelog=<filter>          validators' reth file-log filter (BENCH_DIESIS_FILE_LOG_FILTER); default
+                            info, the judged level; filelog=debug for diagnostic arms
   name=<short>              label in the summary
 With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats. --note
 labels the results: one line at the top of summary.md, for example a setting common to both sides.
@@ -50,7 +52,7 @@ def parse_side(text):
     side = {}
     for part in [p for p in text.split(",") if p]:
         key, sep, value = part.partition("=")
-        if not sep or key not in {"profile", "image", "repo", "env", "outcome", "name", "test"}:
+        if not sep or key not in {"profile", "image", "repo", "env", "outcome", "name", "test", "filelog"}:
             raise SystemExit(f"Bad side field {part!r}")
         side[key] = value
     if side.get("profile", "capped") not in {"capped", "uncapped"}:
@@ -60,6 +62,10 @@ def parse_side(text):
     if side.get("test", "transfer") not in {"transfer", "evm"}:
         raise SystemExit("test must be transfer or evm")
     side.setdefault("profile", "capped")
+    side.setdefault("filelog", "info")
+    if not re.fullmatch(r"[A-Za-z0-9_:=.+-]+", side["filelog"]):
+        raise SystemExit(f"Bad filelog {side['filelog']!r}: one tracing directive (use + for several)")
+    side["filelog"] = side["filelog"].replace("+", ",")
     side["env"] = [e for e in side.get("env", "").split("+") if e]
     for item in side["env"]:
         if not re.fullmatch(r"(DIESIS|RAYON)_[A-Z0-9_]+=.*", item):
@@ -142,11 +148,22 @@ def steps_of(plan):
     return steps
 
 
+def recorded_file_log_levels(out, plan, arms):
+    """The validator file-log levels a side's steps recorded in meta.json (None: not recorded)."""
+    levels = set()
+    for i in arms:
+        for name, *_ in steps_of(plan):
+            path = out / f"arm-{i}{plan['order'][i - 1]}" / name / "meta.json"
+            if path.exists():
+                levels.add((json.loads(path.read_text()).get("chain_config") or {}).get("validator_file_log_filter"))
+    return sorted(levels, key=str)
+
+
 def summarize(out, plan):
     summary = {}
     for key, side in plan["sides"].items():
         arms = [i for i, k in enumerate(plan["order"], 1) if k == key]
-        summary[key] = dict(config=side, rates={})
+        summary[key] = dict(config=side, rates={}, file_log_levels=recorded_file_log_levels(out, plan, arms))
         for rate, *_ in steps_of(plan):
             steps = [m for i in arms if (m := step_metrics(out, i, key, rate))]
             row = dict(n=len(steps))
@@ -177,7 +194,8 @@ def summarize(out, plan):
     for key, data in summary.items():
         c = data["config"]
         lines += [f"## {key.upper()}: {c.get('name') or c['profile']} — {c['profile']} image={c.get('image') or 'HEAD'} "
-                  f"{'outcome=' + c['outcome'] + ' ' if c.get('outcome') else ''}{' '.join(c['env'])}", "",
+                  f"{'outcome=' + c['outcome'] + ' ' if c.get('outcome') else ''}{' '.join(c['env'])} "
+                  f"file log {', '.join(str(v) for v in data['file_log_levels']) or c.get('filelog') or '-'}", "",
                   "| offered | " + " | ".join(cols) + " | gen-bound | saturated | pool full | agree | functional-only |",
                   "|---" * (len(cols) + 6) + "|"]
         for rate, row in data["rates"].items():
@@ -189,6 +207,16 @@ def summarize(out, plan):
     (out / "summary.md").write_text("\n".join(lines) + "\n")
 
 
+def side_env(environ, side, warmup):
+    """Fleet and bench environment for one side: its profile, overrides and file-log level (a plan
+    written before sides carried a level leaves the profile's choice)."""
+    env = dict(environ, BENCH_DIESIS_PROFILE=side["profile"], BENCH_WARMUP_SECS=str(warmup),
+               BENCH_DIESIS_ENV=" ".join(shlex.quote(e) for e in side["env"]))
+    if side.get("filelog"):
+        env["BENCH_DIESIS_FILE_LOG_FILTER"] = side["filelog"]
+    return env
+
+
 def run_step(out, i, key, side, step, plan, log, external=False, aged=None):
     name, rate, duration, warmup = step
     step_dir = out / f"arm-{i}{key}" / name
@@ -196,8 +224,7 @@ def run_step(out, i, key, side, step, plan, log, external=False, aged=None):
         return True
     if step_dir.exists():
         step_dir.rename(step_dir.with_name(f"{name}-failed-{int(time.time())}"))
-    env = dict(os.environ, BENCH_DIESIS_PROFILE=side["profile"], BENCH_WARMUP_SECS=str(warmup),
-               BENCH_DIESIS_ENV=" ".join(shlex.quote(e) for e in side["env"]))
+    env = side_env(os.environ, side, warmup)
     if side.get("image"):
         env["DIESIS_IMAGE_TAG"] = side["image"]
     if side.get("repo"):

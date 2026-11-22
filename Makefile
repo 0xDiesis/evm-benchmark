@@ -135,11 +135,11 @@ bytecode-check: ## Fail if committed .hex files drifted from contracts/ source
 # Single-Chain Benchmarks
 # ══════════════════════════════════════════════════════════════════════════════
 
-bench: build ## Run a single benchmark  (CHAIN= MODE= ENV= TXS= TPS= DURATION= SENDERS= REBUILD= DEV=)
+bench: build ## Run a single benchmark  (CHAIN= MODE= ENV= TXS= TPS= DURATION= SENDERS= REBUILD= DEV= MIX=judged pins its own senders)
 	@bash $(SCRIPTS)/bench.sh \
 		--chain $(CHAIN) --mode $(MODE) --env $(ENV) \
 		--txs $(TXS) --tps $(TPS) --duration $(DURATION) \
-		--senders $(SENDERS) --batch-size $(BATCH_SIZE) $(if $(WORKERS),--workers $(WORKERS)) \
+		$(if $(filter judged,$(MIX)),--mix judged,--senders $(SENDERS)) --batch-size $(BATCH_SIZE) $(if $(WORKERS),--workers $(WORKERS)) \
 		--test-mode $(TEST_MODE) \
 		$(if $(TAG),--tag $(TAG)) \
 		$(if $(filter true yes 1,$(REBUILD)),--rebuild) \
@@ -178,9 +178,10 @@ ab: build ## Interleaved A/B/B/A Diesis runs  (NAME= A= B= ARMS=3 RATES=2000 AB_
 		--warmup $(or $(WARMUP),60) $(if $(AGED),--aged $(AGED)) $(if $(PROBE),--probe $(PROBE)) \
 		$(if $(filter 1 true yes,$(REUSE_FLEET)),--reuse-fleet) $(if $(MAX_LOAD),--max-load $(MAX_LOAD)) $(if $(MAX_RERUNS),--max-reruns $(MAX_RERUNS))
 
-diesis-judged: build ## The judged run  (FIXTURE=<saved fixture> or TAG=<aged fleet>, RATE=, PROFILE=capped WINDOW=600 MAX_LOAD=18)
-	@test -n "$(RATE)" -a -n "$(FIXTURE)$(TAG)" || { echo "Error: RATE and FIXTURE (or TAG) are required"; exit 2; }
+diesis-judged: build ## The judged run  (FIXTURE=<saved fixture> or TAG=<aged fleet>, RATE=, OUTCOME=bls-only|hybrid, MIX=judged|transfer PROFILE=capped WINDOW=600 MAX_LOAD=18)
+	@test -n "$(RATE)" -a -n "$(FIXTURE)$(TAG)" -a -n "$(OUTCOME)" || { echo "Error: RATE, OUTCOME and FIXTURE (or TAG) are required"; exit 2; }
 	@python3 $(SCRIPTS)/judged.py $(if $(FIXTURE),--fixture "$(FIXTURE)",--tag "$(TAG)") --rate $(RATE) \
+		--outcome-rule $(OUTCOME) --mix $(or $(MIX),judged) \
 		--profile $(or $(PROFILE),capped) --window $(or $(WINDOW),600) --max-load $(or $(MAX_LOAD),18)
 
 diesis-fixture-save: ## Archive a stopped aged fleet as a fixture  (TAG=)

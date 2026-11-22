@@ -2,8 +2,15 @@
 """The judged Diesis run: an aged fixture (past 5,000 blocks) at 2 CPU / 4 GiB per validator,
 one 600 s window at a set offered rate (docs/diesis-methodology.md).
 
-  judged.py --fixture <name> --rate 2000 [--profile capped] [--window 600] [--warmup 60] [--max-load 18]
-  judged.py --tag <aged fleet> --rate 2000 ...
+  judged.py --fixture <name> --rate 2000 --outcome-rule bls-only [--mix judged] [--profile capped]
+            [--window 600] [--warmup 60] [--max-load 18]
+  judged.py --tag <aged fleet> --rate 2000 --outcome-rule bls-only ...
+
+--outcome-rule pins the genesis outcome signature rule the run is judged under (fleets default
+BLS-only, the node genesis defaults hybrid); it must match the rule the fixture was built with, or
+the run is refused before the fleet starts. --mix judged (the default) drives the pinned judged
+mixed-EVM workload (crates/evm-benchmark/src/generators/judged_mix.rs); --mix transfer drives plain
+transfers. Finalized TPS counts successful receipts only.
 
 --fixture restores a saved fixture (fleet.py save-fixture) into a throwaway aged fleet, runs,
 and destroys the copy, so the fixture itself is never modified. --tag runs on an existing
@@ -74,12 +81,45 @@ def refusal(failed_dir):
     return dict(nodes=nodes, work_admission=work)
 
 
+def check_outcome_rule(requested, recorded):
+    """The judged outcome signature rule: explicit, and the one the fixture's genesis was built with."""
+    if recorded is None:
+        raise SystemExit("the fixture does not record its genesis outcome signature rule; rebuild it with a "
+                         "checkout that has the rule control")
+    if requested != recorded:
+        raise SystemExit(f"--outcome-rule {requested} does not match the fixture's genesis rule {recorded}")
+    return requested
+
+
+# Judged validators log to file at info: reth's default (debug) wrote 61 MB in 9 idle minutes on one
+# node and inflates the CPU figures. Diagnostic arms keep debug through BENCH_DIESIS_FILE_LOG_FILTER.
+JUDGED_FILE_LOG_FILTER = "info"
+
+
+def fleet_env(environ, tag, profile):
+    """Fleet environment for a judged run: the aged fleet, its profile, the run alone on the host,
+    and the judged file-log level, set explicitly over any ambient choice."""
+    return dict(environ, DIESIS_AGED_TAG=tag, BENCH_DIESIS_PROFILE=profile, BENCH_DIESIS_MAX_FLEETS="1",
+                BENCH_DIESIS_FILE_LOG_FILTER=JUDGED_FILE_LOG_FILTER)
+
+
+def check_file_log_filter(provenance):
+    """The file-log level the started fleet records; a judged run refuses any other."""
+    value = provenance.get("file_log_filter")
+    if value != JUDGED_FILE_LOG_FILTER:
+        raise SystemExit(f"the judged fleet logs to file at {value!r} "
+                         f"({provenance.get('file_log_filter_source')}), not {JUDGED_FILE_LOG_FILTER}")
+    return value
+
+
 def summary(m, max_load):
     f, r, iv = m["submit_to_finalized_s"], m["submit_to_receipt_s"], m["block_interval_ms"]
     load = m.get("host_load_1m") or {}
     agree = m.get("finalized_agreement") or {}
     return dict(
         finalized_tps=m["finalized_tps"], attempted_tps=m["attempted_tps"],
+        finalized_basis=m.get("finalized_basis", "included"), finalized_included_tps=m.get("finalized_included_tps"),
+        outcomes=m.get("outcomes"), reverted_share=m.get("reverted_share"), per_type=m.get("per_type"),
         submit_to_finalized_s={k: f.get(k) for k in ("p50", "p95", "p99")},
         submit_to_receipt_s={k: r.get(k) for k in ("p50", "p95", "p99")},
         unfinalized_share=m["unfinalized_share"],
@@ -88,12 +128,17 @@ def summary(m, max_load):
         finalized_agreement=agree.get("agree"), agreement_heights=[h["height"] for h in agree.get("heights", [])],
         validator_exits=m.get("validator_exits"), generator_bound=m.get("generator_bound"),
         chain_saturated=m.get("chain_saturated"), host_load_1m=load,
+        taker_fills=m.get("taker_fills"), invalid_reasons=m.get("invalid_reasons") or [],
+        valid=not m.get("invalid_reasons"),
         functional_only=(load.get("max") or 0) > max_load)
 
 
 def markdown(record):
     lines = [f"# Judged run {record.get('fixture') or record['tag']} ({record['profile']}, {record['rate']} TPS offered)", "",
              f"- Status: **{record['status']}**", f"- Image: {record.get('image')}",
+             f"- Outcome signature rule: {record.get('outcome_signature_rule')} (pinned)",
+             f"- Mix: {record.get('mix')}",
+             f"- Validator file log level: {record.get('file_log_filter')}",
              f"- Fixture height at start: {record.get('fixture_height')}"]
     if record.get("cpusets"):
         lines.append("- Validator cpusets: " + ", ".join(f"{k} {v}" for k, v in record["cpusets"].items()))
@@ -110,8 +155,15 @@ def markdown(record):
     elif record["status"] == "measured":
         s = record["summary"]
         fmt = lambda d: " / ".join("-" if v is None else f"{v:.2f}" for v in d.values())
+        reasons = s.get("invalid_reasons") or []
+        lines.append("- Validity: valid" if not reasons else "- Validity: **invalid**: " + "; ".join(reasons))
+        fills = s.get("taker_fills")
+        if fills:
+            lines.append(f"- Taker fills: {fills['two_distinct_makers']} of {fills['successful']} successful takers "
+                         f"filled two distinct makers; fills per taker {fills['fills']}")
         lines += [
-            f"- Finalized TPS: {s['finalized_tps']:.1f} (attempted {s['attempted_tps']:.1f})",
+            f"- Finalized TPS: {s['finalized_tps']:.1f} ({s.get('finalized_basis', 'included')} transactions; "
+            f"attempted {s['attempted_tps']:.1f})",
             f"- Submit→finalized p50/p95/p99 s: {fmt(s['submit_to_finalized_s'])} (unfinalized {s['unfinalized_share']:.3f})",
             f"- Submit→receipt p50/p95/p99 s: {fmt(s['submit_to_receipt_s'])}",
             f"- Block interval p50/p99 ms: {fmt(s['block_interval_ms'])}",
@@ -122,6 +174,21 @@ def markdown(record):
             f"- Host load (1 min): {s['host_load_1m']}" + ("  **functional-only**" if s["functional_only"] else "")
             + ("  (another fleet shared the host)" if s.get("shared_host") else ""),
         ]
+        o = s.get("outcomes") or {}
+        if o.get("finalized_reverted") is not None:
+            lines.append(f"- Finalized outcomes: successful {o['finalized_successful']}, reverted "
+                         f"{o['finalized_reverted']}, status unknown {o['finalized_status_unknown']}; reverted share of "
+                         f"window submissions {s.get('reverted_share') or 0:.4f}")
+        types_ = s.get("per_type") or {}
+        if types_ and set(types_) != {"unknown"}:
+            num = lambda v, f="{:.2f}": "-" if v is None else f.format(v)
+            lines += ["", "| Type | Share | Successful TPS | Reverted | Submit→finalized p50/p99 s | "
+                      "Submit→receipt p50 s | Gas used | Fills |", "|---|---|---|---|---|---|---|---|"]
+            for name, t in types_.items():
+                lines.append(f"| {name} | {num(t['share_of_successful'], '{:.3f}')} | "
+                             f"{num(t['finalized_successful_tps'], '{:.1f}')} | {t['finalized_reverted']} | "
+                             f"{num(t['submit_to_finalized_s']['p50'])} / {num(t['submit_to_finalized_s']['p99'])} | "
+                             f"{num(t['submit_to_receipt_s']['p50'])} | {t['gas_used_avg']} | {t['fills']} |")
     return "\n".join(lines) + "\n"
 
 
@@ -135,6 +202,9 @@ def main():
     p.add_argument("--window", type=int, default=600)
     p.add_argument("--warmup", type=int, default=60)
     p.add_argument("--max-load", type=float, default=18.0)
+    p.add_argument("--outcome-rule", choices=["bls-only", "hybrid"], required=True,
+                   help="Genesis outcome signature rule the run is judged under; must match the fixture")
+    p.add_argument("--mix", choices=["judged", "transfer"], default="judged")
     a = p.parse_args()
     restored = None
     if a.fixture:
@@ -144,11 +214,19 @@ def main():
         a.tag = restored
     manifest = json.loads((results_base() / "fleet" / f"aged-{a.tag}.json").read_text())
     project = manifest["project"]
+    try:
+        rule = check_outcome_rule(a.outcome_rule, (manifest.get("provenance") or {}).get("outcome_signature_rule"))
+    except SystemExit:
+        if restored:
+            subprocess.run([sys.executable, "-B", str(FLEET), "destroy-aged", "--tag", restored], capture_output=True,
+                           text=True)
+        raise
     out = results_base() / "judged" / f"{time.strftime('%Y%m%d-%H%M%S')}-{a.fixture or a.tag}-{a.profile}-{a.rate}"
     out.mkdir(parents=True)
     # Judged runs run alone: the fleet starts only while no other Diesis fleet runs (fleet.py waits).
-    env = dict(os.environ, DIESIS_AGED_TAG=a.tag, BENCH_DIESIS_PROFILE=a.profile, BENCH_DIESIS_MAX_FLEETS="1")
+    env = fleet_env(os.environ, a.tag, a.profile)
     record = dict(tag=a.tag, fixture=a.fixture, restored_copy=restored, profile=a.profile, rate=a.rate,
+                  outcome_signature_rule=rule, mix=a.mix,
                   window_s=a.window, warmup_s=a.warmup,
                   fixture_height=manifest.get("height"), genesis_hash=manifest.get("genesis_hash"),
                   image=(manifest.get("provenance") or {}).get("image"), started=time.time())
@@ -165,14 +243,19 @@ def main():
             fleet = load_fleet()
             provenance = json.loads((state / "provenance.json").read_text())
             record.update(cpu_base=provenance.get("cpu_base"), cpusets=provenance.get("cpusets"),
+                          file_log_filter=provenance.get("file_log_filter"),
                           other_fleets_at_start=sorted(fleet.running_fleets(exclude={project})))
+            check_file_log_filter(provenance)
             run_dir = out / "run"
             bench = subprocess.run(["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained",
                                     "--tps", str(a.rate), "--duration", str(a.window + a.warmup), "--out", str(run_dir),
-                                    "--tag", f"judged-{a.tag}"],
+                                    "--tag", f"judged-{a.tag}"] + (["--mix", "judged"] if a.mix == "judged" else []),
                                    env=dict(env, DIESIS_FLEET="external", BENCH_WARMUP_SECS=str(a.warmup)),
                                    stdout=(out / "bench.log").open("w"), stderr=subprocess.STDOUT)
             record["other_fleets_at_end"] = sorted(fleet.running_fleets(exclude={project}))
+            mix_record = run_dir / "judged-mix.json"
+            if mix_record.exists():
+                record["mix_record"] = json.loads(mix_record.read_text())
             metrics = run_dir / "diesis-metrics.json"
             if metrics.exists():
                 record.update(status="measured", bench_exit=bench.returncode, summary=mark_shared(
@@ -180,6 +263,8 @@ def main():
                     record["other_fleets_at_end"]))
             else:
                 record.update(status="failed", bench_exit=bench.returncode)
+    except SystemExit as error:
+        record.update(status="failed", error=str(error))
     finally:
         subprocess.run([sys.executable, "-B", str(FLEET), "down"], env=env, capture_output=True, text=True)
         if restored:

@@ -14,7 +14,16 @@ generate_meta() {
     git_branch="$(git -C "${BENCH_REPO_DIR}" branch --show-current 2>/dev/null || echo "unknown")"
     harness_version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "${HARNESS_CARGO}" 2>/dev/null | head -1)"
 
-    python3 -c "
+    # A Diesis fleet started by fleet.py records how its validators run (file-log level, outcome
+    # rule); "{}" when the fleet was started some other way.
+    local fleet_provenance="{}"
+    if [[ "${chain}" == "diesis" ]]; then
+        local results_base="${RESULTS_BASE:-${BENCH_RESULTS_BASE:-${BENCH_REPO_DIR}/bench-targets/results}}"
+        fleet_provenance="$(BENCH_RESULTS_BASE="${results_base}" python3 \
+            "${BENCH_REPO_DIR}/bench-targets/chains/diesis/fleet.py" provenance 2>/dev/null || echo '{}')"
+    fi
+
+    BENCH_META_FLEET_PROVENANCE="${fleet_provenance}" python3 -c "
 import json, os, subprocess, platform
 
 def env_or(key, default):
@@ -64,6 +73,13 @@ if '${chain}' == 'diesis':
         'fec_max_concurrent_shred_sends_per_peer': int(env_or('E2E_FEC_MAX_CONCURRENT_SHRED_SENDS_PER_PEER', '16')),
         'txpool_max_account_slots': int(env_or('E2E_TXPOOL_MAX_ACCOUNT_SLOTS', '5000')),
     }
+    try:
+        provenance = json.loads(os.environ.get('BENCH_META_FLEET_PROVENANCE') or '{}')
+    except ValueError:
+        provenance = {}
+    chain_config['validator_file_log_filter'] = provenance.get('file_log_filter')
+    chain_config['validator_file_log_filter_source'] = provenance.get('file_log_filter_source')
+    chain_config['outcome_signature_rule'] = provenance.get('outcome_signature_rule')
 else:
     chain_config = {
         'chain': '${chain}',
@@ -80,6 +96,8 @@ bench_params = {
     'duration':   int(env_or('BENCH_DURATION',    '30')),
     'finality_confirmations': int(env_or('BENCH_FINALITY_CONFIRMATIONS', '0')),
     'latency_basis': env_or('BENCH_LATENCY_BASIS', 'submit_to_first_receipt'),
+    'test_mode':  env_or('BENCH_TEST_MODE',   'transfer'),
+    'mix':        env_or('BENCH_MIX',         'default'),
     'prometheus_after_settle_secs': float(env_or('BENCH_PROMETHEUS_AFTER_SETTLE_SECS', '5')),
 }
 

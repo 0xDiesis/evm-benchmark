@@ -31,6 +31,11 @@ Inputs (environment):
                         up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)
   BENCH_DIESIS_HOLD_FILE   while this file exists, fleet starts wait too: creating it yields the
                         slot at a runner's next arm, which tears its fleet down and then waits
+  BENCH_DIESIS_FILE_LOG_FILTER  validators' reth file-log filter (`--log.file.filter`); wins over the
+                        profile's FLEET_FILE_LOG_FILTER. Unset in both, reth's default (debug)
+                        applies. Both profiles log to file at info: debug wrote 61 MB in 9
+                        idle minutes on one node and inflates CPU figures; debug is an explicit
+                        override for diagnostic arms
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
@@ -252,6 +257,25 @@ def merged_env(profile_values, environ):
     return env
 
 
+FILE_LOG_FILTER_FLAG = "--log.file.filter"
+
+
+def file_log_filter(profile_values, environ):
+    """The validators' reth file-log filter: BENCH_DIESIS_FILE_LOG_FILTER, else the profile's
+    FLEET_FILE_LOG_FILTER, else None (reth's default applies)."""
+    value = environ.get("BENCH_DIESIS_FILE_LOG_FILTER") or profile_values.get("FLEET_FILE_LOG_FILTER") or None
+    if value is not None and not re.fullmatch(r"[A-Za-z0-9_:=,.-]+", value):
+        raise SystemExit(f"Bad file log filter {value!r}: one tracing directive list, no spaces")
+    return value
+
+
+def file_log_filter_record(value):
+    """Provenance fields for the validators' file-log filter."""
+    if value is None:
+        return dict(file_log_filter="debug", file_log_filter_source="reth default")
+    return dict(file_log_filter=value, file_log_filter_source="fleet")
+
+
 def outcome_rule_env(repo, environ, default=DEFAULT_OUTCOME_RULE):
     """Validator keys selecting the genesis outcome signature rule, and the rule (None when the
     checkout predates the control). The rule and its epoch-zero artifact always travel together."""
@@ -297,17 +321,20 @@ def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEE
     interpolated = set()
     for path in files[1::2]:
         interpolated |= set(re.findall(r"\$\{([A-Z0-9_]+)", Path(path).read_text()))
-    compose = patch(rendered, image_id, env, profile, interpolated, project, cpu_base)
+    log_filter = file_log_filter(profile, environ)
+    compose = patch(rendered, image_id, env, profile, interpolated, project, cpu_base, file_log_filter=log_filter)
     return compose, dict(checkout=str(repo), checkout_head=head, profile=profile_name, profile_values=profile,
                          validator_env=env, image_id=image_id, signing_overlay=signing.is_file(),
-                         outcome_signature_rule=rule, cpu_base=cpu_base,
+                         outcome_signature_rule=rule, cpu_base=cpu_base, **file_log_filter_record(log_filter),
                          cpusets={name: compose["services"][name].get("cpuset") for name in NODES})
 
 
-def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET, cpu_base=0):
+def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET, cpu_base=0,
+          file_log_filter=None):
     """Validators take every override except keys the compose only interpolates (log levels,
     txpool flags, Rayon thread count): the node's strict configuration rejects any DIESIS_*
-    key it does not consume, so those reach the node only through the rendered values."""
+    key it does not consume, so those reach the node only through the rendered values. A chosen
+    file-log filter replaces any `--log.file.filter` on the validators' command."""
     keep = NODES + ["prometheus"]
     missing = [name for name in keep if name not in rendered["services"]]
     if missing:
@@ -324,6 +351,9 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DE
         service.pop("depends_on", None)
         service["image"] = image_id
         service["environment"].update(container_env)
+        if file_log_filter is not None:
+            command = [arg for arg in service.get("command") or [] if not arg.startswith(FILE_LOG_FILTER_FLAG)]
+            service["command"] = command + [f"{FILE_LOG_FILTER_FLAG}={file_log_filter}"]
         for key in ("cpus", "cpuset", "mem_limit", "deploy"):
             service.pop(key, None)
         if cpus:

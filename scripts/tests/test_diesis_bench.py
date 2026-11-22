@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline tests for the Diesis fleet, observer and A/B runner (no Docker, no chain)."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -160,6 +162,130 @@ class ObserverMetrics(unittest.TestCase):
         self.assertEqual(observer.quantile(parsed, "0.5"), 9.5)
 
 
+FILL = observer.TRADE_FILL_TOPIC
+
+
+def with_methods(tmp):
+    """The synthetic run with a method column: every 4th hash a SpotTake, the rest ETHTransfer;
+    receipts mark every 10th ETHTransfer reverted, and SpotTakes fill makers 0xa and 0xb."""
+    obs, log = synthetic(tmp)
+    lines = log.read_text().splitlines()
+    out, receipts = [lines[0] + ",method"], {}
+    for i, line in enumerate(lines[1:]):
+        h = line.split(",")[0]
+        method = "SpotTake" if i % 4 == 0 else "ETHTransfer"
+        out.append(f"{line},{method}")
+        if h in ("0xfirst", "0xdead"):
+            continue
+        if method == "SpotTake":
+            receipts[h] = dict(status=1, gas=137908, makers=["0xa", "0xb"])
+        else:
+            receipts[h] = dict(status=0 if i % 10 == 1 else 1, gas=21000, makers=[])
+    log.write_text("\n".join(out) + "\n")
+    return obs, log, receipts
+
+
+class ObserverOutcomes(unittest.TestCase):
+    def metrics(self, drop_receipts=0):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log, receipts = with_methods(tmp)
+            for h in list(receipts)[40000:40000 + drop_receipts]:
+                receipts.pop(h)
+            return observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000, receipts=receipts), receipts
+
+    def test_finalized_tps_counts_successful_receipts_only(self):
+        m, receipts = self.metrics()
+        included = m["finalized_included_tps"] * m["window_s"]
+        reverted = m["outcomes"]["finalized_reverted"]
+        self.assertEqual(m["finalized_basis"], "successful")
+        self.assertGreater(reverted, 0)
+        self.assertAlmostEqual(m["finalized_tps"] * m["window_s"], included - reverted)
+        self.assertEqual(m["outcomes"]["finalized_status_unknown"], 0)
+
+    def test_per_type_success_latency_gas_and_fills(self):
+        m, _ = self.metrics()
+        take, transfer = m["per_type"]["SpotTake"], m["per_type"]["ETHTransfer"]
+        self.assertEqual(take["finalized_reverted"], 0)
+        self.assertGreater(transfer["finalized_reverted"], 0)
+        self.assertEqual(take["gas_used_avg"], 137908)
+        self.assertEqual(transfer["gas_used_avg"], 21000)
+        self.assertEqual(take["fills"], {"2": take["finalized_successful"]})
+        self.assertEqual(take["two_distinct_makers"], take["finalized_successful"])
+        self.assertEqual(transfer["fills"], {"0": transfer["finalized_successful"]})
+        self.assertEqual(take["submit_to_finalized_s"]["p50"], 3.0)
+        shares = sum(t["share_of_successful"] for t in m["per_type"].values())
+        self.assertAlmostEqual(shares, 1.0)
+        # Reverted transfers leave the latency population and show as a share instead.
+        self.assertGreater(m["reverted_share"], 0)
+        self.assertLess(m["submit_to_finalized_s"]["n"], 91001)
+
+    def test_missing_receipts_are_status_unknown_not_success(self):
+        m, _ = self.metrics(drop_receipts=500)
+        self.assertGreater(m["outcomes"]["finalized_status_unknown"], 0)
+        self.assertAlmostEqual(
+            m["finalized_tps"] * m["window_s"],
+            m["finalized_included_tps"] * m["window_s"] - m["outcomes"]["finalized_reverted"]
+            - m["outcomes"]["finalized_status_unknown"])
+
+    def test_one_receipt_pass_feeds_every_success_and_revert_count(self):
+        # The post-drain receipt read is the run's only success/revert accounting: no second
+        # window pass over a different block set, and the summary prints the same counts.
+        self.assertFalse(hasattr(observer, "reverted_receipts"))
+        m, _ = self.metrics()
+        self.assertNotIn("receipts", m)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            observer.print_summary(m)
+        o = m["outcomes"]
+        self.assertIn(f"succeeded {o['finalized_successful']}  reverted {o['finalized_reverted']}", out.getvalue())
+
+    def test_takers_short_of_two_distinct_makers_invalidate_the_run(self):
+        m, _ = self.metrics()
+        take = m["per_type"]["SpotTake"]
+        self.assertEqual(m["taker_fills"], dict(successful=take["finalized_successful"],
+                                                two_distinct_makers=take["finalized_successful"],
+                                                fills={"2": take["finalized_successful"]}, valid=True))
+        self.assertEqual(m["invalid_reasons"], [])
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log, receipts = with_methods(tmp)
+            takers = [h for h, r in receipts.items() if r["makers"]]
+            short = takers[len(takers) // 2:len(takers) // 2 + 3]  # inside the window
+            receipts[short[0]] = dict(receipts[short[0]], makers=["0xa"])
+            receipts[short[1]] = dict(receipts[short[1]], makers=["0xa", "0xa"])
+            receipts[short[2]] = dict(receipts[short[2]], makers=[])
+            bad = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000, receipts=receipts)
+        fills = bad["taker_fills"]
+        self.assertFalse(fills["valid"])
+        self.assertEqual(fills["successful"] - fills["two_distinct_makers"], 3)
+        self.assertEqual(fills["fills"]["1"], 1)
+        self.assertEqual(fills["fills"]["0"], 1)
+        self.assertEqual(len(bad["invalid_reasons"]), 1)
+        self.assertIn("3 of", bad["invalid_reasons"][0])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            observer.print_summary(bad)
+        self.assertIn("INVALID", out.getvalue())
+        self.assertIn("Taker fills:", out.getvalue())
+
+    def test_two_column_log_without_receipts_keeps_the_included_basis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log = synthetic(tmp)
+            m = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000)
+        self.assertEqual(m["finalized_basis"], "included")
+        self.assertEqual(set(m["per_type"]), {"unknown"})
+
+    def test_receipt_parse_reads_status_gas_and_distinct_makers(self):
+        book = observer.SPOT_BOOK.lower()
+        raw = [dict(transactionHash="0x01", status="0x1", gasUsed="0x21aa4", logs=[
+                    dict(address=book, topics=[FILL, "0xm", "0xmaker1", "0xt"]),
+                    dict(address=book, topics=[FILL, "0xm", "0xmaker2", "0xt"]),
+                    dict(address=book, topics=["0xother", "0xm", "0xmaker3", "0xt"])]),
+               dict(transactionHash="0x02", status="0x0", gasUsed="0x5208", logs=[])]
+        parsed = observer.parse_receipts(raw)
+        self.assertEqual(parsed["0x01"], dict(status=1, gas=137892, makers=["0xmaker1", "0xmaker2"]))
+        self.assertEqual(parsed["0x02"], dict(status=0, gas=21000, makers=[]))
+
+
 class Fleet(unittest.TestCase):
     def test_profiles_exist_and_capped_is_the_run_rule(self):
         capped = fleet.read_profile("capped")
@@ -200,6 +326,30 @@ class Fleet(unittest.TestCase):
         beside = fleet.patch(json.loads(json.dumps(rendered)), "sha256:abc", {}, {"FLEET_CPUS": "2", "FLEET_PIN_CPUS": "true"},
                              cpu_base=4)
         self.assertEqual([beside["services"][n]["cpuset"] for n in fleet.NODES], ["4-5", "6-7", "8-9", "10-11"])
+
+    def test_file_log_filter_is_set_on_validators_only_when_chosen(self):
+        node = lambda: dict(image="x", environment={}, command=["node", "--http", "--log.file.filter=debug"])
+        rendered = lambda: dict(services={**{n: node() for n in fleet.NODES}, "prometheus": dict(ports=[])},
+                                networks={}, volumes={})
+        c = fleet.patch(rendered(), "sha256:abc", {}, {}, file_log_filter="info")
+        for n in fleet.NODES:
+            self.assertEqual(c["services"][n]["command"], ["node", "--http", "--log.file.filter=info"])
+            self.assertNotIn("FLEET_FILE_LOG_FILTER", c["services"][n]["environment"])
+        # Unchosen: the rendered command, so reth's own default (debug) applies.
+        c = fleet.patch(rendered(), "sha256:abc", {}, {})
+        self.assertEqual(c["services"]["node-1"]["command"], ["node", "--http", "--log.file.filter=debug"])
+
+    def test_file_log_filter_comes_from_the_override_then_the_profile(self):
+        self.assertEqual(fleet.read_profile("capped").get("FLEET_FILE_LOG_FILTER"), "info")
+        self.assertEqual(fleet.read_profile("uncapped").get("FLEET_FILE_LOG_FILTER"), "info")
+        self.assertEqual(fleet.file_log_filter({"FLEET_FILE_LOG_FILTER": "info"}, {}), "info")
+        self.assertEqual(fleet.file_log_filter({"FLEET_FILE_LOG_FILTER": "info"},
+                                               {"BENCH_DIESIS_FILE_LOG_FILTER": "debug"}), "debug")
+        self.assertIsNone(fleet.file_log_filter({}, {}))
+        self.assertEqual(fleet.file_log_filter_record(None), dict(file_log_filter="debug", file_log_filter_source="reth default"))
+        self.assertEqual(fleet.file_log_filter_record("info"), dict(file_log_filter="info", file_log_filter_source="fleet"))
+        with self.assertRaises(SystemExit):
+            fleet.file_log_filter({}, {"BENCH_DIESIS_FILE_LOG_FILTER": "info --http"})
 
     def test_cpu_base_keeps_a_lone_fleet_on_0_to_7(self):
         self.assertEqual(fleet.cpuset_cpus("0-1,4"), {0, 1, 4})
@@ -391,6 +541,16 @@ class AB(unittest.TestCase):
         with self.assertRaises(SystemExit):
             ab.parse_side("outcome=ml-dsa")
 
+    def test_side_file_log_level_defaults_to_info_and_reaches_the_fleet(self):
+        self.assertEqual(ab.parse_side("")["filelog"], "info")
+        self.assertEqual(ab.parse_side("filelog=debug")["filelog"], "debug")
+        with self.assertRaises(SystemExit):
+            ab.parse_side("filelog=info --http")
+        self.assertEqual(ab.parse_side("filelog=info+diesis_node=debug")["filelog"], "info,diesis_node=debug")
+        self.assertEqual(ab.side_env({}, ab.parse_side("filelog=debug"), 0)["BENCH_DIESIS_FILE_LOG_FILTER"], "debug")
+        self.assertEqual(ab.side_env({"BENCH_DIESIS_FILE_LOG_FILTER": "debug"}, ab.parse_side(""), 0)
+                         ["BENCH_DIESIS_FILE_LOG_FILTER"], "info")
+
     def test_probe_step_and_overload(self):
         plan = dict(rates=[1000], duration=300, warmup=0, probe="2:30", max_load=40)
         self.assertEqual(ab.steps_of(plan), [("probe", 2, 30, 0), ("1000", 1000, 300, 0)])
@@ -411,12 +571,17 @@ class AB(unittest.TestCase):
                 base = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000)
             plan = dict(sides={"a": ab.parse_side("profile=capped"), "b": ab.parse_side("profile=uncapped")},
                         order=list("abba"), rates=[1000], note="Both sides: DIESIS_X=2")
+            plan["sides"]["b"] = ab.parse_side("profile=uncapped,filelog=debug")
             for (i, key), factor in zip(enumerate(plan["order"], 1), (1.0, 1.1, 0.9, 1.2)):
                 d = out / f"arm-{i}{key}" / "1000"
                 d.mkdir(parents=True)
                 (d / "diesis-metrics.json").write_text(json.dumps(dict(base, finalized_tps=1000 * factor)))
+                level = plan["sides"][key]["filelog"]
+                (d / "meta.json").write_text(json.dumps(dict(chain_config=dict(validator_file_log_filter=level))))
             ab.summarize(out, plan)
             summary = json.loads((out / "summary.json").read_text())
+            self.assertEqual(summary["a"]["file_log_levels"], ["info"])
+            self.assertEqual(summary["b"]["file_log_levels"], ["debug"])
             b = summary["b"]["rates"]["1000"]
             self.assertEqual(b["n"], 2)
             self.assertAlmostEqual(b["finalized_tps"]["median"], 1000)
@@ -425,6 +590,8 @@ class AB(unittest.TestCase):
             self.assertIn("| 1000 |", md)
             self.assertIn("> Both sides: DIESIS_X=2", md)
             self.assertIn("host_load_median", md)
+            self.assertIn("file log debug", md)
+            self.assertIn("file log info", md)
 
 
 class Judged(unittest.TestCase):
@@ -456,6 +623,51 @@ class Judged(unittest.TestCase):
         self.assertEqual(s["submit_to_finalized_s"]["p50"], 3.0)
         self.assertIn("n0", s["peak_memory_bytes_nodes"])
         self.assertFalse(judged.summary(dict(m, host_load_1m=dict(median=5, max=12)), 18)["functional_only"])
+
+    def test_outcome_rule_is_pinned_against_the_fixture(self):
+        self.assertEqual(judged.check_outcome_rule("bls-only", "bls-only"), "bls-only")
+        with self.assertRaises(SystemExit) as mismatch:
+            judged.check_outcome_rule("hybrid", "bls-only")
+        self.assertIn("bls-only", str(mismatch.exception))
+        with self.assertRaises(SystemExit):
+            judged.check_outcome_rule("bls-only", None)
+
+    def test_judged_summary_and_markdown_carry_mix_outcomes_and_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log, receipts = with_methods(tmp)
+            m = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000, receipts=receipts)
+        m["host_load_1m"] = dict(median=5, max=6)
+        s = judged.summary(m, 18)
+        self.assertEqual(s["finalized_basis"], "successful")
+        self.assertGreater(s["outcomes"]["finalized_reverted"], 0)
+        self.assertIn("SpotTake", s["per_type"])
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="measured", image="i",
+                                  fixture_height=5100, outcome_signature_rule="bls-only", mix="judged",
+                                  summary=dict(s, shared_host=False)))
+        self.assertIn("- Outcome signature rule: bls-only (pinned)", md)
+        self.assertIn("- Mix: judged", md)
+        self.assertIn("| SpotTake |", md)
+        self.assertIn("reverted", md)
+        self.assertTrue(s["valid"])
+        self.assertIn("- Validity: valid", md)
+        bad = judged.summary(dict(m, invalid_reasons=["3 of 9 successful takers did not fill two distinct makers"]), 18)
+        self.assertFalse(bad["valid"])
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="measured", image="i",
+                                  fixture_height=5100, summary=dict(bad, shared_host=False)))
+        self.assertIn("- Validity: **invalid**: 3 of 9 successful takers", md)
+
+    def test_judged_fleet_logs_to_file_at_info_and_records_it(self):
+        env = judged.fleet_env({"PATH": "/bin", "BENCH_DIESIS_FILE_LOG_FILTER": "debug"}, "t", "capped")
+        self.assertEqual(env["BENCH_DIESIS_FILE_LOG_FILTER"], "info")
+        self.assertEqual((env["DIESIS_AGED_TAG"], env["BENCH_DIESIS_PROFILE"], env["BENCH_DIESIS_MAX_FLEETS"]),
+                         ("t", "capped", "1"))
+        self.assertEqual(judged.check_file_log_filter(dict(file_log_filter="info")), "info")
+        with self.assertRaises(SystemExit):
+            judged.check_file_log_filter(dict(file_log_filter="debug", file_log_filter_source="reth default"))
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="refused", image="i",
+                                  fixture_height=5100, file_log_filter="info",
+                                  refusal=dict(nodes={}, work_admission=None)))
+        self.assertIn("- Validator file log level: info", md)
 
     def test_judged_window_shared_with_another_fleet_is_functional_only(self):
         quiet = dict(functional_only=False)

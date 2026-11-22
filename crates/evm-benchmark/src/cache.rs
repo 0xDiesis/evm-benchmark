@@ -309,6 +309,11 @@ pub fn restore_txs(cached: &TxCacheData) -> Result<Vec<SignedTxWithMetadata>> {
             "ERC20Transfer" => crate::types::TransactionType::ERC20Transfer,
             "Swap" => crate::types::TransactionType::Swap,
             "NFTMint" => crate::types::TransactionType::NFTMint,
+            "ERC20Approve" => crate::types::TransactionType::ERC20Approve,
+            "ETHTransfer" => crate::types::TransactionType::ETHTransfer,
+            "SpotPlace" => crate::types::TransactionType::SpotPlace,
+            "SpotCancel" => crate::types::TransactionType::SpotCancel,
+            "SpotTake" => crate::types::TransactionType::SpotTake,
             _ => crate::types::TransactionType::SimpleTransfer,
         };
 
@@ -775,12 +780,12 @@ mod tests {
                 "SimpleTransfer",
                 crate::types::TransactionType::SimpleTransfer,
             ),
-            // Unknown types should fall back to SimpleTransfer
-            (
-                "ERC20Approve",
-                crate::types::TransactionType::SimpleTransfer,
-            ),
-            ("ETHTransfer", crate::types::TransactionType::SimpleTransfer),
+            ("ERC20Approve", crate::types::TransactionType::ERC20Approve),
+            ("ETHTransfer", crate::types::TransactionType::ETHTransfer),
+            ("SpotPlace", crate::types::TransactionType::SpotPlace),
+            ("SpotCancel", crate::types::TransactionType::SpotCancel),
+            ("SpotTake", crate::types::TransactionType::SpotTake),
+            // Unknown types fall back to SimpleTransfer
             ("UnknownType", crate::types::TransactionType::SimpleTransfer),
         ];
 

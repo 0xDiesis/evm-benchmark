@@ -1,4 +1,4 @@
-use crate::types::{ExecutionMode, TestMode};
+use crate::types::{ExecutionMode, Mix, TestMode};
 use alloy_primitives::Address;
 use clap::Parser;
 use std::path::PathBuf;
@@ -59,6 +59,11 @@ pub struct Args {
     /// Execution mode: burst, sustained, or ceiling
     #[arg(long, default_value = "burst")]
     pub execution: String,
+
+    /// EVM workload mix: default, or judged (the pinned Diesis judged mix;
+    /// requires --test evm and --execution sustained)
+    #[arg(long, default_value = "default")]
+    pub mix: String,
 
     // Burst parameters
     /// Number of transactions
@@ -210,6 +215,8 @@ pub struct Config {
     pub evm_pairs: Vec<alloy_primitives::Address>,
     /// Deployed NFT contract addresses (populated at runtime if EVM mode + --fund).
     pub evm_nfts: Vec<alloy_primitives::Address>,
+    /// EVM workload mix.
+    pub mix: Mix,
 }
 
 impl Args {
@@ -256,6 +263,17 @@ impl Args {
             "ceiling" => ExecutionMode::Ceiling,
             other => anyhow::bail!("Unknown execution mode: {}", other),
         };
+
+        let mix = match self.mix.to_lowercase().as_str() {
+            "default" => Mix::Default,
+            "judged" => Mix::Judged,
+            other => anyhow::bail!("Unknown mix: {}", other),
+        };
+        if mix == Mix::Judged
+            && (test_mode != TestMode::Evm || execution_mode != ExecutionMode::Sustained)
+        {
+            anyhow::bail!("--mix judged requires --test evm and --execution sustained");
+        }
 
         // Parse comma-separated RPC endpoints
         let rpc_urls: Result<Vec<Url>, _> = self
@@ -323,6 +341,7 @@ impl Args {
             evm_tokens,
             evm_pairs,
             evm_nfts,
+            mix,
         })
     }
 }
@@ -390,6 +409,7 @@ mod tests {
             validators: None,
             test: "transfer".to_string(),
             execution: "burst".to_string(),
+            mix: "default".into(),
             txs: 100,
             senders: 10,
             waves: 4,
@@ -479,6 +499,23 @@ mod tests {
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("Unknown execution mode"), "got: {msg}");
+    }
+
+    #[test]
+    fn judged_mix_requires_evm_sustained() {
+        let mut args = make_args("http://localhost:8545", "http");
+        args.mix = "judged".into();
+        let err = args
+            .clone()
+            .into_config()
+            .expect_err("transfer burst refused");
+        assert!(err.to_string().contains("--mix judged requires"));
+        args.test = "evm".into();
+        args.execution = "sustained".into();
+        assert_eq!(args.into_config().expect("evm sustained").mix, Mix::Judged);
+        let mut bad = make_args("http://localhost:8545", "http");
+        bad.mix = "other".into();
+        assert!(bad.into_config().is_err());
     }
 
     #[test]

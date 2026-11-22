@@ -1157,6 +1157,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         }
     }
 
@@ -1224,6 +1225,7 @@ mod tests {
                     failed: 0,
                     confirmed: 1,
                     pending: 0,
+                    outcomes: Default::default(),
                     valid: true,
                     invalid_reason: None,
                     submission_errors: vec![],

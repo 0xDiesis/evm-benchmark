@@ -801,6 +801,7 @@ pub async fn run_burst(config: &Config) -> Result<(BurstResult, u128)> {
         failed: accounting.failed,
         confirmed,
         pending,
+        outcomes: tracker.outcome_counts(),
         valid,
         invalid_reason,
         submission_errors: accounting.error_summaries,
@@ -884,6 +885,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         }
     }
 

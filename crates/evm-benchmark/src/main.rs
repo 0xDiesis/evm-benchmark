@@ -179,6 +179,7 @@ fn burst_result_from_ceiling(ceiling: &types::CeilingResult) -> types::BurstResu
         failed: 0,
         confirmed: ceiling.burst_peak_tps,
         pending: 0,
+        outcomes: Default::default(),
         valid: true,
         invalid_reason: None,
         submission_errors: vec![],
@@ -391,13 +392,22 @@ async fn async_main_with(mut config: config::Config, deps: &RuntimeDeps) -> anyh
 
     if config.test_mode == types::TestMode::Evm && config.fund {
         let deployer_key = &sender_keys[0];
+        // The judged mix pins its contract counts; the default mix keeps 5/3/2.
+        let (tokens, pairs, nfts) = match config.mix {
+            types::Mix::Judged => (
+                generators::judged_mix::TOKEN_COUNT as u32,
+                0,
+                generators::judged_mix::NFT_COUNT as u32,
+            ),
+            types::Mix::Default => (5, 3, 2),
+        };
         let contracts = (deps.deploy_contracts)(
             config.rpc.as_str(),
             deployer_key,
             config.chain_id,
-            5,
-            3,
-            2,
+            tokens,
+            pairs,
+            nfts,
             config.quiet,
         )
         .await?;
@@ -530,6 +540,7 @@ mod tests {
             validators: None,
             test: "transfer".to_string(),
             execution: "burst".to_string(),
+            mix: "default".into(),
             txs: 1,
             senders: 1,
             fund: false,
@@ -579,6 +590,7 @@ mod tests {
             failed: 0,
             confirmed: 9,
             pending: 1,
+            outcomes: Default::default(),
             valid: false,
             invalid_reason: Some("1 accepted transactions still pending".into()),
             submission_errors: vec![],
@@ -602,6 +614,7 @@ mod tests {
             accepted: 20,
             confirmed: 18,
             pending: 2,
+            outcomes: Default::default(),
             errors: 0,
             valid: false,
             invalid_reason: Some("2 accepted transactions still pending".into()),
