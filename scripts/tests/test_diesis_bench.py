@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Offline tests for the Diesis fleet, observer and A/B runner (no Docker, no chain)."""
+import contextlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -224,6 +226,18 @@ class ObserverOutcomes(unittest.TestCase):
             m["finalized_tps"] * m["window_s"],
             m["finalized_included_tps"] * m["window_s"] - m["outcomes"]["finalized_reverted"]
             - m["outcomes"]["finalized_status_unknown"])
+
+    def test_one_receipt_pass_feeds_every_success_and_revert_count(self):
+        # The post-drain receipt read is the run's only success/revert accounting: no second
+        # window pass over a different block set, and the summary prints the same counts.
+        self.assertFalse(hasattr(observer, "reverted_receipts"))
+        m, _ = self.metrics()
+        self.assertNotIn("receipts", m)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            observer.print_summary(m)
+        o = m["outcomes"]
+        self.assertIn(f"succeeded {o['finalized_successful']}  reverted {o['finalized_reverted']}", out.getvalue())
 
     def test_two_column_log_without_receipts_keeps_the_included_basis(self):
         with tempfile.TemporaryDirectory() as tmp:

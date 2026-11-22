@@ -604,28 +604,6 @@ def agreement(obs, start, end):
     return dict(agree=all(c["agree"] for c in checked), finalized_head=head, heights=checked)
 
 
-def reverted_receipts(obs, start, end):
-    """Receipt statuses of every transaction in the blocks node 1 served inside the window: the
-    harness tracker counts a reverted transaction as confirmed, so reverts are reported apart."""
-    with obs.lock:
-        numbers = sorted(n for n, b in obs.blocks.items() if start <= b.get("seen", -1) <= end and b.get("hashes"))
-    ok = reverted = 0
-    errors = []
-    for n in numbers:
-        try:
-            for receipt in rpc(RPC_URLS[0], "eth_getBlockReceipts", [hex(n)], 20) or ():
-                if int(receipt.get("status", "0x1"), 16) == 0:
-                    reverted += 1
-                else:
-                    ok += 1
-        except Exception as error:
-            if len(errors) < 3:
-                errors.append(f"{n}: {str(error)[:120]}")
-    total = ok + reverted
-    return dict(blocks=len(numbers), succeeded=ok, reverted=reverted,
-                reverted_share=reverted / total if total else None, errors=errors)
-
-
 # Reth's file log (debug by default) keeps every timeline line. Stdout at info drops some: an info
 # event right after a debug-level `enabled!` check on the same thread can miss the stdout layer.
 NODE_FILE_LOGS = "/root/.cache/reth/logs/*/reth.log*"
@@ -769,7 +747,6 @@ def watch(a):
     metrics["drain_s"] = time.time() - load_end
     metrics["finalized_agreement"] = agreement(obs, metrics["window_start"], metrics["window_end"])
     metrics["pool_pending_after_drain"] = pool
-    metrics["receipts"] = reverted_receipts(obs, metrics["window_start"], metrics["window_end"])
     metrics["log_counts"] = logs.stop()
     # Replace the stdout copies with the complete file-log timeline where readable.
     metrics["timeline_source"] = {}
@@ -817,8 +794,8 @@ def print_summary(m):
     print(f"  CPU cores (per node):   {', '.join(f'{v:.2f}' for v in cores.values()) or '-'}  "
           f"ms/round {', '.join(f'{v * 1000:.0f}' for v in per_round.values()) or '-'}  "
           f"throttled s/s {', '.join(f'{v:.3f}' for v in throttled.values()) or '-'}")
-    receipts = m.get("receipts") or {}
-    print(f"  Receipts:               succeeded {receipts.get('succeeded')}  reverted {receipts.get('reverted')}  "
+    o = m.get("outcomes") or {}
+    print(f"  Receipts:               succeeded {o.get('finalized_successful')}  reverted {o.get('finalized_reverted')}  "
           f"largest block {m.get('largest_block_txs')} tx  head spread p99 "
           f"{(m.get('validator_head_spread_blocks') or {}).get('p99')}  follower "
           f"{(m.get('follower_lag_blocks') or {}).get('p99') if m.get('follower_present') else 'none'}")
