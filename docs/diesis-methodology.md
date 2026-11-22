@@ -115,16 +115,20 @@ counts once however many makers it fills.
 
   | Type | Declared gas | Basis |
   |---|---|---|
-  | native transfer | 21,000 | |
-  | ERC-20 transfer | 65,000 | |
-  | approve | 60,000 | |
-  | ERC-20 mint | 80,000 | |
-  | NFT mint | 150,000 | |
+  | native transfer | 21,000 | the exact intrinsic cost |
+  | ERC-20 transfer | 65,000 | harness per-call limit; worst case writes a cold zero recipient balance |
+  | approve | 60,000 | harness per-call limit; worst case writes a cold zero allowance |
+  | ERC-20 mint | 80,000 | harness per-call limit; worst case writes a cold zero balance and `totalSupply` |
+  | NFT mint | 150,000 | harness per-call limit; writes a new owner slot, `totalSupply` and possibly a zero balance |
   | `SpotPlace` | 115,960 | worst-case calldata intrinsic + the node's 1-lot matching precharge |
   | `SpotTake` | 151,408 | worst-case calldata intrinsic + the 2-lot precharge |
   | `SpotCancel` | 24,288 | worst-case calldata intrinsic + the flat 3,000 cancel charge |
 
-  Together that is 68.4M declared gas per 1,000 transactions.
+  The five EVM-call limits are the generator's existing per-call constants (`evm_mix.rs`), which
+  predate the judged mix and were not tuned to the block. The spot-book limits are minimums: the
+  node charges the precharge before any work, and on a live fleet one gas less reverted out of gas.
+  Together that is 68.4M declared gas per 1,000 transactions. A 4-validator smoke measured 42.2M
+  gas used per 1,000 successful transactions.
 
 **Setup before the window** (not measured):
 1. Deploy the contracts.
