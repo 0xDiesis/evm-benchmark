@@ -4,7 +4,8 @@
 bench.sh starts it before the harness and sends SIGUSR1 when the load ends. It samples:
   - node 1's block trace with transaction hashes (50 ms poll),
   - the all-four `finalized` head and the all-four latest height (100 ms),
-  - each validator's Prometheus subset and Docker CPU counter (5 s),
+  - each validator's Prometheus subset, Docker CPU and CFS throttling counters (5 s),
+  - every validator's latest height, and each follower's when DIESIS_FOLLOWER_RPC is set (100 ms),
   - validator exits (5 s).
 After SIGUSR1 it waits up to --drain seconds for the window's blocks to finalize and the
 pool to empty, then joins the harness submit log (BENCH_SUBMIT_LOG) and report.json and
@@ -16,8 +17,11 @@ finalized TPS, submit->finalized and submit->receipt p50/p95/p99 over every tran
 submitted inside the window (one never included or finalized by the end of the drain counts
 as infinite, so a percentile that lands on it is null and `unfinalized_share` says how many).
 Secondary: latest->finalized, block interval, rounds/block, selected-owner hold and MPT
-quorum wait, CPU-seconds per transaction, pool backlog slope, empty-block share, and the
-generator_bound / chain_saturated verdicts.
+quorum wait, CPU-seconds per transaction and per round, CFS throttled time, pool backlog slope,
+empty-block share, owner hold by site, duplicate proposals, output deferrals and fallback entries
+per block, validator head spread, follower lag, reverted receipts, and the generator_bound /
+chain_saturated verdicts. Round- and vote-timeline log lines (DIESIS_TRACE_ROUND_TIMELINE,
+DIESIS_TRACE_TX_SAMPLE, DIESIS_TRACE_MPT_VOTE_TIMELINE) are copied to <run-dir>/timeline-<node>.log.
 
   diesis-observer.py watch --run-dir DIR --target-tps N --duration S [--warmup W] [--drain D]
   diesis-observer.py summary --metrics DIR/diesis-metrics.json
@@ -42,12 +46,19 @@ RPC_URLS = os.environ.get("DIESIS_RPC", "http://127.0.0.1:18545,http://127.0.0.1
                           "http://127.0.0.1:18565,http://127.0.0.1:18575").split(",")
 METRICS_URLS = os.environ.get("DIESIS_METRICS", ",".join(f"http://127.0.0.1:{p}/metrics"
                                                           for p in (19101, 19102, 19103, 19104))).split(",")
+FOLLOWER_URLS = [u for u in os.environ.get("DIESIS_FOLLOWER_RPC", "").split(",") if u]
 CONTAINERS = [c for c in os.environ.get("DIESIS_CONTAINERS", ",".join(f"diesis-e2e-node-{i}" for i in range(1, 5)))
               .split(",") if c]
 PROM = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)$")
 KEEP = ("reth_sync_checkpoint", "reth_diesis_horizon_committed_transactions_total",
         "reth_diesis_consensus_current_round", "reth_diesis_lock_hold_ms_sum", "reth_diesis_mpt_certify_phase_ms",
-        "reth_diesis_mpt_certify_phase_ms_sum", "reth_transaction_pool_pending_pool_transactions")
+        "reth_diesis_mpt_certify_phase_ms_sum", "reth_transaction_pool_pending_pool_transactions",
+        "reth_diesis_commit_proposal_duplicate_skipped_total", "reth_diesis_producer_output_deferred_transactions_total",
+        "reth_diesis_outcome_fallback_entries_total", "reth_diesis_outcome_fallback_resolved_total",
+        "reth_diesis_horizon_flow_held_ms_total", "reth_diesis_tx_source_selected_primary_total",
+        "reth_diesis_tx_source_selected_fallback_total", "reth_diesis_tx_source_fallback_owner_live_total",
+        "reth_diesis_checkpoint_control_inbound_rejected_total")
+TIMELINE_TARGETS = ("diesis_round_timeline", "diesis_mpt_vote_timeline")
 INF = float("inf")
 
 
@@ -85,6 +96,19 @@ def gauge(p, name):
     return sum(v for k, v in p.items() if k[0] == name and 'quantile="' not in k[1])
 
 
+def by_label(s, e, name, label, flt=""):
+    """End-minus-start of every series of `name` whose labels contain `flt`, keyed by the value of
+    `label`."""
+    out = {}
+    for (metric, labels), value in e.items():
+        if metric != name or 'quantile="' in labels or flt not in labels:
+            continue
+        m = re.search(label + r'="([^"]*)"', labels)
+        key = m.group(1) if m else ""
+        out[key] = out.get(key, 0) + value - s.get((metric, labels), 0)
+    return out
+
+
 def per_block(s, e, seconds):
     blocks = delta(s, e, "reth_sync_checkpoint", 'stage="Finish"')
     if not blocks:
@@ -95,7 +119,11 @@ def per_block(s, e, seconds):
                 rounds_per_block=delta(s, e, "reth_diesis_consensus_current_round") / blocks,
                 hold_ms_per_block=delta(s, e, "reth_diesis_lock_hold_ms_sum", 'lock="selected_owner"') / blocks,
                 quorum_wait_ms_per_block=delta(s, e, "reth_diesis_mpt_certify_phase_ms_sum",
-                                               'phase="quorum_wait"') / blocks)
+                                               'phase="quorum_wait"') / blocks,
+                duplicate_proposals_per_block=delta(s, e, "reth_diesis_commit_proposal_duplicate_skipped_total") / blocks,
+                deferred_tx_per_block=delta(s, e, "reth_diesis_producer_output_deferred_transactions_total") / blocks,
+                fallback_entries=delta(s, e, "reth_diesis_outcome_fallback_entries_total"),
+                rounds=delta(s, e, "reth_diesis_consensus_current_round"))
 
 
 def quantile(p, q):
@@ -141,7 +169,8 @@ def docker_socket():
 
 
 def container_stats(name, sock):
-    """(CPU nanoseconds, working-set bytes: usage minus inactive file cache) for one container."""
+    """(CPU nanoseconds, working-set bytes: usage minus inactive file cache, CFS throttling as
+    (throttled nanoseconds, throttled periods, periods)) for one container."""
     conn = DockerConnection(sock)
     try:
         conn.request("GET", f"/{os.environ.get('DIESIS_DOCKER_API', 'v1.47')}/containers/{name}/stats"
@@ -155,19 +184,23 @@ def container_stats(name, sock):
     memory = data.get("memory_stats", {})
     stats = memory.get("stats", {})
     inactive = stats.get("inactive_file", stats.get("total_inactive_file", 0))
-    return data["cpu_stats"]["cpu_usage"]["total_usage"], max(0, memory.get("usage", 0) - inactive)
+    throttling = data["cpu_stats"].get("throttling_data") or {}
+    return (data["cpu_stats"]["cpu_usage"]["total_usage"], max(0, memory.get("usage", 0) - inactive),
+            (throttling.get("throttled_time", 0), throttling.get("throttled_periods", 0), throttling.get("periods", 0)))
 
 
 class Observer:
     def __init__(self):
         self.lock = threading.Lock()
         self.blocks = {}      # number -> seen, hashes, finalized, all4 (wall clock)
-        self.samples = []     # (wall, [per-node parsed], {container: cpu_ns}, load1)
+        self.samples = []     # (wall, [per-node parsed], {container: cpu_ns}, load1, memory, throttling)
+        self.heads = []       # (wall, [validator latest], [follower latest or None])
         self.exited = []
         self.errors = []
         self.stop = threading.Event()
         self.captured = set()
         self.run_dir = None
+        self.started = time.time()
         self.sock = docker_socket()
         present = subprocess.run(["docker", "ps", "--format", "{{.Names}}"], capture_output=True, text=True).stdout.split()
         self.containers = [c for c in CONTAINERS if c in present]
@@ -198,13 +231,21 @@ class Observer:
         while not self.stop.is_set():
             try:
                 finalized = min(int(rpc(p, "eth_getBlockByNumber", ["finalized", False])["number"], 16) for p in RPC_URLS)
-                latest = min(int(rpc(p, "eth_blockNumber"), 16) for p in RPC_URLS)
+                heads = [int(rpc(p, "eth_blockNumber"), 16) for p in RPC_URLS]
+                latest = min(heads)
+                followers = []
+                for url in FOLLOWER_URLS:
+                    try:
+                        followers.append(int(rpc(url, "eth_blockNumber"), 16))
+                    except Exception:
+                        followers.append(None)
                 seen = time.time()
                 with self.lock:
                     for number in range(floor + 1, finalized + 1):
                         self.blocks.setdefault(number, {})["finalized"] = seen
                     for number in range(all4 + 1, latest + 1):
                         self.blocks.setdefault(number, {})["all4"] = seen
+                    self.heads.append((seen, heads, followers))
                 floor, all4 = max(floor, finalized), max(all4, latest)
             except Exception as error:
                 self.err(f"heads: {error}")
@@ -220,13 +261,13 @@ class Observer:
                 except Exception as error:
                     nodes.append(None)
                     self.err(f"prom {url}: {error}")
-            memory = {}
+            memory, throttling = {}, {}
             for name in self.containers:
                 try:
-                    cpu[name], memory[name] = container_stats(name, self.sock)
+                    cpu[name], memory[name], throttling[name] = container_stats(name, self.sock)
                 except Exception as error:
                     self.err(f"cpu {name}: {error}")
-            self.samples.append((wall, nodes, cpu, os.getloadavg()[0], memory))
+            self.samples.append((wall, nodes, cpu, os.getloadavg()[0], memory, throttling))
             try:
                 if not self.containers:
                     self.stop.wait(5)
@@ -321,6 +362,26 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
     intervals = [(y["seen"] - x["seen"]) * 1000 for x, y in zip(ordered, ordered[1:])]
     r["block_interval_ms"] = spread(intervals, (50, 99)) | dict(mean=window * 1000 / len(in_window) if in_window else None)
     r["empty_block_share"] = sum(1 for b in in_window if not txs(b)) / len(in_window) if in_window else None
+    r["largest_block_txs"] = max((txs(b) for b in in_window), default=None)
+    with obs.lock:
+        heads = [h for h in getattr(obs, "heads", []) if start <= h[0] <= end]
+    spread_blocks = [max(v) - min(v) for _, v, _ in heads]
+    r["validator_head_spread_blocks"] = spread(spread_blocks) | dict(max=max(spread_blocks, default=None))
+    r["follower_present"] = bool(FOLLOWER_URLS)
+    if FOLLOWER_URLS:
+        lag = [max(v) - f for _, v, fs in heads for f in fs if f is not None]
+        r["follower_lag_blocks"] = spread(lag) | dict(max=max(lag, default=None))
+        # Seconds from node 1 first serving a height to the slowest follower serving it.
+        first_seen = {n: b["seen"] for n, b in blocks.items()}
+        reached, lag_s = {}, []
+        for wall, _, fs in heads:
+            if any(f is None for f in fs):
+                continue
+            for n in range(min(fs) - 50, min(fs) + 1):
+                if n in first_seen and n not in reached:
+                    reached[n] = wall
+                    lag_s.append(wall - first_seen[n])
+        r["follower_lag_s"] = spread(lag_s)
     # Resource samples nearest the window bounds; per-node per-block deltas.
     samples = [s for s in obs.samples if all(x is not None for x in s[1])]
     inner = [s for s in samples if start - 2.5 <= s[0] <= end + 2.5]
@@ -341,6 +402,41 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
         r["cpu_cores_nodes"] = {name: (ns - first[2][name]) / 1e9 / span for name, ns in last[2].items()
                                 if name in first[2] and span > 0}
         r["cpu_s_per_tx_median"] = statistics.median(cpu.values()) if cpu else None
+        rounds = delta(first[1][0], last[1][0], "reth_diesis_consensus_current_round")
+        r["rounds_in_window"] = rounds
+        r["cpu_s_per_round_nodes"] = {name: (ns - first[2][name]) / 1e9 / rounds for name, ns in last[2].items()
+                                      if name in first[2] and rounds}
+        r["throttled_s_per_s_nodes"], r["throttled_period_share_nodes"] = {}, {}
+        if len(first) > 5 and len(last) > 5:
+            for name, (ns, throttled, periods) in last[5].items():
+                if name not in first[5] or span <= 0:
+                    continue
+                ns0, throttled0, periods0 = first[5][name]
+                r["throttled_s_per_s_nodes"][name] = (ns - ns0) / 1e9 / span
+                r["throttled_period_share_nodes"][name] = ((throttled - throttled0) / (periods - periods0)
+                                                           if periods > periods0 else None)
+        blocks1 = delta(first[1][0], last[1][0], "reth_sync_checkpoint", 'stage="Finish"')
+        r["hold_ms_per_block_by_site_node1"] = dict(sorted(
+            ((site.removeprefix("crates/node/src/dag_loop/"), ms / blocks1) for site, ms in
+             by_label(first[1][0], last[1][0], "reth_diesis_lock_hold_ms_sum", "site",
+                      'lock="selected_owner"').items() if blocks1),
+            key=lambda kv: -kv[1])[:15])
+        r["fallback_entries_by_cause_nodes"] = [by_label(first[1][i], last[1][i],
+                                                         "reth_diesis_outcome_fallback_entries_total", "cause")
+                                                for i in range(4)]
+        r["fallback_resolved_by_path_nodes"] = [by_label(first[1][i], last[1][i],
+                                                         "reth_diesis_outcome_fallback_resolved_total", "path")
+                                                for i in range(4)]
+        r["checkpoint_control_rejected_by_reason_nodes"] = [
+            by_label(first[1][i], last[1][i], "reth_diesis_checkpoint_control_inbound_rejected_total", "reason")
+            for i in range(4)]
+        r["flow_held_ms_by_reason_node1"] = by_label(first[1][0], last[1][0],
+                                                     "reth_diesis_horizon_flow_held_ms_total", "reason")
+        r["tx_selection_nodes"] = [dict(primary=delta(first[1][i], last[1][i], "reth_diesis_tx_source_selected_primary_total"),
+                                        fallback=delta(first[1][i], last[1][i], "reth_diesis_tx_source_selected_fallback_total"),
+                                        owner_live_skips=delta(first[1][i], last[1][i],
+                                                               "reth_diesis_tx_source_fallback_owner_live_total"))
+                                   for i in range(4)]
         r["bounds_s"] = [first[0] - start, last[0] - end]
     r["per_block_nodes"] = nodes
     r["per_block_median"] = {k: statistics.median(x[k] for x in nodes) for k in nodes[0]} if nodes else None
@@ -396,6 +492,79 @@ def agreement(obs, start, end):
     return dict(agree=all(c["agree"] for c in checked), finalized_head=head, heights=checked)
 
 
+def reverted_receipts(obs, start, end):
+    """Receipt statuses of every transaction in the blocks node 1 served inside the window: the
+    harness tracker counts a reverted transaction as confirmed, so reverts are reported apart."""
+    with obs.lock:
+        numbers = sorted(n for n, b in obs.blocks.items() if start <= b.get("seen", -1) <= end and b.get("hashes"))
+    ok = reverted = 0
+    errors = []
+    for n in numbers:
+        try:
+            for receipt in rpc(RPC_URLS[0], "eth_getBlockReceipts", [hex(n)], 20) or ():
+                if int(receipt.get("status", "0x1"), 16) == 0:
+                    reverted += 1
+                else:
+                    ok += 1
+        except Exception as error:
+            if len(errors) < 3:
+                errors.append(f"{n}: {str(error)[:120]}")
+    total = ok + reverted
+    return dict(blocks=len(numbers), succeeded=ok, reverted=reverted,
+                reverted_share=reverted / total if total else None, errors=errors)
+
+
+# Reth's file log (debug by default) keeps every timeline line. Stdout at info drops some: an info
+# event right after a debug-level `enabled!` check on the same thread can miss the stdout layer.
+NODE_FILE_LOGS = "/root/.cache/reth/logs/*/reth.log*"
+
+
+def file_timeline(container, path, since_unix):
+    """Copy a validator's timeline lines from its reth file logs (all rotations) to `path`, keeping
+    lines at or after `since_unix`. Returns the line count, or None when the logs are unreadable."""
+    pattern = "round timeline|mpt vote timeline"
+    try:
+        out = subprocess.run(["docker", "exec", container, "sh", "-c", f"grep -h -E '{pattern}' {NODE_FILE_LOGS}"],
+                             capture_output=True, text=True, errors="replace", timeout=300)
+    except Exception:
+        return None
+    if out.returncode not in (0, 1):
+        return None
+    since_us = int(since_unix * 1e6)
+    kept = 0
+    with open(path, "w") as f:
+        for line in out.stdout.splitlines(keepends=True):
+            m = re.search(r"unix_us=(\d+)", line)
+            if m and int(m.group(1)) >= since_us:
+                f.write(LOG_ANSI.sub("", line))
+                kept += 1
+    return kept
+
+
+SAMPLED_TX = re.compile(r'event="tx_admitted" tx=(0x[0-9a-fA-F]{64})')
+
+
+def sampled_tx_blocks(obs, run_dir):
+    """Block number, node-1 first-seen and all-four finalized times of every transaction the
+    validators sampled on the round timeline (DIESIS_TRACE_TX_SAMPLE), for diesis-timeline.py."""
+    hashes = set()
+    for path in run_dir.glob("timeline-*.log"):
+        with open(path, errors="replace") as f:
+            hashes.update(m.group(1).lower() for line in f if (m := SAMPLED_TX.search(line)))
+    if not hashes:
+        return 0
+    out = {}
+    with obs.lock:
+        for number, block in obs.blocks.items():
+            for h in block.get("hashes") or ():
+                if h.lower() in hashes:
+                    out[h.lower()] = dict(number=number, seen=block.get("seen"), finalized=block.get("finalized"))
+        blocks = {n: dict(seen=b.get("seen"), finalized=b.get("finalized"), txs=len(b.get("hashes") or ()))
+                  for n, b in obs.blocks.items()}
+    (run_dir / "timeline-blocks.json").write_text(json.dumps(dict(sampled=out, blocks=blocks)) + "\n")
+    return len(out)
+
+
 LOG_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 WORK_REFUSED = re.compile(r'Work refused; (retrying once Work frees|not retrying) operation="?(\w+)')
 
@@ -420,32 +589,39 @@ class LogCounts:
     start) and count lines with count_log_line. Streaming survives the fleet's log rotation and the
     containers' removal at teardown."""
 
-    def __init__(self, containers):
+    def __init__(self, containers, run_dir=None):
         self.counts = {c: dict(unknown_parent_vertex=0, work_refused={}, work_admission_limit_errors=0)
                        for c in containers}
-        self.procs = []
+        self.procs, self.sinks = [], []
         since = f"{time.time() - 1:.3f}"
         for name in containers:
             proc = subprocess.Popen(["docker", "logs", "-f", "--since", since, name], stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, errors="replace")
             self.procs.append(proc)
-            threading.Thread(target=self.read, args=(proc, self.counts[name]), daemon=True).start()
+            sink = open(run_dir / f"timeline-{name}.log", "w") if run_dir is not None else None
+            if sink is not None:
+                self.sinks.append(sink)
+            threading.Thread(target=self.read, args=(proc, self.counts[name], sink), daemon=True).start()
 
     @staticmethod
-    def read(proc, counts):
+    def read(proc, counts, sink=None):
         for line in proc.stdout:
             count_log_line(line, counts)
+            if sink is not None and any(target in line for target in TIMELINE_TARGETS):
+                sink.write(LOG_ANSI.sub("", line))
 
     def stop(self):
         for proc in self.procs:
             proc.terminate()
         time.sleep(0.5)
+        for sink in self.sinks:
+            sink.close()
         return self.counts
 
 
 def watch(a):
     obs = Observer()
-    logs = LogCounts(obs.containers)
+    logs = LogCounts(obs.containers, a.run_dir)
     obs.run_dir = a.run_dir
     done = threading.Event()
     signal.signal(signal.SIGUSR1, lambda *_: done.set())
@@ -474,7 +650,14 @@ def watch(a):
     metrics["drain_s"] = time.time() - load_end
     metrics["finalized_agreement"] = agreement(obs, metrics["window_start"], metrics["window_end"])
     metrics["pool_pending_after_drain"] = pool
+    metrics["receipts"] = reverted_receipts(obs, metrics["window_start"], metrics["window_end"])
     metrics["log_counts"] = logs.stop()
+    # Replace the stdout copies with the complete file-log timeline where readable.
+    metrics["timeline_source"] = {}
+    for name in obs.containers:
+        kept = file_timeline(name, a.run_dir / f"timeline-{name}.log", obs.started)
+        metrics["timeline_source"][name] = "stdout" if kept is None else f"file ({kept} lines)"
+    metrics["timeline_sampled_txs_in_blocks"] = sampled_tx_blocks(obs, a.run_dir)
     obs.stop.set()
     (a.run_dir / "diesis-metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")
     if not a.keep_raw:
@@ -505,6 +688,17 @@ def print_summary(m):
           f"empty blocks {fmt(m['empty_block_share'])}  pool slope {fmt(m['pool_slope_tx_per_s'])}/s")
     print(f"  Verdicts:               generator_bound={m['generator_bound']}  chain_saturated={m['chain_saturated']}"
           + (f"  EXITS={m['validator_exits']}" if m["validator_exits"] else ""))
+    cores = m.get("cpu_cores_nodes") or {}
+    throttled = m.get("throttled_s_per_s_nodes") or {}
+    per_round = m.get("cpu_s_per_round_nodes") or {}
+    print(f"  CPU cores (per node):   {', '.join(f'{v:.2f}' for v in cores.values()) or '-'}  "
+          f"ms/round {', '.join(f'{v * 1000:.0f}' for v in per_round.values()) or '-'}  "
+          f"throttled s/s {', '.join(f'{v:.3f}' for v in throttled.values()) or '-'}")
+    receipts = m.get("receipts") or {}
+    print(f"  Receipts:               succeeded {receipts.get('succeeded')}  reverted {receipts.get('reverted')}  "
+          f"largest block {m.get('largest_block_txs')} tx  head spread p99 "
+          f"{(m.get('validator_head_spread_blocks') or {}).get('p99')}  follower "
+          f"{(m.get('follower_lag_blocks') or {}).get('p99') if m.get('follower_present') else 'none'}")
     agree = m.get("finalized_agreement") or {}
     print(f"  Finalized agreement:    {agree.get('agree')} at heights "
           f"{[c['height'] for c in agree.get('heights', [])]}")

@@ -25,6 +25,7 @@ fleet = load(ROOT / "bench-targets/chains/diesis/fleet.py")
 ab = load(ROOT / "bench-targets/scripts/ab.py")
 judged = load(ROOT / "bench-targets/scripts/judged.py")
 idle = load(ROOT / "bench-targets/scripts/diesis-idle.py")
+timeline = load(ROOT / "bench-targets/scripts/diesis-timeline.py")
 
 W0 = 1.795e9
 
@@ -38,14 +39,18 @@ def prom(k, pending=100):
             ("reth_diesis_lock_hold_ms_sum", '{lock="other",site="c"}'): 99999 * k,
             ("reth_diesis_mpt_certify_phase_ms_sum", '{phase="quorum_wait"}'): 2000 * k,
             ("reth_diesis_mpt_certify_phase_ms", '{phase="quorum_wait",quantile="0.99"}'): 600.0,
-            ("reth_transaction_pool_pending_pool_transactions", ""): pending * k}
+            ("reth_transaction_pool_pending_pool_transactions", ""): pending * k,
+            ("reth_diesis_commit_proposal_duplicate_skipped_total", ""): 20 * k,
+            ("reth_diesis_producer_output_deferred_transactions_total", ""): 50 * k,
+            ("reth_diesis_outcome_fallback_entries_total", '{cause="carrier_round_below_quorum"}'): k,
+            ("reth_diesis_checkpoint_control_inbound_rejected_total", '{reason="lane_full"}'): 2 * k}
 
 
 def synthetic(tmp, pending=100, unfinalized_from=None):
     """120 blocks 0.5 s apart from W0, 1,000 txs each (every 10th empty), finalized 1 s after first
     seen; each tx submitted 2 s before its block was seen; one hash never included. Load starts
     at W0 - 2 (first submission), so warmup 7 s and duration 57 s give the window [W0+5, W0+55]."""
-    obs = types.SimpleNamespace(lock=threading.Lock(), blocks={}, samples=[], exited=[], errors=[])
+    obs = types.SimpleNamespace(lock=threading.Lock(), blocks={}, samples=[], exited=[], errors=[], heads=[])
     rows = []
     for n in range(120):
         seen = W0 + n * 0.5
@@ -59,7 +64,11 @@ def synthetic(tmp, pending=100, unfinalized_from=None):
     rows.append(("0xdead", int((W0 + 20) * 1e6)))
     for k in range(14):
         obs.samples.append((W0 + k * 5, [prom(k, pending)] * 4, {f"n{i}": int(k * 5e9) for i in range(4)}, 4.0,
-                            {f"n{i}": (i + 1) * 1000 + k for i in range(4)}))
+                            {f"n{i}": (i + 1) * 1000 + k for i in range(4)},
+                            {f"n{i}": (int(k * 5e8), k * 10, k * 50) for i in range(4)}))
+    for k in range(600):
+        lead = 100 + k // 10
+        obs.heads.append((W0 + k * 0.1, [lead, lead, lead - (k % 3), lead], []))
     log = Path(tmp) / "submit-log.csv"
     log.write_text("hash,submit_unix_us\n" + "".join(f"{h},{u}\n" for h, u in rows))
     return obs, log
@@ -102,6 +111,22 @@ class ObserverMetrics(unittest.TestCase):
         self.assertGreater(m["cpu_s_per_tx_median"], 0)
         self.assertAlmostEqual(m["cpu_cores_nodes"]["n0"], 1.0)
         self.assertEqual(m["peak_memory_bytes_nodes"]["n3"], 4000 + 11)  # samples 1-11 fall in the window
+
+    def test_cpu_throttling_rounds_and_attribution_per_block(self):
+        m = self.metrics()
+        # 5 s CPU per 5 s sample, 0.5 s throttled per 5 s, 30 rounds per sample.
+        self.assertAlmostEqual(m["throttled_s_per_s_nodes"]["n0"], 0.1)
+        self.assertAlmostEqual(m["throttled_period_share_nodes"]["n0"], 0.2)
+        self.assertAlmostEqual(m["cpu_s_per_round_nodes"]["n0"], 5 / 30)
+        self.assertEqual(m["hold_ms_per_block_by_site_node1"], {"a": 300, "b": 100})
+        pb = m["per_block_median"]
+        self.assertEqual(pb["duplicate_proposals_per_block"], 2)
+        self.assertEqual(pb["deferred_tx_per_block"], 5)
+        self.assertEqual(m["fallback_entries_by_cause_nodes"][0], {"carrier_round_below_quorum": 10})
+        self.assertEqual(m["largest_block_txs"], 1000)
+        self.assertEqual(m["checkpoint_control_rejected_by_reason_nodes"][3], {"lane_full": 20})
+        self.assertEqual(m["validator_head_spread_blocks"]["max"], 2)
+        self.assertFalse(m["follower_present"])
 
     def test_verdicts(self):
         self.assertFalse(self.metrics()["generator_bound"])
@@ -360,6 +385,9 @@ class AB(unittest.TestCase):
             ab.parse_side("env=PATH=/x")
         self.assertEqual(ab.parse_side("outcome=hybrid,name=pq")["outcome"], "hybrid")
         self.assertNotIn("outcome", ab.parse_side("profile=uncapped"))
+        self.assertEqual(ab.parse_side("test=evm")["test"], "evm")
+        with self.assertRaises(SystemExit):
+            ab.parse_side("test=orderbook")
         with self.assertRaises(SystemExit):
             ab.parse_side("outcome=ml-dsa")
 
@@ -498,3 +526,66 @@ class Idle(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def timeline_line(kind, us, **fields):
+    target, message = (("diesis_round_timeline", "round timeline") if kind == "round"
+                       else ("diesis_mpt_vote_timeline", "mpt vote timeline"))
+    body = " ".join(f'{k}="{v}"' if isinstance(v, str) else f"{k}={v}" for k, v in fields.items())
+    return f"2026-11-22T00:00:00.000000Z  INFO {target}: {message} {body} unix_us={int(us * 1e6)}\n"
+
+
+class TimelineAnalysis(unittest.TestCase):
+    """Two sampled transfers submitted between rounds 10 and 11: A to node 1, which owns its
+    sender and carries it at round 11; B to node 2, which does not, so node 3 carries it at 12.
+    Both land in block 5, cut from the Commit of leader round 14."""
+
+    def test_owner_split_and_stages(self):
+        A, B = "0x" + "a" * 64, "0x" + "b" * 64
+        t = lambda r, node: 100 + r * 0.2 + node * 0.001
+        lines = {n: [] for n in range(1, 5)}
+        for n in range(1, 5):
+            for r in range(10, 20):
+                sampled = A if (n, r) == (1, 11) else B if (n, r) == (3, 12) else ""
+                lines[n].append(timeline_line("round", t(r, n), event="vertex_signed", round=r,
+                                              leader="true" if (r == 14 and n == 2) else "false",
+                                              mode="partitioned", slot=n - 1, proposers=4, carried=1 if sampled else 0,
+                                              sampled=sampled))
+        lines[1].append(timeline_line("round", 102.05, event="tx_admitted", tx=A, sender="0x1", origin="local"))
+        lines[2].append(timeline_line("round", 102.05, event="tx_admitted", tx=B, sender="0x2", origin="local"))
+        for n in (1, 3, 4):
+            lines[n].append(timeline_line("round", 102.1, event="tx_admitted", tx=B, sender="0x2", origin="external"))
+        lines[1].append(timeline_line("round", t(11, 1) - 0.0005, event="tx_selection", round=11, tx=A,
+                                      verdict="primary", owner=0, local=0, proposers=4))
+        lines[2].append(timeline_line("round", t(11, 2) - 0.0005, event="tx_selection", round=11, tx=B,
+                                      verdict="owner_live", owner=2, local=1, proposers=4))
+        lines[3].append(timeline_line("round", t(12, 3) - 0.0005, event="tx_selection", round=12, tx=B,
+                                      verdict="primary", owner=2, local=2, proposers=4))
+        lines[1].append(timeline_line("vote", 103.39, event="round", number=17, detail=""))
+        lines[1].append(timeline_line("round", 103.6, event="decided", round=14, offset=0, value="commit",
+                                      path="carried_quorum", view=0))
+        lines[1].append(timeline_line("round", 103.7, event="installed", round=14, offset=0, changed="true"))
+        lines[1].append(timeline_line("round", 103.9, event="block_cut", number=5, round=14, included=2, deferred=0))
+        lines[2].append(timeline_line("vote", 104.0, event="requested", number=5, detail=""))
+        lines[2].append(timeline_line("vote", 104.2, event="quorum", number=5, detail="collector"))
+        with tempfile.TemporaryDirectory() as tmp:
+            for n, body in lines.items():
+                Path(tmp, f"timeline-bench-node-{n}.log").write_text("".join(body))
+            Path(tmp, "timeline-blocks.json").write_text(json.dumps(dict(
+                sampled={A: dict(number=5, seen=104.3, finalized=104.4), B: dict(number=5, seen=104.3, finalized=104.4)},
+                blocks={})))
+            s = timeline.analyze(tmp)
+            rows = {r["tx"]: r for r in json.loads(Path(tmp, "stages.json").read_text())["txs"]}
+        self.assertEqual(s["sampled_txs"], 2)
+        owner, other = s["inclusion"]["owner"], s["inclusion"]["non_owner"]
+        self.assertEqual((owner["n"], owner["first_opportunity_share"]), (1, 1.0))
+        self.assertEqual((other["n"], other["first_opportunity_share"], other["extra_rounds"]["p50"]), (1, 0.0, 1))
+        self.assertAlmostEqual(rows[A]["a"], t(11, 1) - 102.05, places=4)
+        self.assertAlmostEqual(rows[A]["b"], t(14, 2) - t(11, 1), places=4)
+        self.assertAlmostEqual(rows[A]["c"], 103.39 - t(14, 2), places=4)
+        self.assertAlmostEqual(rows[A]["d1"], 103.6 - 103.39, places=4)
+        self.assertAlmostEqual(rows[B]["g"], 104.0 - 103.9, places=4)
+        self.assertAlmostEqual(rows[B]["h"], 0.2, places=4)
+        self.assertAlmostEqual(rows[B]["total"], 104.4 - 102.05, places=4)
+        self.assertEqual(rows[B]["rounds_carry_to_leader"], 2)
+        self.assertAlmostEqual(s["round_period_s"]["p50"], 0.2)
