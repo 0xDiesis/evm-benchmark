@@ -166,15 +166,70 @@ pub fn benchmark_validity(
     }
 }
 
+/// Receipt outcomes of included transactions.
+///
+/// `confirmed` in result reports is `successful + status_unknown`: an inclusion
+/// whose receipt status was never read (block-body or nonce fallback) is not
+/// known to have reverted, but it is not proven successful either. Reverted
+/// transactions are never confirmations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TxOutcomeCounts {
+    /// Included with receipt status 1.
+    pub successful: u32,
+    /// Included with receipt status 0.
+    pub reverted: u32,
+    /// Included, receipt status not read.
+    pub status_unknown: u32,
+}
+
+/// Name reverted receipts in an invalid run's reason.
+///
+/// [`benchmark_validity`] already fails a run whose confirmations fall short of
+/// its accepted count; this says how much of that shortfall was reverts.
+pub fn with_revert_reason(
+    validity: (bool, Option<String>),
+    outcomes: TxOutcomeCounts,
+) -> (bool, Option<String>) {
+    if outcomes.reverted == 0 {
+        return validity;
+    }
+    let revert = format!("{} included transactions reverted", outcomes.reverted);
+    let reason = match validity.1 {
+        Some(reason) => format!("{reason}; {revert}"),
+        None => revert,
+    };
+    (false, Some(reason))
+}
+
 // Per-method statistics for EVM benchmarks
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PerMethodStats {
+    /// Accepted transactions of this method (included + still pending).
     pub count: u32,
+    /// Included and not reverted (successful + status unknown).
     pub confirmed: u32,
     pub reverted: u32,
+    #[serde(default)]
+    pub successful: u32,
+    #[serde(default)]
+    pub status_unknown: u32,
+    /// Accepted but not included when the run ended (backlog).
+    #[serde(default)]
+    pub pending: u32,
+    /// Mean receipt gas used over successful receipts that report it.
     pub avg_gas: u64,
+    /// Mean receipt gas used over reverted receipts that report it.
+    #[serde(default)]
+    pub avg_gas_reverted: u64,
+    /// Declared gas limit (mean over accepted transactions of this method).
+    #[serde(default)]
+    pub avg_gas_limit: u64,
+    /// Submit to receipt, confirmed transactions only.
     pub latency_p50: u64,
     pub latency_p95: u64,
+    #[serde(default)]
+    pub latency_p99: u64,
 }
 
 // Server metrics from Prometheus
@@ -210,8 +265,13 @@ pub struct BurstResult {
     /// Transactions rejected by RPC/txpool or missing a valid JSON-RPC response.
     #[serde(default)]
     pub failed: u32,
+    /// Included and not reverted: successful plus status unknown.
     pub confirmed: u32,
     pub pending: u32,
+    /// Receipt outcomes, flattened into the report as `successful`,
+    /// `reverted` and `status_unknown`.
+    #[serde(flatten)]
+    pub outcomes: TxOutcomeCounts,
     /// True only when attempted == accepted == confirmed, with no failures or
     /// pending transactions. Invalid runs should not be used for best-TPS claims.
     #[serde(default)]
@@ -268,9 +328,12 @@ pub struct SustainedResult {
     pub sent: u32,
     #[serde(default)]
     pub accepted: u32,
+    /// Included and not reverted: successful plus status unknown.
     pub confirmed: u32,
     pub pending: u32,
     pub errors: u32,
+    #[serde(flatten)]
+    pub outcomes: TxOutcomeCounts,
     #[serde(default)]
     pub valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -309,6 +372,7 @@ impl SustainedResult {
             failed: self.errors,
             confirmed: self.confirmed,
             pending: self.pending,
+            outcomes: self.outcomes,
             valid: self.valid,
             invalid_reason: self.invalid_reason.clone(),
             submission_errors: self.submission_errors.clone(),
@@ -521,6 +585,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reverted_receipts_make_a_run_invalid_and_are_named() {
+        let outcomes = TxOutcomeCounts {
+            successful: 9,
+            reverted: 1,
+            status_unknown: 0,
+        };
+        let (valid, reason) = with_revert_reason(benchmark_validity(10, 10, 0, 9, 0), outcomes);
+        assert!(!valid);
+        assert_eq!(
+            reason.as_deref(),
+            Some("confirmed 9 of 10 accepted transactions; 1 included transactions reverted")
+        );
+        assert_eq!(
+            with_revert_reason((true, None), TxOutcomeCounts::default()),
+            (true, None)
+        );
+    }
+
+    #[test]
     fn test_sustained_result_to_burst_result() {
         let sustained = SustainedResult {
             attempted: 503,
@@ -528,6 +611,7 @@ mod tests {
             accepted: 500,
             confirmed: 480,
             pending: 20,
+            outcomes: Default::default(),
             errors: 3,
             valid: false,
             invalid_reason: Some("3 transaction submissions failed".into()),
@@ -683,6 +767,7 @@ mod tests {
             failed: 0,
             confirmed: 950,
             pending: 50,
+            outcomes: Default::default(),
             valid: false,
             invalid_reason: Some("50 accepted transactions still pending".into()),
             submission_errors: vec![],
@@ -731,6 +816,7 @@ mod tests {
                 failed: 0,
                 confirmed: 490,
                 pending: 10,
+                outcomes: Default::default(),
                 valid: false,
                 invalid_reason: Some("10 accepted transactions still pending".into()),
                 submission_errors: vec![],
@@ -764,6 +850,7 @@ mod tests {
             avg_gas: 50_000,
             latency_p50: 40,
             latency_p95: 120,
+            ..Default::default()
         };
         let json = serde_json::to_string(&pms).unwrap();
         let deser: PerMethodStats = serde_json::from_str(&json).unwrap();
@@ -847,6 +934,7 @@ mod tests {
             accepted: 1000,
             confirmed: 990,
             pending: 10,
+            outcomes: Default::default(),
             errors: 1,
             valid: false,
             invalid_reason: Some("1 transaction submissions failed".into()),

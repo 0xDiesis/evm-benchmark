@@ -198,6 +198,7 @@ mod tests {
             failed: 0,
             confirmed: 95,
             pending: 5,
+            outcomes: Default::default(),
             valid: false,
             invalid_reason: Some("5 accepted transactions still pending".into()),
             submission_errors: vec![],
@@ -286,6 +287,7 @@ mod tests {
                     avg_gas: 50_000,
                     latency_p50: 10,
                     latency_p95: 20,
+                    ..Default::default()
                 },
             ),
             (
@@ -297,6 +299,7 @@ mod tests {
                     avg_gas: 100_000,
                     latency_p50: 10,
                     latency_p95: 20,
+                    ..Default::default()
                 },
             ),
         ]));
@@ -316,6 +319,7 @@ mod tests {
                 avg_gas: 80_000,
                 latency_p50: 10,
                 latency_p95: 20,
+                ..Default::default()
             },
         )]));
 
@@ -351,6 +355,7 @@ mod tests {
                     avg_gas: 50_000,
                     latency_p50: 10,
                     latency_p95: 20,
+                    ..Default::default()
                 },
             ),
             (
@@ -362,6 +367,7 @@ mod tests {
                     avg_gas: 100_000,
                     latency_p50: 10,
                     latency_p95: 20,
+                    ..Default::default()
                 },
             ),
         ]));

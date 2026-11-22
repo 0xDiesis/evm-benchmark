@@ -574,7 +574,10 @@ try:
     print(f'  Attempted:     {attempted}')
     print(f'  Accepted:      {accepted}')
     print(f'  Failed:        {failed}')
-    print(f'  Confirmed:     {r[\"confirmed\"]}')
+    print(f'  Confirmed:     {r[\"confirmed\"]}  (successful {r.get(\"successful\", \"-\")}, '
+          f'status unknown {r.get(\"status_unknown\", \"-\")})')
+    print(f'  Reverted:      {r.get(\"reverted\", \"-\")}')
+    print(f'  Backlog:       {r.get(\"pending\", 0)}')
     print(f'  Valid run:     {valid}')
     if cfg.get('execution_mode') == 'sustained' and cfg.get('target_tps') and cfg.get('duration_secs'):
         target_tps = float(cfg['target_tps'])

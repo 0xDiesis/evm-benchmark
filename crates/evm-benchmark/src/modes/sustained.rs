@@ -419,7 +419,11 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         let summaries = submission_errors.lock().await.clone();
         merge_submission_error_summaries(summaries)
     };
-    let (valid, invalid_reason) = benchmark_validity(attempted, sent, errors, confirmed, pending);
+    let outcomes = tracker.outcome_counts();
+    let (valid, invalid_reason) = crate::types::with_revert_reason(
+        benchmark_validity(attempted, sent, errors, confirmed, pending),
+        outcomes,
+    );
 
     let actual_tps = actual_tps(confirmed, total_duration);
 
@@ -436,6 +440,7 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         confirmed,
         pending,
         errors,
+        outcomes,
         valid,
         invalid_reason,
         submission_errors,
@@ -895,6 +900,7 @@ mod tests {
             accepted: 500,
             confirmed: 480,
             pending: 10,
+            outcomes: Default::default(),
             errors: 10,
             valid: false,
             invalid_reason: Some("10 transaction submissions failed".into()),
@@ -1124,6 +1130,7 @@ mod tests {
             accepted: 950,
             confirmed: 900,
             pending: 50,
+            outcomes: Default::default(),
             errors: 50,
             valid: false,
             invalid_reason: Some("50 transaction submissions failed".into()),
@@ -1159,6 +1166,7 @@ mod tests {
             accepted: 100,
             confirmed: 90,
             pending: 5,
+            outcomes: Default::default(),
             errors: 5,
             valid: false,
             invalid_reason: Some("5 transaction submissions failed".into()),

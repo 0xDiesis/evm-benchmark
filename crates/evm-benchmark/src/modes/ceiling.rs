@@ -1224,6 +1224,7 @@ mod tests {
                     failed: 0,
                     confirmed: 1,
                     pending: 0,
+                    outcomes: Default::default(),
                     valid: true,
                     invalid_reason: None,
                     submission_errors: vec![],

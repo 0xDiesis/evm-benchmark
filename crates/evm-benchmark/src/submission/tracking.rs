@@ -1,4 +1,4 @@
-use crate::types::{LatencyStats, PerMethodStats, TransactionType, TxRecord};
+use crate::types::{LatencyStats, PerMethodStats, TransactionType, TxOutcomeCounts, TxRecord};
 use alloy_primitives::{Address, B256};
 use dashmap::DashMap;
 use std::collections::BTreeMap;
@@ -15,7 +15,14 @@ struct ConfirmedEntry {
     gas_limit: u64,
     gas_used: Option<u64>,
     wave: Option<u32>,
-    reverted: bool,
+    /// Receipt status: `Some(true)` success, `Some(false)` revert, `None` not read.
+    status: Option<bool>,
+}
+
+impl ConfirmedEntry {
+    fn reverted(&self) -> bool {
+        self.status == Some(false)
+    }
 }
 
 /// Metadata captured when an accepted transaction enters confirmation tracking.
@@ -52,7 +59,8 @@ pub struct LatencyTracker {
     pending_scan_visits: Arc<AtomicU64>,
     /// Confirmed transactions moved out of pending immediately.
     confirmed: Arc<parking_lot::Mutex<Vec<ConfirmedEntry>>>,
-    /// Atomic confirmed count for lock-free reads.
+    /// Included transactions that did not revert (successful or status
+    /// unknown), for lock-free reads.
     confirmed_count: Arc<AtomicU32>,
 }
 
@@ -186,10 +194,12 @@ impl LatencyTracker {
                 gas_limit: record.gas_limit,
                 gas_used: gas_used.or(record.gas_used),
                 wave: record.wave,
-                reverted: status_success.is_some_and(|success| !success),
+                status: status_success,
             };
+            if !entry.reverted() {
+                self.confirmed_count.fetch_add(1, Ordering::Relaxed);
+            }
             self.confirmed.lock().push(entry);
-            self.confirmed_count.fetch_add(1, Ordering::Relaxed);
             true
         } else {
             false
@@ -252,9 +262,23 @@ impl LatencyTracker {
         self.pending.len() as u32
     }
 
-    /// Number of confirmed transactions.
+    /// Included transactions that did not revert: successful receipts plus
+    /// inclusions whose receipt status was not read. Reverts are excluded.
     pub fn confirmed_count(&self) -> u32 {
         self.confirmed_count.load(Ordering::Relaxed)
+    }
+
+    /// Included transactions split by receipt outcome.
+    pub fn outcome_counts(&self) -> TxOutcomeCounts {
+        let mut counts = TxOutcomeCounts::default();
+        for entry in self.confirmed.lock().iter() {
+            match entry.status {
+                Some(true) => counts.successful += 1,
+                Some(false) => counts.reverted += 1,
+                None => counts.status_unknown += 1,
+            }
+        }
+        counts
     }
 
     /// Return hashes of all transactions that have not yet been confirmed.
@@ -265,7 +289,11 @@ impl LatencyTracker {
     /// Compute latency statistics across all confirmed transactions.
     pub fn statistics(&self) -> LatencyStats {
         let confirmed = self.confirmed.lock();
-        let mut latencies: Vec<u64> = confirmed.iter().map(|e| e.latency_ms).collect();
+        let mut latencies: Vec<u64> = confirmed
+            .iter()
+            .filter(|e| !e.reverted())
+            .map(|e| e.latency_ms)
+            .collect();
 
         if latencies.is_empty() {
             return LatencyStats {
@@ -320,71 +348,70 @@ impl LatencyTracker {
     }
 
     /// Compute per-method statistics for EVM benchmarks.
+    ///
+    /// `confirmed` excludes reverts; gas used averages come from receipts of
+    /// the matching outcome only (never the declared limit); latencies cover
+    /// confirmed transactions.
     #[allow(dead_code)]
     pub fn per_method_statistics(&self) -> BTreeMap<String, PerMethodStats> {
-        let confirmed = self.confirmed.lock();
-
-        let mut method_latencies: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-        let mut method_gas: BTreeMap<String, (u64, u32)> = BTreeMap::new();
-        let mut method_reverted: BTreeMap<String, u32> = BTreeMap::new();
-
-        for entry in confirmed.iter() {
-            let method_name = format!("{:?}", entry.method);
-            method_latencies
-                .entry(method_name.clone())
-                .or_default()
-                .push(entry.latency_ms);
-
-            let gas = entry.gas_used.unwrap_or(entry.gas_limit);
-            let (total_gas, count) = method_gas.entry(method_name.clone()).or_insert((0, 0));
-            *total_gas += gas;
-            *count += 1;
-            if entry.reverted {
-                *method_reverted.entry(method_name).or_insert(0) += 1;
+        #[derive(Default)]
+        struct Acc {
+            stats: PerMethodStats,
+            latencies: Vec<u64>,
+            gas_ok: (u64, u64),
+            gas_reverted: (u64, u64),
+            gas_limit: (u64, u64),
+        }
+        let mut by_method: BTreeMap<String, Acc> = BTreeMap::new();
+        for entry in self.confirmed.lock().iter() {
+            let acc = by_method.entry(format!("{:?}", entry.method)).or_default();
+            acc.stats.count += 1;
+            acc.gas_limit.0 += entry.gas_limit;
+            acc.gas_limit.1 += 1;
+            match entry.status {
+                Some(true) => {
+                    acc.stats.successful += 1;
+                    if let Some(gas) = entry.gas_used {
+                        acc.gas_ok.0 += gas;
+                        acc.gas_ok.1 += 1;
+                    }
+                }
+                Some(false) => {
+                    acc.stats.reverted += 1;
+                    if let Some(gas) = entry.gas_used {
+                        acc.gas_reverted.0 += gas;
+                        acc.gas_reverted.1 += 1;
+                    }
+                }
+                None => acc.stats.status_unknown += 1,
+            }
+            if !entry.reverted() {
+                acc.stats.confirmed += 1;
+                acc.latencies.push(entry.latency_ms);
             }
         }
-
-        let mut pending_by_method: BTreeMap<String, u32> = BTreeMap::new();
         for entry in self.pending.iter() {
-            *pending_by_method
-                .entry(format!("{:?}", entry.method))
-                .or_insert(0) += 1;
+            let acc = by_method.entry(format!("{:?}", entry.method)).or_default();
+            acc.stats.count += 1;
+            acc.stats.pending += 1;
+            acc.gas_limit.0 += entry.gas_limit;
+            acc.gas_limit.1 += 1;
         }
 
-        let mut result = BTreeMap::new();
-        for (method, mut latencies) in method_latencies {
-            latencies.sort_unstable();
-            let count = latencies.len() as u32;
-            let (avg_gas, _) = method_gas.get(&method).copied().unwrap_or((0, 0));
-
-            result.insert(
-                method.clone(),
-                PerMethodStats {
-                    count,
-                    confirmed: count,
-                    reverted: method_reverted.get(&method).copied().unwrap_or(0),
-                    avg_gas: if count > 0 { avg_gas / count as u64 } else { 0 },
-                    latency_p50: percentile(&latencies, 0.50),
-                    latency_p95: percentile(&latencies, 0.95),
-                },
-            );
-        }
-
-        for (method, pending_count) in pending_by_method {
-            result
-                .entry(method)
-                .and_modify(|stats| stats.count += pending_count)
-                .or_insert(PerMethodStats {
-                    count: pending_count,
-                    confirmed: 0,
-                    reverted: 0,
-                    avg_gas: 0,
-                    latency_p50: 0,
-                    latency_p95: 0,
-                });
-        }
-
-        result
+        let mean = |(sum, n): (u64, u64)| sum.checked_div(n).unwrap_or(0);
+        by_method
+            .into_iter()
+            .map(|(method, mut acc)| {
+                acc.latencies.sort_unstable();
+                acc.stats.avg_gas = mean(acc.gas_ok);
+                acc.stats.avg_gas_reverted = mean(acc.gas_reverted);
+                acc.stats.avg_gas_limit = mean(acc.gas_limit);
+                acc.stats.latency_p50 = percentile(&acc.latencies, 0.50);
+                acc.stats.latency_p95 = percentile(&acc.latencies, 0.95);
+                acc.stats.latency_p99 = percentile(&acc.latencies, 0.99);
+                (method, acc.stats)
+            })
+            .collect()
     }
 }
 
@@ -835,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn test_per_method_statistics_uses_gas_used_average() {
+    fn test_per_method_statistics_ignores_gas_without_receipt_status() {
         let tracker = LatencyTracker::new();
 
         for (idx, gas_used) in [(1u8, 40_000u64), (2u8, 80_000u64)] {
@@ -858,7 +885,12 @@ mod tests {
         let stats = tracker.per_method_statistics();
         let mint_stats = stats.get("ERC20Mint").expect("missing ERC20Mint");
         assert_eq!(mint_stats.confirmed, 2);
-        assert_eq!(mint_stats.avg_gas, 60_000);
+        assert_eq!(mint_stats.status_unknown, 2);
+        assert_eq!(
+            mint_stats.avg_gas, 0,
+            "gas from inclusions without a receipt status is not a success average"
+        );
+        assert_eq!(mint_stats.avg_gas_limit, 90_000);
     }
 
     #[test]
@@ -888,9 +920,86 @@ mod tests {
 
         let stats = tracker.per_method_statistics();
         let mint_stats = stats.get("ERC20Mint").expect("missing ERC20Mint");
-        assert_eq!(mint_stats.confirmed, 2);
+        assert_eq!(mint_stats.count, 2);
+        assert_eq!(
+            mint_stats.confirmed, 1,
+            "a reverted receipt is not a confirmation"
+        );
+        assert_eq!(mint_stats.successful, 1);
         assert_eq!(mint_stats.reverted, 1);
-        assert_eq!(mint_stats.avg_gas, 40_000);
+        assert_eq!(mint_stats.status_unknown, 0);
+        assert_eq!(
+            mint_stats.avg_gas, 30_000,
+            "gas used comes from successful receipts only"
+        );
+        assert_eq!(mint_stats.avg_gas_reverted, 50_000);
+    }
+
+    #[test]
+    fn reverted_receipts_are_counted_apart_from_confirmations() {
+        let tracker = LatencyTracker::new();
+        let ok = B256::with_last_byte(1);
+        let reverted = B256::with_last_byte(2);
+        let no_status = B256::with_last_byte(3);
+        let backlog = B256::with_last_byte(4);
+        for (nonce, hash) in [ok, reverted, no_status, backlog].into_iter().enumerate() {
+            tracker.record_submit(
+                hash,
+                nonce as u64,
+                Address::default(),
+                90_000,
+                TransactionType::ERC20Transfer,
+            );
+        }
+
+        let now = Instant::now();
+        tracker.on_block_inclusion_with_receipt(ok, now, Some(30_000), Some(true));
+        tracker.on_block_inclusion_with_receipt(reverted, now, Some(25_000), Some(false));
+        // A block-body inclusion carries no receipt status.
+        tracker.on_block_inclusion(no_status, now);
+
+        let outcomes = tracker.outcome_counts();
+        assert_eq!(outcomes.successful, 1);
+        assert_eq!(outcomes.reverted, 1);
+        assert_eq!(outcomes.status_unknown, 1);
+        assert_eq!(
+            tracker.confirmed_count(),
+            2,
+            "confirmed = successful + status unknown, never reverted"
+        );
+        assert_eq!(tracker.pending_count(), 1, "backlog stays pending");
+    }
+
+    #[test]
+    fn latency_statistics_exclude_reverted_transactions() {
+        let tracker = LatencyTracker::new();
+        let submit = Instant::now();
+        let ok = B256::with_last_byte(1);
+        let reverted = B256::with_last_byte(2);
+        for (nonce, hash) in [ok, reverted].into_iter().enumerate() {
+            tracker.record_submit_at(
+                hash,
+                nonce as u64,
+                Address::default(),
+                21_000,
+                TransactionType::ETHTransfer,
+                submit,
+            );
+        }
+        tracker.on_block_inclusion_with_receipt(
+            ok,
+            submit + std::time::Duration::from_millis(100),
+            Some(21_000),
+            Some(true),
+        );
+        tracker.on_block_inclusion_with_receipt(
+            reverted,
+            submit + std::time::Duration::from_millis(900),
+            Some(21_000),
+            Some(false),
+        );
+        let stats = tracker.statistics();
+        assert_eq!(stats.max, 100);
     }
 
     #[test]
