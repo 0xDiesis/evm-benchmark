@@ -272,14 +272,17 @@ def wait_live(timeout=180):
 
 def start(project, aged_tag=None):
     others = foreign_fleet(project)
-    if others:
-        running = [n for n, p, s in others if s == "running"]
-        if running or any(not p.startswith(FRESH_PROJECT) for _, p, _ in others):
-            raise SystemExit(f"Validator containers belong to another project: {others}. Stop that cluster first "
-                             f"(`make -C <node> e2e-down`, or `fleet.py stop`).")
-        # A stopped fleet of this tool under another project: remove its containers, keep volumes.
-        for name, p, _ in others:
-            sh(["docker", "rm", name], check=False, capture=True)
+    foreign = [o for o in others if not o[1].startswith(FRESH_PROJECT)]
+    if foreign:
+        raise SystemExit(f"Validator containers belong to another project: {foreign}. Stop that cluster first "
+                         f"(for example `make -C <node> e2e-down`).")
+    # Only one fleet runs at a time: stop this tool's other fleet (keeping its volumes) and
+    # remove its containers so the validator names are free.
+    for p in sorted({p for _, p, _ in others}):
+        say(f"stopping {p} to free the validator names")
+        stop_project(p)
+    for name, _, _ in others:
+        sh(["docker", "rm", "-f", name], check=False, capture=True)
     if running_project() != project and port_holders():
         raise SystemExit(f"Benchmark ports in use: {port_holders()}")
     repo = checkout()
