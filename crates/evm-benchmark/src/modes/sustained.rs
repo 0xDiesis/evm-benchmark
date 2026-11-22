@@ -4,7 +4,7 @@ use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
 use crate::submission::{BlockTracker, LatencyTracker, Submitter};
 use crate::types::{
-    SubmissionErrorSummary, SustainedResult, TestMode, TransactionType, WindowEntry,
+    Mix, SubmissionErrorSummary, SustainedResult, TestMode, TransactionType, WindowEntry,
     benchmark_validity, merge_submission_error_summaries,
 };
 use alloy_primitives::{Address, B256, U256};
@@ -205,66 +205,79 @@ pub async fn run_sustained(config: &Config) -> Result<(SustainedResult, u128)> {
         );
     }
 
-    let recipient = Address::with_last_byte(0x42);
-    let mut sender_batches = Vec::new();
-    let evm_contracts = if config.test_mode == TestMode::Evm {
-        Some(super::evm_contracts(config)?)
+    // The judged mix sets up its own state and signs one plan in order; the
+    // other workloads sign per sender and interleave.
+    let pre_signed = if config.mix == Mix::Judged {
+        let (pool, record) =
+            super::judged::prepare(config, &client, &sender_keys, gas_price, total_txs).await?;
+        let path = config.output.with_file_name("judged-mix.json");
+        std::fs::write(&path, serde_json::to_vec_pretty(&record)?)
+            .map_err(|e| anyhow::anyhow!("Failed to write {}: {}", path.display(), e))?;
+        pool
     } else {
-        None
-    };
+        let recipient = Address::with_last_byte(0x42);
+        let mut sender_batches = Vec::new();
+        let evm_contracts = if config.test_mode == TestMode::Evm {
+            Some(super::evm_contracts(config)?)
+        } else {
+            None
+        };
 
-    for (i, key) in sender_keys.iter().enumerate() {
-        let count = signer_transaction_count(total_txs, num_keys, i);
-        if count == 0 {
-            continue;
+        for (i, key) in sender_keys.iter().enumerate() {
+            let count = signer_transaction_count(total_txs, num_keys, i);
+            if count == 0 {
+                continue;
+            }
+
+            let signer = PrivateKeySigner::from_str(key)
+                .map_err(|e| anyhow::anyhow!("Failed to parse sender key {}: {}", i, e))?;
+            let account = signer.address();
+
+            let nonce_payload = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "eth_getTransactionCount",
+                "params": [format!("{:?}", account), "pending"],
+                "id": 1
+            });
+            let resp = client
+                .post(config.rpc.as_str())
+                .json(&nonce_payload)
+                .send()
+                .await?;
+            let result: serde_json::Value = resp.json().await?;
+            let nonce_hex = result
+                .get("result")
+                .and_then(|r| r.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Failed to get nonce for sender {}", i))?;
+            let nonce = u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16)?;
+
+            let signed = if let Some(ref contracts) = evm_contracts {
+                let mut generator = EvmMixGenerator::new(
+                    contracts.clone(),
+                    super::evm_mix_config(contracts),
+                    vec![account],
+                    config.chain_id,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
+                let descs = generator.generate_batch(count);
+                EvmMixGenerator::sign_batch(&descs, &signer, nonce, gas_price, config.chain_id)
+                    .map_err(|e| {
+                        anyhow::anyhow!("EVM pre-signing failed for sender {}: {}", i, e)
+                    })?
+            } else {
+                let tx_data: Vec<(Address, U256)> =
+                    (0..count).map(|_| (recipient, U256::from(1u32))).collect();
+                let batch_signer =
+                    BatchSigner::new_with_gas_price(signer, nonce, gas_price, config.chain_id);
+                batch_signer
+                    .sign_batch_parallel(tx_data)
+                    .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?
+            };
+            sender_batches.push(signed);
         }
 
-        let signer = PrivateKeySigner::from_str(key)
-            .map_err(|e| anyhow::anyhow!("Failed to parse sender key {}: {}", i, e))?;
-        let account = signer.address();
-
-        let nonce_payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "eth_getTransactionCount",
-            "params": [format!("{:?}", account), "pending"],
-            "id": 1
-        });
-        let resp = client
-            .post(config.rpc.as_str())
-            .json(&nonce_payload)
-            .send()
-            .await?;
-        let result: serde_json::Value = resp.json().await?;
-        let nonce_hex = result
-            .get("result")
-            .and_then(|r| r.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Failed to get nonce for sender {}", i))?;
-        let nonce = u64::from_str_radix(nonce_hex.trim_start_matches("0x"), 16)?;
-
-        let signed = if let Some(ref contracts) = evm_contracts {
-            let mut generator = EvmMixGenerator::new(
-                contracts.clone(),
-                super::evm_mix_config(contracts),
-                vec![account],
-                config.chain_id,
-            )
-            .map_err(|e| anyhow::anyhow!("Failed to create EVM generator: {}", e))?;
-            let descs = generator.generate_batch(count);
-            EvmMixGenerator::sign_batch(&descs, &signer, nonce, gas_price, config.chain_id)
-                .map_err(|e| anyhow::anyhow!("EVM pre-signing failed for sender {}: {}", i, e))?
-        } else {
-            let tx_data: Vec<(Address, U256)> =
-                (0..count).map(|_| (recipient, U256::from(1u32))).collect();
-            let batch_signer =
-                BatchSigner::new_with_gas_price(signer, nonce, gas_price, config.chain_id);
-            batch_signer
-                .sign_batch_parallel(tx_data)
-                .map_err(|e| anyhow::anyhow!("Pre-signing failed for sender {}: {}", i, e))?
-        };
-        sender_batches.push(signed);
-    }
-
-    let pre_signed = interleave_sender_batches(sender_batches);
+        interleave_sender_batches(sender_batches)
+    };
 
     if !config.quiet {
         println!("Pre-signing complete. Starting benchmark...");
@@ -800,6 +813,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         }
     }
 
@@ -859,6 +873,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         };
         let _ = config;
     }

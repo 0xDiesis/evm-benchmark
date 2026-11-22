@@ -10,6 +10,16 @@ pub enum TestMode {
     Evm,
 }
 
+/// EVM workload mix.
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Default)]
+pub enum Mix {
+    /// The generator's default EVM mix (mints, approvals, NFT mints, transfers).
+    #[default]
+    Default,
+    /// The pinned judged mix for Diesis speed runs (`generators::judged_mix`).
+    Judged,
+}
+
 #[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     Burst,

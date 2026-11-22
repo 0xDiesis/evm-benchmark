@@ -885,6 +885,7 @@ mod tests {
             evm_tokens: vec![],
             evm_pairs: vec![],
             evm_nfts: vec![],
+            mix: Default::default(),
         }
     }
 

@@ -1,5 +1,6 @@
 pub mod burst;
 pub mod ceiling;
+pub mod judged;
 pub mod sustained;
 
 use crate::config::Config;

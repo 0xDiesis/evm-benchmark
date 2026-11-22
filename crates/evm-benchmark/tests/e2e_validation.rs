@@ -347,6 +347,7 @@ async fn test_burst_mode_end_to_end() {
         evm_tokens: vec![],
         evm_pairs: vec![],
         evm_nfts: vec![],
+        mix: Default::default(),
     };
 
     let result = evm_benchmark::run_burst(&config).await;
@@ -420,6 +421,7 @@ async fn test_burst_mode_ws_submission() {
         evm_tokens: vec![],
         evm_pairs: vec![],
         evm_nfts: vec![],
+        mix: Default::default(),
     };
 
     let result = evm_benchmark::run_burst(&config).await;
