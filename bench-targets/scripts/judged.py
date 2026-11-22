@@ -16,9 +16,12 @@ through the fixture's port block) and the observer measures the window. The flee
 afterwards. Results: $BENCH_RESULTS_BASE/judged/<stamp>-<tag>-<profile>-<rate>/judged.json and
 judged.md, reporting finalized TPS, submit->finalized p50/p95/p99, block interval p50/p99,
 per-container CPU (cores) and peak memory, validator agreement, and host load. A window whose
-1-minute host load exceeded --max-load is marked functional-only.
+1-minute host load exceeded --max-load is marked functional-only. Judged runs run alone: the fleet
+starts only while no other Diesis fleet runs (fleet.py waits), each validator's cpuset is recorded,
+and a window with another Diesis fleet up at its start or end is marked functional-only.
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -36,6 +39,20 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 def results_base():
     return Path(os.environ.get("BENCH_RESULTS_BASE", ROOT / "bench-targets" / "results"))
+
+
+def load_fleet():
+    spec = importlib.util.spec_from_file_location("fleet", FLEET)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def mark_shared(summary, at_start, at_end):
+    """A judged window runs alone: another Diesis fleet seen at its start or end makes it
+    functional-only."""
+    shared = bool(at_start or at_end)
+    return dict(summary, shared_host=shared, functional_only=summary["functional_only"] or shared)
 
 
 def refusal(failed_dir):
@@ -78,6 +95,11 @@ def markdown(record):
     lines = [f"# Judged run {record.get('fixture') or record['tag']} ({record['profile']}, {record['rate']} TPS offered)", "",
              f"- Status: **{record['status']}**", f"- Image: {record.get('image')}",
              f"- Fixture height at start: {record.get('fixture_height')}"]
+    if record.get("cpusets"):
+        lines.append("- Validator cpusets: " + ", ".join(f"{k} {v}" for k, v in record["cpusets"].items()))
+    if "other_fleets_at_end" in record:
+        lines.append(f"- Other Diesis fleets at the window's start / end: {record.get('other_fleets_at_start') or 'none'}"
+                     f" / {record['other_fleets_at_end'] or 'none'}")
     if record["status"] == "refused":
         work = record["refusal"].get("work_admission")
         if work:
@@ -97,7 +119,8 @@ def markdown(record):
             f"- Peak memory per validator: " + ", ".join(f"{k} {v / 2**30:.2f} GiB"
                                                           for k, v in (s['peak_memory_bytes_nodes'] or {}).items()),
             f"- Validator agreement: {s['finalized_agreement']} at {s['agreement_heights']}; exits {s['validator_exits']}",
-            f"- Host load (1 min): {s['host_load_1m']}" + ("  **functional-only**" if s["functional_only"] else ""),
+            f"- Host load (1 min): {s['host_load_1m']}" + ("  **functional-only**" if s["functional_only"] else "")
+            + ("  (another fleet shared the host)" if s.get("shared_host") else ""),
         ]
     return "\n".join(lines) + "\n"
 
@@ -123,7 +146,8 @@ def main():
     project = manifest["project"]
     out = results_base() / "judged" / f"{time.strftime('%Y%m%d-%H%M%S')}-{a.fixture or a.tag}-{a.profile}-{a.rate}"
     out.mkdir(parents=True)
-    env = dict(os.environ, DIESIS_AGED_TAG=a.tag, BENCH_DIESIS_PROFILE=a.profile)
+    # Judged runs run alone: the fleet starts only while no other Diesis fleet runs (fleet.py waits).
+    env = dict(os.environ, DIESIS_AGED_TAG=a.tag, BENCH_DIESIS_PROFILE=a.profile, BENCH_DIESIS_MAX_FLEETS="1")
     record = dict(tag=a.tag, fixture=a.fixture, restored_copy=restored, profile=a.profile, rate=a.rate,
                   window_s=a.window, warmup_s=a.warmup,
                   fixture_height=manifest.get("height"), genesis_hash=manifest.get("genesis_hash"),
@@ -138,16 +162,22 @@ def main():
             record.update(status="refused", refusal=refusal(failed[-1]) if failed else dict(nodes={}, work_admission=None),
                           failed_start=str(failed[-1]) if failed else None)
         else:
+            fleet = load_fleet()
+            provenance = json.loads((state / "provenance.json").read_text())
+            record.update(cpu_base=provenance.get("cpu_base"), cpusets=provenance.get("cpusets"),
+                          other_fleets_at_start=sorted(fleet.running_fleets(exclude={project})))
             run_dir = out / "run"
             bench = subprocess.run(["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained",
                                     "--tps", str(a.rate), "--duration", str(a.window + a.warmup), "--out", str(run_dir),
                                     "--tag", f"judged-{a.tag}"],
                                    env=dict(env, DIESIS_FLEET="external", BENCH_WARMUP_SECS=str(a.warmup)),
                                    stdout=(out / "bench.log").open("w"), stderr=subprocess.STDOUT)
+            record["other_fleets_at_end"] = sorted(fleet.running_fleets(exclude={project}))
             metrics = run_dir / "diesis-metrics.json"
             if metrics.exists():
-                record.update(status="measured", summary=summary(json.loads(metrics.read_text()), a.max_load),
-                              bench_exit=bench.returncode)
+                record.update(status="measured", bench_exit=bench.returncode, summary=mark_shared(
+                    summary(json.loads(metrics.read_text()), a.max_load), record["other_fleets_at_start"],
+                    record["other_fleets_at_end"]))
             else:
                 record.update(status="failed", bench_exit=bench.returncode)
     finally:

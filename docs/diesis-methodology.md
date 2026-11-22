@@ -24,6 +24,9 @@ EVM targets are judged under the **`capped`** profile:
 
 `uncapped` is for diagnosis only.
 
+Judged runs run alone. `judged.py` starts its fleet only while no other Diesis fleet runs, and a
+window with another fleet up at its start or end is marked functional-only.
+
 **Known failure: the official capped run does not complete today.** A capped validator
 cannot start an aged chain within its 1 GiB selected encoded Work budget. After about 280
 blocks aged under load, node 6570bb686 refused at startup with
@@ -145,6 +148,12 @@ Fixes made along the way:
   - Concurrent users on one host set distinct `BENCH_DIESIS_FLEET` names for their fresh
     fleets. Starting a fleet stops only the same user's other fleet.
   - `down` removes only that user's fresh project.
+- **CPU pinning.** The capped profile pins validator i to 2 consecutive CPUs from a base, so a
+  lone capped fleet keeps CPUs 0–7 and its results stay comparable. A capped fleet that starts
+  while another Diesis fleet pins CPUs takes whichever of base 0 and (Docker CPUs − 8) overlaps
+  those CPUs least: CPUs 4–11 on the M2's 12-CPU Docker VM. Two capped fleets there still share
+  CPUs 4–7, so concurrent fleets are functional runs only. The base and each validator's cpuset
+  go to the provenance, which `bench.sh` copies into every run directory.
 - **Aged fleets.** Copying volumes does not work: each validator binds its writer-fence
   journal to its datadir's device and inode (diesis-reth
   `crates/engine/tree/src/writer_fence.rs`), and a copy is refused at startup. An aged fleet

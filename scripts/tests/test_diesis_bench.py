@@ -159,6 +159,25 @@ class Fleet(unittest.TestCase):
         self.assertEqual(c["networks"], {"n": {"name": "diesis-bench_n"}})
         free = fleet.patch(json.loads(json.dumps(rendered)), "sha256:abc", {}, {})
         self.assertNotIn("cpus", free["services"]["node-1"])
+        beside = fleet.patch(json.loads(json.dumps(rendered)), "sha256:abc", {}, {"FLEET_CPUS": "2", "FLEET_PIN_CPUS": "true"},
+                             cpu_base=4)
+        self.assertEqual([beside["services"][n]["cpuset"] for n in fleet.NODES], ["4-5", "6-7", "8-9", "10-11"])
+
+    def test_cpu_base_keeps_a_lone_fleet_on_0_to_7(self):
+        self.assertEqual(fleet.cpuset_cpus("0-1,4"), {0, 1, 4})
+        self.assertEqual(fleet.cpuset_cpus(""), set())
+        self.assertEqual(fleet.choose_cpu_base(set(), 12, 8), 0)
+        self.assertEqual(fleet.choose_cpu_base(set(range(8)), 12, 8), 4)
+        self.assertEqual(fleet.choose_cpu_base(set(range(4, 12)), 12, 8), 0)
+        self.assertEqual(fleet.choose_cpu_base(set(range(8)), 8, 8), 0)
+        self.assertEqual(fleet.choose_cpu_base(set(range(8)), 16, 8), 8)
+        lines = "\n".join(["sha256:aa\tcapped\t/capped-node-1\t0-1", "sha256:aa\tcapped\t/capped-node-4\t6-7",
+                           "sha256:aa\tuncapped\t/uncapped-node-1\t", "sha256:cc\tother\t/x\t8-9"])
+        self.assertEqual(fleet.fleet_containers(lines, {"sha256:aa"}),
+                         [("capped", "0-1"), ("capped", "6-7"), ("uncapped", "")])
+        with mock.patch.object(fleet, "running_containers", return_value=fleet.fleet_containers(lines, {"sha256:aa"})):
+            self.assertEqual(fleet.pinned_cpus(exclude={"diesis-bench"}), {0, 1, 6, 7})
+            self.assertEqual(fleet.pinned_cpus(exclude={"capped"}), set())
 
     def test_interpolation_only_keys_stay_out_of_validator_env(self):
         node = lambda: dict(environment={"RUST_LOG": "info", "DIESIS_MIN_ROUND_DELAY": "50ms"}, ports=[], volumes=[])
@@ -359,6 +378,17 @@ class Judged(unittest.TestCase):
         self.assertEqual(s["submit_to_finalized_s"]["p50"], 3.0)
         self.assertIn("n0", s["peak_memory_bytes_nodes"])
         self.assertFalse(judged.summary(dict(m, host_load_1m=dict(median=5, max=12)), 18)["functional_only"])
+
+    def test_judged_window_shared_with_another_fleet_is_functional_only(self):
+        quiet = dict(functional_only=False)
+        self.assertEqual(judged.mark_shared(quiet, [], []), dict(functional_only=False, shared_host=False))
+        self.assertEqual(judged.mark_shared(quiet, [], ["p3-unblock"]), dict(functional_only=True, shared_host=True))
+        self.assertTrue(judged.mark_shared(dict(functional_only=True), [], [])["functional_only"])
+        md = judged.markdown(dict(tag="t", fixture=None, profile="capped", rate=1000, status="refused", image="i",
+                                  fixture_height=5100, cpusets={"node-1": "0-1"}, other_fleets_at_start=[],
+                                  other_fleets_at_end=["x"], refusal=dict(nodes={}, work_admission=None)))
+        self.assertIn("- Validator cpusets: node-1 0-1", md)
+        self.assertIn("start / end: none / ['x']", md)
 
 
 def idle_arm(number, stretch, cpu, blocks_per_s):

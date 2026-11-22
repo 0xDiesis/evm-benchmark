@@ -254,7 +254,8 @@ def run_arm(number, value, a, out, sock):
         chain_id = int(rpc(urls[0], "eth_chainId"), 16)
         provenance = json.loads((fleet.state_dir() / fleet.fresh_project() / "provenance.json").read_text())
         arm.update(block=ports["block"], image=provenance.get("image"), image_id=provenance.get("image_id"),
-                   checkout_head=provenance.get("checkout_head"), validator_env=provenance.get("validator_env"))
+                   checkout_head=provenance.get("checkout_head"), validator_env=provenance.get("validator_env"),
+                   cpusets=provenance.get("cpusets"))
         metrics = [f"http://127.0.0.1:{p}/metrics" for p in ports["metrics"]]
         time.sleep(a.settle)
         start, round_start = heads(urls), rounds(metrics)

@@ -44,6 +44,12 @@ block stays free. P2P ports stay inside each fleet's network. The block, contain
 (<project>-node-N) and node IPs go to <state>/<project>/ports.json and the provenance, which
 bench.sh stores with every run; lib.sh routes RPC, WS, metrics and topology from it.
 
+CPU pinning: a profile with FLEET_PIN_CPUS=true pins validator i to FLEET_CPUS consecutive CPUs
+from a base. A lone pinned fleet uses base 0 (CPUs 0-7 under the capped profile), so results
+stay comparable with earlier runs. A fleet that starts while other Diesis fleets pin CPUs takes
+whichever of base 0 and <Docker CPUs> - width overlaps those CPUs least: CPUs 4-11 beside a
+capped fleet on a 12-CPU Docker VM. The base and every validator's cpuset go to the provenance.
+
 Aged fleets: validators bind their writer-fence journal to the datadir's device and inode,
 so volumes cannot be copied. An aged fleet is a stopped compose project
 (diesis-bench-aged-<tag>) whose volumes every later run reuses; each run re-renders it for
@@ -235,7 +241,7 @@ def merged_env(profile_values, environ):
     return env
 
 
-def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEET, block=None):
+def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEET, block=None, cpu_base=0):
     environ = dict(os.environ if environ is None else environ)
     profile = read_profile(profile_name)
     env = merged_env(profile, environ)
@@ -257,12 +263,13 @@ def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEE
     interpolated = set()
     for path in files[1::2]:
         interpolated |= set(re.findall(r"\$\{([A-Z0-9_]+)", Path(path).read_text()))
-    compose = patch(rendered, image_id, env, profile, interpolated, project)
+    compose = patch(rendered, image_id, env, profile, interpolated, project, cpu_base)
     return compose, dict(checkout=str(repo), checkout_head=head, profile=profile_name, profile_values=profile,
-                         validator_env=env, image_id=image_id, signing_overlay=signing.is_file())
+                         validator_env=env, image_id=image_id, signing_overlay=signing.is_file(), cpu_base=cpu_base,
+                         cpusets={name: compose["services"][name].get("cpuset") for name in NODES})
 
 
-def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET):
+def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DEFAULT_FLEET, cpu_base=0):
     """Validators take every override except keys the compose only interpolates (log levels,
     txpool flags, Rayon thread count): the node's strict configuration rejects any DIESIS_*
     key it does not consume, so those reach the node only through the rendered values."""
@@ -288,7 +295,8 @@ def patch(rendered, image_id, env, profile, interpolated=frozenset(), project=DE
             service["cpus"] = float(cpus)
             if pin:
                 n = int(float(cpus))
-                service["cpuset"] = f"{i * n}-{i * n + n - 1}" if n > 1 else str(i)
+                first = cpu_base + i * n
+                service["cpuset"] = f"{first}-{first + n - 1}" if n > 1 else str(first)
         if memory:
             service["mem_limit"] = memory
     for name, service in services.items():
@@ -324,29 +332,65 @@ def project_running(project):
     return bool(out.split())
 
 
-def fleet_projects(inspect_lines, image_ids):
-    """Compose projects (bare container names outside compose) among `docker inspect` lines
-    "<image id>\t<compose project>\t<name>" whose image ID is a Diesis node image."""
-    projects = set()
+def fleet_containers(inspect_lines, image_ids):
+    """(fleet, cpuset) for each `docker inspect` line "<image id>\t<compose project>\t<name>\t<cpuset>"
+    whose image ID is a Diesis node image; the fleet is the compose project, or the bare container
+    name outside compose."""
+    out = []
     for line in inspect_lines.splitlines():
-        image, project, name = (line.split("\t") + ["", ""])[:3]
+        image, project, name, cpuset = (line.split("\t") + ["", "", ""])[:4]
         if image in image_ids:
-            projects.add(project if project and project != "<no value>" else name.lstrip("/"))
-    return projects
+            out.append((project if project and project != "<no value>" else name.lstrip("/"), cpuset))
+    return out
 
 
-def running_fleets(exclude=()):
-    """Every running Diesis fleet on this host, any user's, matched by image ID because fleets
-    started from an immutable image ID show no tag."""
+def fleet_projects(inspect_lines, image_ids):
+    return {fleet for fleet, _ in fleet_containers(inspect_lines, image_ids)}
+
+
+def running_containers():
+    """(fleet, cpuset) for every running Diesis validator on this host, any user's, matched by
+    image ID because fleets started from an immutable image ID show no tag."""
     ids = set(sh(["docker", "images", "--no-trunc", "--format", "{{.ID}}", "--filter", "reference=diesis-node*"],
                  check=False, capture=True).stdout.split())
     running = sh(["docker", "ps", "-q"], check=False, capture=True).stdout.split()
     if not ids or not running:
-        return set()
+        return []
     out = sh(["docker", "inspect", "--format",
-              '{{.Image}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{.Name}}', *running],
-             check=False, capture=True).stdout
-    return fleet_projects(out, ids) - set(exclude)
+              '{{.Image}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{.Name}}\t{{.HostConfig.CpusetCpus}}',
+              *running], check=False, capture=True).stdout
+    return fleet_containers(out, ids)
+
+
+def running_fleets(exclude=()):
+    """Every running Diesis fleet on this host, by compose project."""
+    return {fleet for fleet, _ in running_containers()} - set(exclude)
+
+
+def cpuset_cpus(text):
+    """The CPUs of a cpuset such as "0-1,4"."""
+    cpus = set()
+    for part in filter(None, (text or "").split(",")):
+        low, _, high = part.partition("-")
+        cpus |= set(range(int(low), int(high or low) + 1))
+    return cpus
+
+
+def pinned_cpus(exclude=()):
+    """CPUs pinned by the validators of other running Diesis fleets."""
+    return set().union(*[cpuset_cpus(cpuset) for fleet, cpuset in running_containers() if fleet not in set(exclude)])
+
+
+def docker_cpus():
+    out = sh(["docker", "info", "--format", "{{.NCPU}}"], check=False, capture=True).stdout.strip()
+    return int(out) if out.isdigit() else 0
+
+
+def choose_cpu_base(busy, cpus, width):
+    """First CPU for a fleet pinned to `width` CPUs: 0 unless CPUs other fleets pin overlap it, then
+    whichever of 0 and cpus - width overlaps them least (a tie keeps 0)."""
+    bases = [0] + ([cpus - width] if cpus > width else [])
+    return min(bases, key=lambda base: (len(busy & set(range(base, base + width))), base))
 
 
 def wait_for_slot(project):
@@ -412,14 +456,22 @@ def start(project, aged_tag=None):
         say(f"stopping {other} (this user's other fleet)")
         stop_project(other)
     wait_for_slot(project)
-    previous =json.loads(ports_path(project).read_text())["block"] if ports_path(project).exists() else None
+    previous = json.loads(ports_path(project).read_text())["block"] if ports_path(project).exists() else None
     own_network = f"{project}_diesis-e2e"
     block = choose_block(previous, busy_host_ports() if not project_running(project) else set(),
                          busy_subnets(own_network))
     repo = checkout()
     ref, image_id = image_ref(repo)
     profile = os.environ.get("BENCH_DIESIS_PROFILE", "capped")
-    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project, block=block)
+    values = read_profile(profile)
+    cpu_base = 0
+    if values.get("FLEET_PIN_CPUS") == "true" and values.get("FLEET_CPUS"):
+        busy = pinned_cpus(exclude={project})
+        cpu_base = choose_cpu_base(busy, docker_cpus(), int(float(values["FLEET_CPUS"])) * len(NODES))
+        if busy:
+            say(f"{project}: other fleets pin CPUs {sorted(busy)}; pinning validators from CPU {cpu_base}")
+    compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project, block=block,
+                                 cpu_base=cpu_base)
     directory = state_dir() / project
     directory.mkdir(parents=True, exist_ok=True)
     containers = [compose["services"][n]["container_name"] for n in NODES]
