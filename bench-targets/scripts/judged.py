@@ -2,9 +2,13 @@
 """The judged Diesis run: an aged fixture (past 5,000 blocks) at 2 CPU / 4 GiB per validator,
 one 600 s window at a set offered rate (docs/diesis-methodology.md).
 
-  judged.py --tag m6570-5k --rate 2000 [--profile capped] [--window 600] [--warmup 60] [--max-load 18]
+  judged.py --fixture <name> --rate 2000 [--profile capped] [--window 600] [--warmup 60] [--max-load 18]
+  judged.py --tag <aged fleet> --rate 2000 ...
 
-Starts the aged fixture --tag under --profile. If a validator refuses to start, the run is
+--fixture restores a saved fixture (fleet.py save-fixture) into a throwaway aged fleet, runs,
+and destroys the copy, so the fixture itself is never modified. --tag runs on an existing
+stopped aged fleet in place (the chain keeps aging). Either way the fleet starts under
+--profile. If a validator refuses to start, the run is
 recorded as refused, with each validator's error and, for Work admission, the bytes requested
 and the configured limit, and no load is offered. Otherwise bench.sh drives --warmup + --window
 seconds of sustained load at --rate against the running fleet (DIESIS_FLEET=external, routed
@@ -71,7 +75,7 @@ def summary(m, max_load):
 
 
 def markdown(record):
-    lines = [f"# Judged run {record['tag']} ({record['profile']}, {record['rate']} TPS offered)", "",
+    lines = [f"# Judged run {record.get('fixture') or record['tag']} ({record['profile']}, {record['rate']} TPS offered)", "",
              f"- Status: **{record['status']}**", f"- Image: {record.get('image')}",
              f"- Fixture height at start: {record.get('fixture_height')}"]
     if record["status"] == "refused":
@@ -100,19 +104,28 @@ def markdown(record):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--tag", required=True)
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--fixture", help="Saved fixture name (restored into a throwaway copy)")
+    source.add_argument("--tag", help="Existing stopped aged fleet, used in place")
     p.add_argument("--rate", type=int, required=True)
     p.add_argument("--profile", choices=["capped", "uncapped"], default="capped")
     p.add_argument("--window", type=int, default=600)
     p.add_argument("--warmup", type=int, default=60)
     p.add_argument("--max-load", type=float, default=18.0)
     a = p.parse_args()
+    restored = None
+    if a.fixture:
+        restored = f"j{time.strftime('%m%d%H%M%S')}"
+        subprocess.run([sys.executable, "-B", str(FLEET), "restore-fixture", "--fixture", a.fixture, "--as", restored],
+                       check=True)
+        a.tag = restored
     manifest = json.loads((results_base() / "fleet" / f"aged-{a.tag}.json").read_text())
     project = manifest["project"]
-    out = results_base() / "judged" / f"{time.strftime('%Y%m%d-%H%M%S')}-{a.tag}-{a.profile}-{a.rate}"
+    out = results_base() / "judged" / f"{time.strftime('%Y%m%d-%H%M%S')}-{a.fixture or a.tag}-{a.profile}-{a.rate}"
     out.mkdir(parents=True)
     env = dict(os.environ, DIESIS_AGED_TAG=a.tag, BENCH_DIESIS_PROFILE=a.profile)
-    record = dict(tag=a.tag, profile=a.profile, rate=a.rate, window_s=a.window, warmup_s=a.warmup,
+    record = dict(tag=a.tag, fixture=a.fixture, restored_copy=restored, profile=a.profile, rate=a.rate,
+                  window_s=a.window, warmup_s=a.warmup,
                   fixture_height=manifest.get("height"), genesis_hash=manifest.get("genesis_hash"),
                   image=(manifest.get("provenance") or {}).get("image"), started=time.time())
     state = results_base() / "fleet" / project
@@ -139,6 +152,9 @@ def main():
                 record.update(status="failed", bench_exit=bench.returncode)
     finally:
         subprocess.run([sys.executable, "-B", str(FLEET), "down"], env=env, capture_output=True, text=True)
+        if restored:
+            subprocess.run([sys.executable, "-B", str(FLEET), "destroy-aged", "--tag", restored], capture_output=True,
+                           text=True)
         record["ended"] = time.time()
         (out / "judged.json").write_text(json.dumps(record, indent=2) + "\n")
         (out / "judged.md").write_text(markdown(record))

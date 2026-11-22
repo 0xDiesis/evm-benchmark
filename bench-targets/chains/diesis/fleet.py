@@ -7,6 +7,8 @@
   fleet.py stop             stop the selected fleet, keeping its volumes
   fleet.py age --tag T      build an aged fleet: load it past --blocks, drain, stop
   fleet.py destroy-aged --tag T   remove an aged fleet and its manifest
+  fleet.py save-fixture --tag T   archive a stopped aged fleet's volumes (fixture, never modified)
+  fleet.py restore-fixture --fixture NAME --as T   extract a fixture into a new aged fleet T
   fleet.py status | render | provenance | ports
 
 Inputs (environment):
@@ -552,7 +554,84 @@ def cmd_destroy_aged(a):
     path = last_compose(project)
     if path:
         sh([*compose_cmd(project, path), "down", "--volumes", "--remove-orphans"], env=compose_env())
+    # A restored fleet that never started has volumes but no compose file yet.
+    leftover = sh(["docker", "volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={project}"],
+                  check=False, capture=True).stdout.split()
+    if leftover:
+        sh(["docker", "volume", "rm", *leftover], check=False, capture=True)
     manifest_path(a.tag).unlink(missing_ok=True)
+
+
+# ---- saved fixtures ----------------------------------------------------------------------
+# A fixture is a tar archive of every volume of a stopped aged fleet (each node's data and
+# signing volumes) plus fixture.json, under $BENCH_DIESIS_FIXTURES/<name>, named
+# <tag>-<image id 12>-<genesis hash 10>. Restoring extracts the archives into a new aged
+# project and never modifies the archives. Note: validators bind their writer-fence journal
+# to the datadir's device and inode, and node 6570bb686 refuses a copied datadir at startup
+# ("journal datadir identity mismatch"); a restored fixture starts only once that is resolved.
+
+def fixtures_dir():
+    path = Path(os.environ.get("BENCH_DIESIS_FIXTURES", state_dir().parent / "fixtures"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def fixture_name(manifest):
+    image = manifest["provenance"]["image_id"].removeprefix("sha256:")[:12]
+    genesis = manifest["genesis_hash"].removeprefix("0x")[:10]
+    return f"{manifest['tag']}-{image}-{genesis}"
+
+
+def cmd_save_fixture(a):
+    """Archive a stopped aged fleet's volumes as a fixture."""
+    m = manifest(a.tag)
+    project = aged_project(a.tag)
+    if project_running(project):
+        raise SystemExit(f"{project} is running; stop it first (DIESIS_AGED_TAG={a.tag} fleet.py down)")
+    compose = json.loads(last_compose(project).read_text())
+    name = fixture_name(m)
+    out = fixtures_dir() / name
+    if out.exists():
+        raise SystemExit(f"Fixture {name} exists at {out}")
+    out.mkdir(parents=True)
+    image = m["provenance"]["image_id"]
+    volumes = {}
+    for key, definition in compose["volumes"].items():
+        sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "tar", "-v", f"{definition['name']}:/v:ro",
+            "-v", f"{out}:/out", image, "-C", "/v", "-cf", f"/out/{key}.tar", "."], timeout=3600)
+        volumes[key] = dict(archive=f"{key}.tar", bytes=(out / f"{key}.tar").stat().st_size)
+    record = dict(name=name, tag=a.tag, image=m["provenance"]["image"], image_id=image,
+                  genesis_hash=m["genesis_hash"], height=m["height"], workload=m.get("workload"),
+                  aging_rate=m.get("aging_rate"), senders=m.get("senders"), aging_seconds=m.get("aging_seconds"),
+                  volumes=volumes, total_bytes=sum(v["bytes"] for v in volumes.values()), saved=time.time(),
+                  source_manifest=m)
+    (out / "fixture.json").write_text(json.dumps(record, indent=2) + "\n")
+    say(f"fixture {name}: {record['total_bytes'] / 2**30:.2f} GiB in {out}")
+    print(json.dumps(dict(name=name, path=str(out), total_bytes=record["total_bytes"])))
+
+
+def cmd_restore_fixture(a):
+    """Extract a fixture into a new aged fleet <as> (stopped); start it with DIESIS_AGED_TAG=<as>."""
+    src = fixtures_dir() / a.fixture
+    record = json.loads((src / "fixture.json").read_text())
+    project = aged_project(a.as_tag)
+    if manifest_path(a.as_tag).exists():
+        raise SystemExit(f"Aged fleet {a.as_tag} exists; destroy it first (fleet.py destroy-aged --tag {a.as_tag})")
+    for key, info in record["volumes"].items():
+        name = f"{project}_{key}"
+        if sh(["docker", "volume", "inspect", name], check=False, capture=True).returncode == 0:
+            raise SystemExit(f"Volume {name} exists")
+        sh(["docker", "volume", "create", "--label", f"com.docker.compose.project={project}",
+            "--label", f"com.docker.compose.volume={key}", "--label", f"{OWNER_LABEL}=true", name], capture=True)
+        sh(["docker", "run", "--rm", "--network", "none", "--entrypoint", "tar", "-v", f"{name}:/v",
+            "-v", f"{src}:/in:ro", record["image_id"], "-C", "/v", "-xpf", f"/in/{info['archive']}"], timeout=3600)
+    m = dict(record["source_manifest"], tag=a.as_tag, project=project, restored_from=record["name"],
+             restored=time.time())
+    manifest_path(a.as_tag).write_text(json.dumps(m, indent=2) + "\n")
+    # The restored project starts from the fixture's own compose shape on its next `up`.
+    (state_dir() / project).mkdir(parents=True, exist_ok=True)
+    say(f"restored {record['name']} as aged fleet {a.as_tag} (height {record['height']}); "
+        f"start it with DIESIS_AGED_TAG={a.as_tag}")
 
 
 def cmd_provenance(_a):
@@ -615,6 +694,11 @@ def main():
     age.add_argument("--workload", choices=["evm", "transfer"], default="evm")
     destroy = sub.add_parser("destroy-aged")
     destroy.add_argument("--tag", required=True)
+    save = sub.add_parser("save-fixture")
+    save.add_argument("--tag", required=True)
+    restore = sub.add_parser("restore-fixture")
+    restore.add_argument("--fixture", required=True)
+    restore.add_argument("--as", dest="as_tag", required=True)
     a = p.parse_args()
     globals()["cmd_" + a.cmd.replace("-", "_")](a)
 

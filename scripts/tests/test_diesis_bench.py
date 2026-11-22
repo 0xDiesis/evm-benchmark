@@ -226,6 +226,10 @@ class Fleet(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(old)
 
+    def test_fixture_name_carries_image_and_genesis(self):
+        m = dict(tag="m6570-5k", genesis_hash="0x" + "ab" * 32, provenance=dict(image_id="sha256:" + "7d" * 32))
+        self.assertEqual(fleet.fixture_name(m), "m6570-5k-7d7d7d7d7d7d-abababab" + "ab")
+
     def test_aged_tags_are_restricted(self):
         self.assertEqual(fleet.aged_project("m832-5k"), "diesis-bench-aged-m832-5k")
         with self.assertRaises(SystemExit):
