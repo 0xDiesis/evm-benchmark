@@ -496,10 +496,22 @@ def cmd_age(a):
         time.sleep(30)
     else:
         raise SystemExit("Sender funding failed four times")
-    # Load until the time limit; aging stops as soon as every validator passes --blocks.
-    gen = subprocess.Popen(list(map(str, [*common, "--execution", "sustained", "--duration", a.max_minutes * 60,
-                                          "--tps", a.rate, "--out", out / "aging.json"])), env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Load in 600 s chunks until every validator passes --blocks or --max-minutes runs out
+    # (sustained mode pre-signs rate x duration, so one run per chunk keeps that bounded). The
+    # EVM workload (default) deploys token, pair and NFT contracts (--fund) and mixes transfers,
+    # ERC-20, AMM and NFT calls, so state grows as it would under real use.
+    def chunk(n):
+        load = [*common, "--execution", "sustained", "--duration", 600, "--tps", a.rate,
+                "--out", out / f"aging-{n}.json"]
+        if a.workload == "evm":
+            load[load.index("--test") + 1] = "evm"
+            load.append("--fund")
+        log = (out / "aging-generator.log").open("a")
+        return subprocess.Popen(list(map(str, load)), env=env, stdout=log, stderr=subprocess.STDOUT)
+
+    aging_started = time.time()
+    chunks = 1
+    gen = chunk(chunks)
     try:
         deadline = time.monotonic() + a.max_minutes * 60
         while True:
@@ -508,8 +520,13 @@ def cmd_age(a):
             say(f"aging heights {h}")
             if all(x is not None for x in h) and min(h) >= a.blocks:
                 break
-            if gen.poll() is not None or time.monotonic() > deadline:
-                raise SystemExit(f"Aging stopped short at {h}")
+            if time.monotonic() > deadline:
+                raise SystemExit(f"Aging stopped short at {h} after {a.max_minutes} min")
+            if gen.poll() is not None:
+                if gen.returncode not in (0, 1) or any(x is None for x in h):
+                    raise SystemExit(f"Aging load exited {gen.returncode} at heights {h}")
+                chunks += 1
+                gen = chunk(chunks)
     finally:
         if gen.poll() is None:
             gen.send_signal(signal.SIGINT)
@@ -522,6 +539,8 @@ def cmd_age(a):
         time.sleep(5)
     time.sleep(10)
     record = dict(tag=a.tag, project=project, height=min(heights(block)), aging_rate=a.rate, senders=a.senders,
+                  workload=a.workload, aging_seconds=time.time() - aging_started, aging_chunks=chunks,
+                  genesis_hash=rpc(block["rpc"][0], "eth_getBlockByNumber", ["0x0", False])["hash"],
                   created=time.time(), provenance=json.loads((out / "provenance.json").read_text()))
     stop_project(project)
     manifest_path(a.tag).write_text(json.dumps(record, indent=2) + "\n")
@@ -592,7 +611,8 @@ def main():
     age.add_argument("--blocks", type=int, default=5100)
     age.add_argument("--rate", type=int, default=400)
     age.add_argument("--senders", type=int, default=512)
-    age.add_argument("--max-minutes", type=int, default=120)
+    age.add_argument("--max-minutes", type=int, default=360)
+    age.add_argument("--workload", choices=["evm", "transfer"], default="evm")
     destroy = sub.add_parser("destroy-aged")
     destroy.add_argument("--tag", required=True)
     a = p.parse_args()
