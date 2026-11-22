@@ -15,8 +15,10 @@ EVM targets are judged under the **`capped`** profile:
 - interleaved A B B A arms, at least 3 per side;
 - medians and ranges reported.
 
+**Workload:** the judged mix (below), under an explicitly pinned genesis outcome signature rule.
+
 **Primary results:**
-- finalized TPS;
+- finalized TPS, counting successful receipts only;
 - **submit→finalized** p50/p95/p99, against the target of ≤1.5 s;
 - **submit→receipt** p50/p95/p99.
 
@@ -52,9 +54,10 @@ make ab NAME=<change> AGED=m6570-5k RATES=2000 \
 # Baseline under both profiles:
 make ab NAME=baseline-<sha> AGED=m6570-5k RATES=500,1000,2000,3000 A="profile=capped" B="profile=uncapped"
 
-# Save a stopped aged fleet as a fixture, then the judged run on a fresh copy of it:
+# Save a stopped aged fleet as a fixture, then the judged run on a fresh copy of it
+# (OUTCOME must match the rule the fixture was built with; MIX=judged is the default):
 make diesis-fixture-save TAG=m6570-5k
-make diesis-judged FIXTURE=<fixture> RATE=2000
+make diesis-judged FIXTURE=<fixture> RATE=2000 OUTCOME=bls-only
 
 # The node's built speed flags all off against all on, A B B A (FIXTURE= or AGED=, or fresh):
 make diesis-speed-flags NAME=<name> FIXTURE=<fixture> RATES=2000
@@ -62,9 +65,84 @@ make diesis-speed-flags NAME=<name> FIXTURE=<fixture> RATES=2000
 # Idle CPU, cadence and resume latency per DIESIS_IDLE_STRETCH, interleaved 4 1 1 4:
 make diesis-idle STRETCH=4,1 ARMS=2
 
-# One ad-hoc run (fresh genesis unless AGED is set):
-make bench CHAIN=diesis MODE=sustained TPS=2000 DURATION=660 WARMUP=60 PROFILE=capped
+# One ad-hoc run (fresh genesis unless AGED is set); MIX=judged drives the judged mix:
+make bench CHAIN=diesis MODE=sustained TPS=2000 DURATION=660 WARMUP=60 PROFILE=capped MIX=judged
 ```
+
+## The judged mix
+
+`--mix judged` (bench.sh, `make bench MIX=judged`, `judged.py` by default) drives the pinned
+mixed-EVM workload in `crates/evm-benchmark/src/generators/judged_mix.rs`. It runs only in
+sustained mode. The generator's default EVM mix (mint-heavy, no order book) is not the judged mix.
+
+**Proportions, by transaction.** Each seeded block of 100 transactions holds them exactly:
+
+| Type | Share | Call |
+|---|---|---|
+| `ETHTransfer` | 25% | native transfer, 1-1,000 wei |
+| `ERC20Transfer` | 30% | `BenchmarkToken.transfer`, 1-1,000 units |
+| `ERC20Approve` | 10% | `approve(spender, 1000 + plan index)`: every approval changes the allowance |
+| `ERC20Mint` | 5% | `mint(recipient, 1-1e6)` |
+| `NFTMint` | 5% | `BenchmarkNFT.mint(recipient)` |
+| `SpotPlace` | 15% | resting 1-lot `submitLimitOrder` inside the active band |
+| `SpotCancel` | 5% | `cancelOrder` of a live seeded order, signed by its owner |
+| `SpotTake` | 5% | 2-lot crossing `submitLimitOrder` that fills two distinct 1-lot makers |
+
+Order-book calls go straight from the trader's account to `DiesisSpotBook`; a crossing order
+matches inside that call. The plan's success is defined by finalized receipts, so a taker
+counts once however many makers it fills.
+
+**Pinned contention.**
+- **Plan:** seed `0x4a55444745444d58`, SplitMix64, so a plan is identical on every host.
+- **Senders:** 400, round-robin within role: 300 general, 80 makers (every placement and every
+  cancel) and 20 takers. Takers never fill their own orders. The first four are the funding
+  keys; key 0x01 must be first, because it is the development governance owner and holds
+  TEST-USD and stDS.
+- **Contracts:** 8 ERC-20 contracts and 4 NFT contracts, each chosen with Zipf exponent 1.0.
+- **Recipients:** a fixed pool of 4,096 addresses with Zipf exponent 0.8.
+- **Approval spenders:** 64, chosen uniformly.
+- **Markets:** WDS/TEST-USD 40%, stDS/TEST-USD 35%, stDS/WDS 25%. These are pricing-version-0
+  markets, the only kind direct `submitLimitOrder` accepts, so there is one per ordered token pair.
+- **Book, in raw ticks around mid 1,000:**
+  - placements rest within 10 levels of the mid;
+  - takers cross the whole active side (buy at mid+10, sell at mid-10);
+  - cancel targets rest 51-100 ticks away, beyond every taker limit.
+- **Seeding:** 64 active orders per side per market are seeded before the window, plus one deep
+  order for every cancel the plan holds. The plan refuses to start if any market would pass the
+  node's 32,768 active orders per market. A judged 660 s run at 2,000 TPS peaks near 29,000 in
+  the 40% market.
+- **Declared gas, fixed per type:**
+
+  | Type | Declared gas | Basis |
+  |---|---|---|
+  | native transfer | 21,000 | |
+  | ERC-20 transfer | 65,000 | |
+  | approve | 60,000 | |
+  | ERC-20 mint | 80,000 | |
+  | NFT mint | 150,000 | |
+  | `SpotPlace` | 115,960 | worst-case calldata intrinsic + the node's 1-lot matching precharge |
+  | `SpotTake` | 151,408 | worst-case calldata intrinsic + the 2-lot precharge |
+  | `SpotCancel` | 24,288 | worst-case calldata intrinsic + the flat 3,000 cancel charge |
+
+  Together that is 68.4M declared gas per 1,000 transactions.
+
+**Setup before the window** (not measured):
+1. Deploy the contracts.
+2. Fund the senders with native DS.
+3. Create the markets, skipping any that already exist.
+4. Send each order-book trader TEST-USD and stDS, then have each trader wrap DS and deposit WDS,
+   stDS and TEST-USD into settlement.
+5. Mint ERC-20 holdings to the general senders.
+6. Seed the books, reading the cancel targets' order ids from their `OrderPlaced` logs.
+
+Setup transactions must all succeed. `judged-mix.json` beside `report.json` records:
+- the pinned parameters;
+- the planned counts per type;
+- the seeded book sizes;
+- the setup time.
+
+**Outcome rule.** `judged.py --outcome-rule bls-only|hybrid` is required. A rule that differs
+from the fixture's genesis is refused. The rule is written to `judged.json` and `judged.md`.
 
 On the shared M2, do not reserve the host: there is no `compute measure begin --host local`,
 and development comes first. Before each arm, `ab.py` waits up to 10 minutes for 60 s of
@@ -85,7 +163,7 @@ tears its fleet down and waits until the file is removed.
 | Execution modes | burst (waves), sustained (pre-signed, paced, `target hit` at 95%), ceiling (adaptive step search, saturation confidence score, restart between steps) |
 | Environments | `ENV=clean` and eight `geo-*` tc-netem layouts with topology verification and geo-safe consensus timing |
 | Ingress | Diesis RPC limiter kept on but raised (`BENCH_DIESIS_RATE_LIMIT_*`), HTTP or WebSocket submission, multi-endpoint round robin with failover, retry profiles |
-| Accounting | attempted / accepted / failed / confirmed / pending, `valid` and `invalid_reason`, confirmed %, per-wave latency, finality-confirmation depth mode, cost metrics, preflight |
+| Accounting | attempted / accepted / failed / confirmed / pending, `valid` and `invalid_reason`, confirmed %, per-wave latency, finality-confirmation depth mode, cost metrics, preflight. `confirmed` counts included transactions that did not revert; `successful`, `reverted` and `status_unknown` (inclusions whose receipt status was never read) are reported apart, per method too |
 | Confirmation | recent-block scans, bounded receipt polling, WebSocket `newHeads`; strict hash matching by default |
 | Analytics | bottleneck detection, regression against baselines, recommendations; ASCII, JSON, Markdown and HTML reports |
 | Chain diagnostics | Prometheus before/after deltas through the e2e Prometheus (`prometheus-diagnostics.py`: DAG drops, payload repair, commit skips, tx-source selection) |
@@ -182,8 +260,11 @@ first submission in the submit log; the observer and generator share the host cl
 
 | Field | Definition |
 |---|---|
-| `finalized_tps` | Transactions in blocks whose all-four `finalized` head passed them inside the window, ÷ window |
-| `submit_to_finalized_s` p50/p95/p99 | Every transaction submitted inside the window: time from submission until all four validators' finalized head reached its block. Transactions never included, or not finalized by the end of the drain (`BENCH_DIESIS_DRAIN_SECS`, default 150), count as infinite, so a percentile that lands on them is `null`; `unfinalized_share` gives their share |
+| `finalized_tps` | Successful transactions (receipt status 1) in blocks whose all-four `finalized` head passed them inside the window, ÷ window. After the drain the observer reads `eth_getBlockReceipts` for the run's blocks; `finalized_basis` is `successful`, or `included` when receipts were not read (`--no-receipts`) |
+| `finalized_included_tps`, `outcomes` | Every included transaction in those blocks ÷ window; successful, reverted and status-unknown counts among them |
+| `reverted_share` | Window submissions that reverted; reverted transactions are excluded from the latency populations below |
+| `per_type` | Per submit-log method: successful finalized TPS and share of successes, reverts, submit→finalized and submit→receipt p50/p95/p99, mean gas used (successful and reverted receipts), and spot-book fills per successful transaction (`two_distinct_makers` for takers) |
+| `submit_to_finalized_s` p50/p95/p99 | Every transaction submitted inside the window that did not revert: time from submission until all four validators' finalized head reached its block. Transactions never included, or not finalized by the end of the drain (`BENCH_DIESIS_DRAIN_SECS`, default 150), count as infinite, so a percentile that lands on them is `null`; `unfinalized_share` gives their share |
 | `submit_to_receipt_s` p50/p95/p99 | The same population, to its block's first appearance on node 1 (50 ms poll) |
 | `latest_to_finalized_s` | Per block in the window, finalized time minus first-seen time, weighted by transactions |
 | `committed_tps`, `all_four_latest_tps` | Same as finalized TPS, by node 1 first-seen time and by the time all four reached the height (the Nov 8-9 basis) |

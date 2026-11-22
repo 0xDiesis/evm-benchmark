@@ -42,6 +42,10 @@ const SETUP_GAS: u64 = 500_000;
 /// Setup transactions in flight per account (the e2e pool allows 256).
 const SETUP_INFLIGHT_PER_SENDER: usize = 64;
 const SETUP_RECEIPT_TIMEOUT: Duration = Duration::from_secs(180);
+/// Concurrent setup reads and sends, spread over every endpoint; the node caps
+/// concurrent reads per endpoint and refuses the excess with -32005.
+const SETUP_READ_CONCURRENCY: usize = 16;
+const SETUP_SEND_CONCURRENCY: usize = 32;
 
 /// One transaction to sign: who sends it and what it does.
 #[derive(Clone, Debug)]
@@ -364,7 +368,8 @@ pub struct SetupReceipt {
 /// Sends setup batches in waves and requires every receipt to succeed.
 struct SetupSender {
     client: reqwest::Client,
-    rpc: String,
+    /// Every RPC endpoint; setup spreads reads and sends over them.
+    urls: Vec<String>,
     chain_id: u64,
     gas_price: u128,
     keyring: HashMap<Address, PrivateKeySigner>,
@@ -381,7 +386,7 @@ impl SetupSender {
     ) -> Self {
         SetupSender {
             client,
-            rpc: config.rpc.to_string(),
+            urls: config.rpc_urls.iter().map(|u| u.to_string()).collect(),
             chain_id: config.chain_id,
             gas_price,
             keyring,
@@ -391,21 +396,23 @@ impl SetupSender {
     }
 
     async fn pending_nonces(&self, senders: &[Address]) -> Result<HashMap<Address, u64>> {
-        let (client, rpc) = (&self.client, self.rpc.as_str());
-        let results: Vec<Result<(Address, u64)>> = stream::iter(senders.iter().copied())
-            .map(|a| async move {
-                let v = rpc_call(
-                    client,
-                    rpc,
-                    "eth_getTransactionCount",
-                    json!([format!("{a:?}"), "pending"]),
-                )
-                .await?;
-                Ok((a, hex_u64(&v)?))
-            })
-            .buffer_unordered(64)
-            .collect()
-            .await;
+        let (client, urls) = (&self.client, &self.urls);
+        let results: Vec<Result<(Address, u64)>> =
+            stream::iter(senders.iter().copied().enumerate())
+                .map(|(i, a)| async move {
+                    let rpc = urls[i % urls.len()].as_str();
+                    let v = rpc_call(
+                        client,
+                        rpc,
+                        "eth_getTransactionCount",
+                        json!([format!("{a:?}"), "pending"]),
+                    )
+                    .await?;
+                    Ok((a, hex_u64(&v)?))
+                })
+                .buffer_unordered(SETUP_READ_CONCURRENCY)
+                .collect()
+                .await;
         results.into_iter().collect()
     }
 
@@ -444,11 +451,12 @@ impl SetupSender {
             waves[wave].push(i);
         }
         let mut receipts: Vec<Option<SetupReceipt>> = vec![None; signed.len()];
-        let (client, rpc) = (&self.client, self.rpc.as_str());
+        let (client, urls) = (&self.client, &self.urls);
         for wave in waves {
             let sends: Vec<Result<()>> = stream::iter(wave.iter().copied())
                 .map(|i| {
                     let raw = format!("0x{}", hex::encode(&signed[i].encoded));
+                    let rpc = urls[i % urls.len()].as_str();
                     async move {
                         rpc_call(client, rpc, "eth_sendRawTransaction", json!([raw]))
                             .await
@@ -456,7 +464,7 @@ impl SetupSender {
                             .with_context(|| format!("{label}: send {i}"))
                     }
                 })
-                .buffer_unordered(64)
+                .buffer_unordered(SETUP_SEND_CONCURRENCY)
                 .collect()
                 .await;
             sends.into_iter().collect::<Result<Vec<()>>>()?;
@@ -474,6 +482,7 @@ impl SetupSender {
                     stream::iter(waiting.iter().copied())
                         .map(|i| {
                             let hash = format!("{:?}", signed[i].hash);
+                            let rpc = urls[i % urls.len()].as_str();
                             async move {
                                 let r = rpc_call(
                                     client,
@@ -486,7 +495,7 @@ impl SetupSender {
                                 (i, r)
                             }
                         })
-                        .buffer_unordered(128)
+                        .buffer_unordered(SETUP_READ_CONCURRENCY)
                         .collect()
                         .await;
                 let mut still = Vec::new();
@@ -540,6 +549,8 @@ pub fn order_id_from_receipt(receipt: &Value) -> Option<B256> {
     })
 }
 
+/// One JSON-RPC call. Node rate-limit refusals (`-32005`, e.g. "read
+/// concurrency limit exceeded") are retried with backoff; other errors return.
 async fn rpc_call(
     client: &reqwest::Client,
     url: &str,
@@ -547,11 +558,30 @@ async fn rpc_call(
     params: Value,
 ) -> Result<Value> {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-    let response: Value = client.post(url).json(&body).send().await?.json().await?;
-    if let Some(error) = response.get("error") {
-        anyhow::bail!("{method}: {error}");
+    let mut delay = Duration::from_millis(50);
+    let mut attempt = 0;
+    loop {
+        let response: Value = client.post(url).json(&body).send().await?.json().await?;
+        match response.get("error") {
+            Some(error) if is_rate_limited(error) && attempt < RPC_RATE_LIMIT_RETRIES => {
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(2));
+            }
+            Some(error) => anyhow::bail!("{method}: {error}"),
+            None => return Ok(response.get("result").cloned().unwrap_or(Value::Null)),
+        }
     }
-    Ok(response.get("result").cloned().unwrap_or(Value::Null))
+}
+
+const RPC_RATE_LIMIT_RETRIES: u32 = 12;
+
+fn is_rate_limited(error: &Value) -> bool {
+    error.get("code").and_then(Value::as_i64) == Some(-32005)
+        || error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|m| m.contains("limit exceeded"))
 }
 
 fn hex_u64(v: &Value) -> Result<u64> {
@@ -569,6 +599,45 @@ mod tests {
     fn actors() -> Actors {
         let senders: Vec<Address> = (0..SENDERS).map(|i| derived_address("s", i)).collect();
         Actors::from_senders(&senders).expect("actors")
+    }
+
+    #[test]
+    fn node_rate_limit_refusals_are_retried() {
+        assert!(is_rate_limited(
+            &json!({"code": -32005, "message": "read concurrency limit exceeded"})
+        ));
+        assert!(!is_rate_limited(
+            &json!({"code": -32000, "message": "nonce too low"})
+        ));
+    }
+
+    #[tokio::test]
+    async fn rpc_call_retries_a_rate_limited_read() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!(
+                {"jsonrpc": "2.0", "id": 1, "error": {"code": -32005, "message": "read concurrency limit exceeded"}})))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"jsonrpc": "2.0", "id": 1, "result": "0x7"})),
+            )
+            .mount(&server)
+            .await;
+        let v = rpc_call(
+            &reqwest::Client::new(),
+            &server.uri(),
+            "eth_getTransactionCount",
+            json!([]),
+        )
+        .await
+        .expect("retried");
+        assert_eq!(hex_u64(&v).expect("hex"), 7);
     }
 
     #[test]

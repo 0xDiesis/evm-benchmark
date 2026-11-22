@@ -94,11 +94,18 @@ def fetch_receipts(numbers, errors, workers=8):
     from concurrent.futures import ThreadPoolExecutor
 
     def one(n):
-        try:
-            return parse_receipts(rpc(RPC_URLS[0], "eth_getBlockReceipts", [hex(n)], 30))
-        except Exception as error:
-            errors.append(f"receipts {n}: {str(error)[:120]}")
-            return {}
+        delay = 0.05
+        for attempt in range(10):
+            try:
+                return parse_receipts(rpc(RPC_URLS[0], "eth_getBlockReceipts", [hex(n)], 30))
+            except Exception as error:
+                # The node refuses reads past its concurrency limit (-32005); back off and retry.
+                if "limit exceeded" in str(error) and attempt < 9:
+                    time.sleep(delay)
+                    delay = min(delay * 2, 2.0)
+                    continue
+                errors.append(f"receipts {n}: {str(error)[:120]}")
+                return {}
 
     receipts = {}
     with ThreadPoolExecutor(workers) as pool:
