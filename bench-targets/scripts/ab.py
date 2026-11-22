@@ -9,6 +9,7 @@ A side is a comma list of:
   image=<tag>               diesis-node-e2e tag (DIESIS_IMAGE_TAG); default: checkout HEAD-release
   repo=<path>               node checkout to render (must match the image); default DIESIS_REPO_DIR
   env=K=V+K=V               validator overrides (BENCH_DIESIS_ENV)
+  test=transfer|evm         load generator mode (bench.sh --test-mode); default transfer
   outcome=hybrid|bls-only   genesis outcome signature rule (BENCH_DIESIS_OUTCOME_RULE); default:
                             the harness default for the checkout
   name=<short>              label in the summary
@@ -49,13 +50,15 @@ def parse_side(text):
     side = {}
     for part in [p for p in text.split(",") if p]:
         key, sep, value = part.partition("=")
-        if not sep or key not in {"profile", "image", "repo", "env", "outcome", "name"}:
+        if not sep or key not in {"profile", "image", "repo", "env", "outcome", "name", "test"}:
             raise SystemExit(f"Bad side field {part!r}")
         side[key] = value
     if side.get("profile", "capped") not in {"capped", "uncapped"}:
         raise SystemExit("profile must be capped or uncapped")
     if side.get("outcome", "hybrid") not in {"hybrid", "bls-only"}:
         raise SystemExit("outcome must be hybrid or bls-only")
+    if side.get("test", "transfer") not in {"transfer", "evm"}:
+        raise SystemExit("test must be transfer or evm")
     side.setdefault("profile", "capped")
     side["env"] = [e for e in side.get("env", "").split("+") if e]
     for item in side["env"]:
@@ -207,6 +210,8 @@ def run_step(out, i, key, side, step, plan, log, external=False, aged=None):
         env["DIESIS_FLEET"] = "external"
     cmd = ["bash", str(HERE / "bench.sh"), "--chain", "diesis", "--mode", "sustained", "--tps", str(rate),
            "--duration", str(duration), "--out", str(step_dir), "--tag", f"{out.name}-{i}{key}"]
+    if side.get("test"):
+        cmd += ["--test-mode", side["test"]]
     log.write(f"{time.strftime('%H:%M:%S')} arm {i}{key} {name}{' (same fleet)' if external else ''}: "
               f"{' '.join(cmd)}\n")
     log.flush()
