@@ -42,7 +42,8 @@ def prom(k, pending=100):
             ("reth_transaction_pool_pending_pool_transactions", ""): pending * k,
             ("reth_diesis_commit_proposal_duplicate_skipped_total", ""): 20 * k,
             ("reth_diesis_producer_output_deferred_transactions_total", ""): 50 * k,
-            ("reth_diesis_outcome_fallback_entries_total", '{cause="carrier_round_below_quorum"}'): k}
+            ("reth_diesis_outcome_fallback_entries_total", '{cause="carrier_round_below_quorum"}'): k,
+            ("reth_diesis_checkpoint_control_inbound_rejected_total", '{reason="lane_full"}'): 2 * k}
 
 
 def synthetic(tmp, pending=100, unfinalized_from=None):
@@ -123,6 +124,7 @@ class ObserverMetrics(unittest.TestCase):
         self.assertEqual(pb["deferred_tx_per_block"], 5)
         self.assertEqual(m["fallback_entries_by_cause_nodes"][0], {"carrier_round_below_quorum": 10})
         self.assertEqual(m["largest_block_txs"], 1000)
+        self.assertEqual(m["checkpoint_control_rejected_by_reason_nodes"][3], {"lane_full": 20})
         self.assertEqual(m["validator_head_spread_blocks"]["max"], 2)
         self.assertFalse(m["follower_present"])
 

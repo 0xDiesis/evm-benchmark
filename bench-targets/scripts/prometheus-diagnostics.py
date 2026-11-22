@@ -107,6 +107,19 @@ COUNTERS: dict[str, str] = {
     "quic_hedged_rlpx": "sum(reth_diesis_quic_hedged_rlpx_total)",
     "quic_hedged_rlpx_failed": "sum(reth_diesis_quic_hedged_rlpx_failed_total)",
     "quic_hedged_rlpx_broadcast": "sum(reth_diesis_quic_hedged_rlpx_broadcast_total)",
+    "sync_targets_declined": "sum(reth_diesis_consensus_sync_targets_declined_total)",
+    "sync_targets_abandoned": "sum(reth_diesis_consensus_sync_targets_abandoned_total)",
+    "sync_targets_forgotten_after_timeout": (
+        "sum(reth_diesis_consensus_sync_targets_forgotten_after_timeout_total)"
+    ),
+    "catch_up_sync_vertices_busy": "sum(reth_diesis_consensus_catch_up_sync_vertices_busy_total)",
+    "catch_up_sync_vertices_refused": (
+        "sum(reth_diesis_consensus_catch_up_sync_vertices_refused_total)"
+    ),
+    "catch_up_slots_reported_above_round": (
+        "sum(reth_diesis_consensus_catch_up_slots_reported_above_round_total)"
+    ),
+    "pending_vertices_dropped_stale": "sum(reth_diesis_consensus_pending_vertices_dropped_stale_total)",
 }
 
 SERIES_COUNTERS: dict[str, str] = {
@@ -134,6 +147,21 @@ SERIES_COUNTERS: dict[str, str] = {
     ),
     "quic_hedged_rlpx_broadcast_by_msg_id": (
         "sum by (msg_id) (reth_diesis_quic_hedged_rlpx_broadcast_total)"
+    ),
+    "checkpoint_control_inbound_rejected_by_reason": (
+        "sum by (reason) (reth_diesis_checkpoint_control_inbound_rejected_total)"
+    ),
+    "dag_inbound_dropped_full_by_msg_id": (
+        "sum by (msg_id) (reth_diesis_dag_inbound_dropped_full_total)"
+    ),
+    "sync_requests_by_outcome": (
+        "sum by (outcome) (reth_diesis_consensus_sync_requests_total)"
+    ),
+    "catch_up_refused_by_reason": (
+        "sum by (reason) (reth_diesis_consensus_catch_up_refused_total)"
+    ),
+    "catch_up_sync_replies_by_shape": (
+        "sum by (shape) (reth_diesis_consensus_catch_up_sync_replies_total)"
     ),
 }
 

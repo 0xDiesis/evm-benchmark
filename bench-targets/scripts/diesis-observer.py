@@ -56,7 +56,8 @@ KEEP = ("reth_sync_checkpoint", "reth_diesis_horizon_committed_transactions_tota
         "reth_diesis_commit_proposal_duplicate_skipped_total", "reth_diesis_producer_output_deferred_transactions_total",
         "reth_diesis_outcome_fallback_entries_total", "reth_diesis_outcome_fallback_resolved_total",
         "reth_diesis_horizon_flow_held_ms_total", "reth_diesis_tx_source_selected_primary_total",
-        "reth_diesis_tx_source_selected_fallback_total", "reth_diesis_tx_source_fallback_owner_live_total")
+        "reth_diesis_tx_source_selected_fallback_total", "reth_diesis_tx_source_fallback_owner_live_total",
+        "reth_diesis_checkpoint_control_inbound_rejected_total")
 TIMELINE_TARGETS = ("diesis_round_timeline", "diesis_mpt_vote_timeline")
 INF = float("inf")
 
@@ -425,6 +426,9 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
         r["fallback_resolved_by_path_nodes"] = [by_label(first[1][i], last[1][i],
                                                          "reth_diesis_outcome_fallback_resolved_total", "path")
                                                 for i in range(4)]
+        r["checkpoint_control_rejected_by_reason_nodes"] = [
+            by_label(first[1][i], last[1][i], "reth_diesis_checkpoint_control_inbound_rejected_total", "reason")
+            for i in range(4)]
         r["flow_held_ms_by_reason_node1"] = by_label(first[1][0], last[1][0],
                                                      "reth_diesis_horizon_flow_held_ms_total", "reason")
         r["tx_selection_nodes"] = [dict(primary=delta(first[1][i], last[1][i], "reth_diesis_tx_source_selected_primary_total"),
