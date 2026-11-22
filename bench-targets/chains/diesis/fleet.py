@@ -21,6 +21,11 @@ Inputs (environment):
   DIESIS_AGED_TAG       reuse the stopped aged fleet <tag> instead of a fresh genesis
   BENCH_DIESIS_FLEET    this user's fresh fleet name (default diesis-bench); concurrent users
                         on one host pick distinct names
+  BENCH_DIESIS_OUTCOME_RULE  genesis outcome signature rule: bls-only (default) or hybrid. The
+                        node's live validator path does not yet sign the ML-DSA halves hybrid
+                        outcomes need, so a hybrid fleet stops within a few blocks. Checkouts
+                        without docker/epoch/epoch-zero-4v-bls-only.calldata predate the
+                        control and get no rule keys (their strict configuration refuses them)
   BENCH_DIESIS_MAX_FLEETS  start only while fewer than N other Diesis fleets (any user's, one per
                         compose project) run on this host; otherwise wait, polling every 30 s,
                         up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)
@@ -80,6 +85,12 @@ OWNER_LABEL = "local.bench.fleet"
 DEV_KEY = "0x" + "0" * 63 + "1"
 RESERVED = {"DIESIS_REPO_DIR", "DIESIS_RPC", "DIESIS_WS", "DIESIS_CHAIN_ID", "DIESIS_IMAGE_TAG", "DIESIS_AGED_TAG",
             "DIESIS_IMAGE_PROFILE", "DIESIS_SOURCE_REVISION"}
+# Genesis outcome signature rule. Each rule has its own genesis hash, so the epoch-zero
+# calldata the validators load must be the artifact signed for that rule's genesis.
+OUTCOME_RULES = ("bls-only", "hybrid")
+DEFAULT_OUTCOME_RULE = "bls-only"
+BLS_ONLY_EPOCH_ZERO = "epoch-zero-4v-bls-only.calldata"
+OUTCOME_RULE_KEYS = ("DIESIS_DEV_OUTCOME_SIGNATURE_RULE", "DIESIS_EPOCH_ZERO_CALLDATA_FILE")
 
 
 def state_dir():
@@ -241,10 +252,33 @@ def merged_env(profile_values, environ):
     return env
 
 
-def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEET, block=None, cpu_base=0):
+def outcome_rule_env(repo, environ, default=DEFAULT_OUTCOME_RULE):
+    """Validator keys selecting the genesis outcome signature rule, and the rule (None when the
+    checkout predates the control). The rule and its epoch-zero artifact always travel together."""
+    requested = environ.get("BENCH_DIESIS_OUTCOME_RULE") or None
+    rule = requested or default
+    if rule not in OUTCOME_RULES:
+        raise SystemExit(f"BENCH_DIESIS_OUTCOME_RULE must be one of {', '.join(OUTCOME_RULES)}, not {rule!r}")
+    if not (Path(repo) / "docker" / "epoch" / BLS_ONLY_EPOCH_ZERO).is_file():
+        if requested:
+            raise SystemExit(f"{repo} predates the genesis outcome rule control; unset BENCH_DIESIS_OUTCOME_RULE")
+        return {}, None
+    env = {"DIESIS_DEV_OUTCOME_SIGNATURE_RULE": rule}
+    if rule == "bls-only":
+        env["DIESIS_EPOCH_ZERO_CALLDATA_FILE"] = f"/etc/diesis/epoch/{BLS_ONLY_EPOCH_ZERO}"
+    return env, rule
+
+
+def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEET, block=None,
+           outcome_rule=DEFAULT_OUTCOME_RULE, cpu_base=0):
     environ = dict(os.environ if environ is None else environ)
     profile = read_profile(profile_name)
     env = merged_env(profile, environ)
+    clash = sorted(set(OUTCOME_RULE_KEYS) & set(env))
+    if clash:
+        raise SystemExit(f"Select the outcome rule with BENCH_DIESIS_OUTCOME_RULE, not {', '.join(clash)}")
+    rule_env, rule = outcome_rule_env(repo, environ, outcome_rule)
+    env.update(rule_env)
     files = ["-f", repo / "docker" / "docker-compose.e2e.yml"]
     signing = repo / "docker" / "docker-compose.mpt-signing.yml"
     if signing.is_file():
@@ -265,7 +299,8 @@ def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEE
         interpolated |= set(re.findall(r"\$\{([A-Z0-9_]+)", Path(path).read_text()))
     compose = patch(rendered, image_id, env, profile, interpolated, project, cpu_base)
     return compose, dict(checkout=str(repo), checkout_head=head, profile=profile_name, profile_values=profile,
-                         validator_env=env, image_id=image_id, signing_overlay=signing.is_file(), cpu_base=cpu_base,
+                         validator_env=env, image_id=image_id, signing_overlay=signing.is_file(),
+                         outcome_signature_rule=rule, cpu_base=cpu_base,
                          cpusets={name: compose["services"][name].get("cpuset") for name in NODES})
 
 
@@ -470,8 +505,12 @@ def start(project, aged_tag=None):
         cpu_base = choose_cpu_base(busy, docker_cpus(), int(float(values["FLEET_CPUS"])) * len(NODES))
         if busy:
             say(f"{project}: other fleets pin CPUs {sorted(busy)}; pinning validators from CPU {cpu_base}")
+    aged_rule = aged_outcome_rule(aged_tag)
     compose, provenance = render(repo, image_id, ref.split(":", 1)[1], profile, project=project, block=block,
-                                 cpu_base=cpu_base)
+                                 outcome_rule=aged_rule or DEFAULT_OUTCOME_RULE, cpu_base=cpu_base)
+    if aged_rule and provenance["outcome_signature_rule"] != aged_rule:
+        raise SystemExit(f"Aged fleet {aged_tag} has a {aged_rule} genesis, not "
+                         f"{provenance['outcome_signature_rule']}")
     directory = state_dir() / project
     directory.mkdir(parents=True, exist_ok=True)
     containers = [compose["services"][n]["container_name"] for n in NODES]
@@ -483,8 +522,9 @@ def start(project, aged_tag=None):
     provenance.update(project=project, image=ref, aged_tag=aged_tag, ports=ports,
                       compose_sha256=hashlib.sha256(path.read_bytes()).hexdigest(), started=time.time())
     (directory / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
-    say(f"{project}: {ref} ({image_id[:19]}) profile={profile} block {block['block']} "
-        f"(RPC {block['rpc'][0]}, metrics {block['metrics'][0]}, subnet {block['subnet_prefix']}.0/24) checkout={repo}")
+    say(f"{project}: {ref} ({image_id[:19]}) profile={profile} outcome-rule={provenance['outcome_signature_rule']} "
+        f"block {block['block']} (RPC {block['rpc'][0]}, metrics {block['metrics'][0]}, "
+        f"subnet {block['subnet_prefix']}.0/24) checkout={repo}")
     sh([*compose_cmd(project, path), "up", "-d", "--no-build", "--pull", "never", "--remove-orphans"],
        env=compose_env(), timeout=600)
     try:
@@ -559,6 +599,14 @@ def manifest(tag):
     if not path.exists():
         raise SystemExit(f"No aged fleet {tag} ({path}); build one with `fleet.py age --tag {tag}`")
     return json.loads(path.read_text())
+
+
+def aged_outcome_rule(tag):
+    """The outcome signature rule an aged fleet's genesis was built with, when recorded: every
+    later run must keep it, since another rule is another genesis."""
+    if not tag or not manifest_path(tag).exists():
+        return None
+    return manifest(tag)["provenance"].get("outcome_signature_rule")
 
 
 def harness_binary():
@@ -787,8 +835,9 @@ def cmd_status(_a):
 def cmd_render(_a):
     repo = checkout()
     ref, image_id = image_ref(repo)
+    rule = aged_outcome_rule(os.environ.get("DIESIS_AGED_TAG")) or DEFAULT_OUTCOME_RULE
     compose, provenance = render(repo, image_id, ref.split(":", 1)[1], os.environ.get("BENCH_DIESIS_PROFILE", "capped"),
-                                 project=selected_project(), block=project_ports(selected_project()))
+                                 project=selected_project(), block=project_ports(selected_project()), outcome_rule=rule)
     print(json.dumps(dict(provenance=provenance, compose=compose), indent=2))
 
 
