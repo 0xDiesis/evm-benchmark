@@ -21,6 +21,9 @@ Inputs (environment):
   DIESIS_AGED_TAG       reuse the stopped aged fleet <tag> instead of a fresh genesis
   BENCH_DIESIS_FLEET    this user's fresh fleet name (default diesis-bench); concurrent users
                         on one host pick distinct names
+  BENCH_DIESIS_MAX_FLEETS  start only while fewer than N other Diesis fleets (any user's, one per
+                        compose project) run on this host; otherwise wait, polling every 30 s,
+                        up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
@@ -319,6 +322,54 @@ def project_running(project):
     return bool(out.split())
 
 
+def fleet_projects(inspect_lines, image_ids):
+    """Compose projects (bare container names outside compose) among `docker inspect` lines
+    "<image id>\t<compose project>\t<name>" whose image ID is a Diesis node image."""
+    projects = set()
+    for line in inspect_lines.splitlines():
+        image, project, name = (line.split("\t") + ["", ""])[:3]
+        if image in image_ids:
+            projects.add(project if project and project != "<no value>" else name.lstrip("/"))
+    return projects
+
+
+def running_fleets(exclude=()):
+    """Every running Diesis fleet on this host, any user's, matched by image ID because fleets
+    started from an immutable image ID show no tag."""
+    ids = set(sh(["docker", "images", "--no-trunc", "--format", "{{.ID}}", "--filter", "reference=diesis-node*"],
+                 check=False, capture=True).stdout.split())
+    running = sh(["docker", "ps", "-q"], check=False, capture=True).stdout.split()
+    if not ids or not running:
+        return set()
+    out = sh(["docker", "inspect", "--format",
+              '{{.Image}}\t{{index .Config.Labels "com.docker.compose.project"}}\t{{.Name}}', *running],
+             check=False, capture=True).stdout
+    return fleet_projects(out, ids) - set(exclude)
+
+
+def wait_for_slot(project):
+    """With BENCH_DIESIS_MAX_FLEETS=N, start only while fewer than N other Diesis fleets run on
+    this host, polling every 30 s for up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)."""
+    limit = int(os.environ.get("BENCH_DIESIS_MAX_FLEETS") or 0)
+    if limit <= 0:
+        return
+    deadline = time.monotonic() + float(os.environ.get("BENCH_DIESIS_SLOT_WAIT_S") or 7200)
+    shown = None
+    while True:
+        others = running_fleets(exclude={project})
+        if len(others) < limit:
+            if shown is not None:
+                say(f"{project}: fleet slot free ({len(others)} other fleet(s) running)")
+            return
+        if others != shown:
+            say(f"{project}: {len(others)} other Diesis fleets running ({', '.join(sorted(others))}); "
+                f"waiting for a slot (limit {limit})")
+            shown = others
+        if time.monotonic() > deadline:
+            raise SystemExit(f"No fleet slot within BENCH_DIESIS_SLOT_WAIT_S: {sorted(others)} still running")
+        time.sleep(30)
+
+
 def wait_live(block, timeout=180):
     deadline = time.monotonic() + timeout
     first = None
@@ -352,7 +403,8 @@ def start(project, aged_tag=None):
     for other in own_other_fleets(project):
         say(f"stopping {other} (this user's other fleet)")
         stop_project(other)
-    previous = json.loads(ports_path(project).read_text())["block"] if ports_path(project).exists() else None
+    wait_for_slot(project)
+    previous =json.loads(ports_path(project).read_text())["block"] if ports_path(project).exists() else None
     own_network = f"{project}_diesis-e2e"
     block = choose_block(previous, busy_host_ports() if not project_running(project) else set(),
                          busy_subnets(own_network))

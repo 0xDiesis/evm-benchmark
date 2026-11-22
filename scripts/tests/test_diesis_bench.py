@@ -2,11 +2,13 @@
 """Offline tests for the Diesis fleet, observer and A/B runner (no Docker, no chain)."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
 import types
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -22,6 +24,7 @@ observer = load(ROOT / "bench-targets/scripts/diesis-observer.py")
 fleet = load(ROOT / "bench-targets/chains/diesis/fleet.py")
 ab = load(ROOT / "bench-targets/scripts/ab.py")
 judged = load(ROOT / "bench-targets/scripts/judged.py")
+idle = load(ROOT / "bench-targets/scripts/diesis-idle.py")
 
 W0 = 1.795e9
 
@@ -226,6 +229,29 @@ class Fleet(unittest.TestCase):
                 os.environ.clear()
                 os.environ.update(old)
 
+    def test_fleet_slots_count_projects_by_image_id(self):
+        lines = "\n".join(["sha256:aa\towner-lock-cuts\t/owner-lock-cuts-node-1",
+                           "sha256:aa\towner-lock-cuts\t/owner-lock-cuts-node-2",
+                           "sha256:bb\tdiesis-bench\t/diesis-bench-node-1",
+                           "sha256:cc\tcoordin\t/coordin-api-1",
+                           "sha256:aa\t\t/loose-node",
+                           "sha256:aa\t<no value>\t/other-node"])
+        self.assertEqual(fleet.fleet_projects(lines, {"sha256:aa", "sha256:bb"}),
+                         {"owner-lock-cuts", "diesis-bench", "loose-node", "other-node"})
+
+    def test_wait_for_slot_waits_while_the_host_is_full(self):
+        with mock.patch.dict(os.environ, {"BENCH_DIESIS_MAX_FLEETS": ""}), \
+                mock.patch.object(fleet, "running_fleets") as running:
+            fleet.wait_for_slot("diesis-bench")
+            running.assert_not_called()
+        with mock.patch.dict(os.environ, {"BENCH_DIESIS_MAX_FLEETS": "2"}), \
+                mock.patch.object(fleet, "running_fleets", side_effect=[{"a", "b"}, {"a", "b"}, {"a"}]) as running, \
+                mock.patch.object(fleet.time, "sleep") as sleep, mock.patch.object(fleet, "say"):
+            fleet.wait_for_slot("diesis-bench")
+        self.assertEqual(running.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        running.assert_called_with(exclude={"diesis-bench"})
+
     def test_fixture_name_carries_image_and_genesis(self):
         m = dict(tag="m6570-5k", genesis_hash="0x" + "ab" * 32, provenance=dict(image_id="sha256:" + "7d" * 32))
         self.assertEqual(fleet.fixture_name(m), "m6570-5k-7d7d7d7d7d7d-abababab" + "ab")
@@ -312,6 +338,54 @@ class Judged(unittest.TestCase):
         self.assertEqual(s["submit_to_finalized_s"]["p50"], 3.0)
         self.assertIn("n0", s["peak_memory_bytes_nodes"])
         self.assertFalse(judged.summary(dict(m, host_load_1m=dict(median=5, max=12)), 18)["functional_only"])
+
+
+def idle_arm(number, stretch, cpu, blocks_per_s):
+    return dict(arm=number, stretch=stretch, result="completed",
+                idle=dict(cpu_pct={f"n{i}": cpu + i for i in range(4)}, cpu_pct_median=cpu + 1.5,
+                          host_load_1m=dict(median=3.0, max=4.0)),
+                idle_heads=dict(all_advanced=True, blocks_per_s=[blocks_per_s] * 4),
+                idle_interval_ms=dict(p50=1000 / blocks_per_s, p90=None, p99=1200 / blocks_per_s, n=10),
+                probes=[dict(first_block_s=0.5, receipt_s=0.9, finalized_s=1.5)],
+                first_block_s=dict(median=0.5, min=0.5, max=0.5, n=1), receipt_s=dict(median=0.9, min=0.9, max=0.9, n=1),
+                finalized_s=dict(median=1.5, min=1.5, max=1.5, n=1), agreement=dict(agree=True, height=5),
+                not_running=[], idle_rounds_per_s=[2 * blocks_per_s] * 4,
+                idle_mode={f"n{i}": 1 for i in range(4)})
+
+
+class Idle(unittest.TestCase):
+    def test_arms_interleave(self):
+        self.assertEqual(idle.schedule(["4", "1"], 2), ["4", "1", "1", "4"])
+        self.assertEqual(idle.schedule(["4", "1"], 1), ["4", "1"])
+        self.assertEqual(idle.schedule(["4", "1"], 3), ["4", "1", "1", "4", "4", "1"])
+
+    def test_gaps_spread_multi_block_polls(self):
+        for got, want in zip(idle.gaps_ms([(0.0, 1), (0.8, 1), (2.4, 2)]), [800.0, 800.0], strict=True):
+            self.assertAlmostEqual(got, want)
+        self.assertEqual(idle.gaps_ms([(0.0, 1)]), [])
+
+    def test_rounds_per_second_skip_failed_scrapes(self):
+        self.assertEqual(idle.per_second([10, None, 4], [30, 9, 8], 10.0), [2.0, None, 0.4])
+
+    def test_advance_requires_every_head_to_move(self):
+        start = dict(at=0.0, latest=[10, 10, 10, 10], finalized=[8, 8, 8, 8])
+        end = dict(at=10.0, latest=[20, 21, 20, 20], finalized=[18, 18, 18, 18])
+        moved = idle.advance(start, end)
+        self.assertTrue(moved["all_advanced"])
+        self.assertAlmostEqual(moved["blocks_per_s"][1], 1.1)
+        self.assertFalse(idle.advance(start, dict(end, finalized=[18, 8, 18, 18]))["all_advanced"])
+        self.assertFalse(idle.advance(start, dict(end, latest=[20, None, 20, 20]))["all_advanced"])
+
+    def test_report_has_a_row_per_arm_and_medians_per_stretch(self):
+        arms = [idle_arm(1, 4, 10.0, 1.0), idle_arm(2, 1, 30.0, 4.0), idle_arm(3, 1, 32.0, 4.0),
+                idle_arm(4, 4, 12.0, 1.0), dict(arm=5, stretch=4, result="failed: x")]
+        md = idle.report(dict(profile="capped", idle_s=300, probes=1, probe_idle_s=120, arms=arms))
+        self.assertIn("| 1 | 4 | 10.0, 11.0, 12.0, 13.0 | 11.5 | 1.00 | 2.00 | 1000/1200 | 0.50 | 0.90 | "
+                      "1.50 (1.50–1.50, n=1) | yes; agree True | 1/1, 1/1, 1/1, 1/1 | 3.0/4.0 |", md)
+        self.assertIn("| 5 | 4 | failed: x |", md)
+        self.assertIn("| 4 | 2 | 12.5 (10.0–15.0) | 1.00 | 2.00 | 1000/1200 | 0.50 | 0.90 | 1.50 (1.50–1.50, n=2) | "
+                      "2/2 |", md)
+        self.assertIn("| 1 | 2 | 32.5 (30.0–35.0) | 4.00 | 8.00 | 250/300 |", md)
 
 
 if __name__ == "__main__":

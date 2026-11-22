@@ -189,8 +189,9 @@ diesis-fixture-save: ## Archive a stopped aged fleet as a fixture  (TAG=)
 diesis-fixture-restore: ## Restore a fixture into a new aged fleet  (FIXTURE= AS=)
 	@python3 bench-targets/chains/diesis/fleet.py restore-fixture --fixture "$(FIXTURE)" --as "$(AS)"
 
-# The node's built speed flags (main 9ba6562b2), all off against all on. Booleans take only
-# true/false; the two selected warm-preparation flags are 0/1 integers; pipeline depth is 1..3.
+# The node's built speed flags (keys and ranges as at main 0016cf806 and 9ba6562b2), all off
+# against all on. Booleans take only true/false; the two selected warm-preparation flags are 0/1
+# integers; pipeline depth is 1..3.
 # Excluded: DIESIS_SELECTED_APPEND_DURABLE_DUPLICATE_REPLAY (rejected) and
 # DIESIS_MPT_SERVE_EXECUTED_HEAD (stays off).
 SPEED_FLAGS_OFF := DIESIS_HORIZON_APPEND_BEFORE_RETIRE=false+DIESIS_MPT_SINGLE_AUTHORITY_CHECK=false+DIESIS_MPT_EARLY_VOTES=false+DIESIS_MPT_PIPELINE_DEPTH=1+DIESIS_SELECTED_AGREEMENT_CAPTURE_OUTSIDE_OWNER=false+DIESIS_SELECTED_WARM_PUBLICATION_REFS=0+DIESIS_SELECTED_QUEUE_DIGEST_PER_REVISION=0
@@ -205,8 +206,13 @@ diesis-speed-flags: build ## Speed flags off vs on, interleaved A B B A  (NAME= 
 		--warmup $(or $(WARMUP),60) $(if $(FIXTURE),--fixture $(FIXTURE)) $(if $(AGED),--aged $(AGED)) \
 		$(if $(MAX_LOAD),--max-load $(MAX_LOAD)) $(if $(filter 1 true yes,$(NO_QUIET_WAIT)),--no-quiet-wait)
 
-diesis-idle: ## Idle CPU and first-transaction latency per DIESIS_IDLE_STRETCH  (STRETCH=4,1 PROFILE=capped)
-	@python3 $(SCRIPTS)/diesis-idle.py --stretch "$(or $(STRETCH),4,1)" --profile $(or $(PROFILE),capped)
+# A comma inside $(or ...) splits its arguments, so the default stretch list is a variable.
+IDLE_STRETCH_DEFAULT := 4,1
+
+diesis-idle: ## Idle CPU, cadence and resume latency per DIESIS_IDLE_STRETCH, interleaved  (STRETCH=4,1 ARMS=1 PROFILE=capped IDLE=300 PROBES=5 PROBE_IDLE=120)
+	@python3 $(SCRIPTS)/diesis-idle.py --stretch "$(or $(STRETCH),$(IDLE_STRETCH_DEFAULT))" --arms $(or $(ARMS),1) \
+		--profile $(or $(PROFILE),capped) --idle $(or $(IDLE),300) --probes $(or $(PROBES),5) \
+		--probe-idle $(or $(PROBE_IDLE),120)
 
 diesis-age: build ## Build an aged Diesis fleet  (TAG= BLOCKS=5100 RATE=400)
 	@test -n "$(TAG)" || { echo "Error: TAG is required"; exit 2; }
