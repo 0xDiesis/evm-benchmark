@@ -604,8 +604,9 @@ def agreement(obs, start, end):
     return dict(agree=all(c["agree"] for c in checked), finalized_head=head, heights=checked)
 
 
-# Reth's file log (debug by default) keeps every timeline line. Stdout at info drops some: an info
-# event right after a debug-level `enabled!` check on the same thread can miss the stdout layer.
+# Reth's file log keeps every timeline line at its default (debug) and at info. When the file filter
+# is debug and stdout is info, stdout drops some: an info event right after a debug-level `enabled!`
+# check on the same thread can miss the stdout layer. Matching filters (judged runs: info) drop none.
 NODE_FILE_LOGS = "/root/.cache/reth/logs/*/reth.log*"
 
 

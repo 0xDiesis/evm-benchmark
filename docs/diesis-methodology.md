@@ -155,6 +155,9 @@ capped profile sets `FLEET_FILE_LOG_FILTER=info` and `judged.py` sets
 Diagnostic arms keep debug with `BENCH_DIESIS_FILE_LOG_FILTER=debug`, which wins over the profile.
 The level is recorded in the fleet provenance, in `judged.json`/`judged.md`, and as
 `chain_config.validator_file_log_filter` in each run's `meta.json`.
+Timeline marks are info events, so they still land in the file log at info: a 4-validator check with
+all three timelines on kept every `decided`, `installed`, `block_cut`, sampled `tx_admitted` and vote
+mark, with no debug lines. With stdout and the file both at info, stdout no longer drops marks either.
 
 On the shared M2, do not reserve the host: there is no `compute measure begin --host local`,
 and development comes first. Before each arm, `ab.py` waits up to 10 minutes for 60 s of
