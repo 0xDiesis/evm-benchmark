@@ -49,6 +49,16 @@ make ab NAME=<change> AGED=m6570-5k RATES=2000 \
 # Baseline under both profiles:
 make ab NAME=baseline-<sha> AGED=m6570-5k RATES=500,1000,2000,3000 A="profile=capped" B="profile=uncapped"
 
+# Save a stopped aged fleet as a fixture, then the judged run on a fresh copy of it:
+make diesis-fixture-save TAG=m6570-5k
+make diesis-judged FIXTURE=<fixture> RATE=2000
+
+# The node's built speed flags all off against all on, A B B A (FIXTURE= or AGED=, or fresh):
+make diesis-speed-flags NAME=<name> FIXTURE=<fixture> RATES=2000
+
+# Idle CPU, cadence and resume latency per DIESIS_IDLE_STRETCH, interleaved 4 1 1 4:
+make diesis-idle STRETCH=4,1 ARMS=2
+
 # One ad-hoc run (fresh genesis unless AGED is set):
 make bench CHAIN=diesis MODE=sustained TPS=2000 DURATION=660 WARMUP=60 PROFILE=capped
 ```
@@ -58,7 +68,10 @@ and development comes first. Before each arm, `ab.py` waits up to 10 minutes for
 quiet (1-minute load below 8, no compiler or docker build) and records the outcome in
 `arm-*/host-*.json`. The observer records the host load for every window. Treat arms run on
 a busy host as diagnostic. Set `BENCH_RESULTS_BASE` to keep results off the system disk
-(in this workspace, `/Volumes/Scratch/0xdiesis/reports/evm-benchmark`).
+(in this workspace, `/Volumes/Scratch/0xdiesis/reports/evm-benchmark`). Set
+`BENCH_DIESIS_MAX_FLEETS=2` to honour a shared fleet cap. Before starting any fleet, including
+each arm's restart, `fleet.py` then waits while two or more other Diesis fleets run on the host.
+It counts every user's fleets, one per compose project, matched by image ID.
 
 ## What the harness already provided
 
@@ -89,6 +102,9 @@ lacked geo profiles, ceiling search, analytics, cross-chain comparison and sweep
 | Diesis attribution | Per-node Prometheus deltas: selected-owner hold, MPT quorum wait, rounds/block, tx/block, interval; also empty-block share, CPU-seconds per tx (Docker), pool backlog slope |
 | Env and round timer | `BENCH_DIESIS_ENV="K=V ..."` for any node flag, or the node-Makefile `E2E_*` spellings (for example `E2E_MIN_ROUND_DELAY=20ms`). Ambient `DIESIS_*` values only feed the compose's own interpolation and are never injected: the node's strict configuration rejects any `DIESIS_*` key it does not consume, and workspace tooling exports such names |
 | Interleaved A/B | `ab.py` / `make ab`: A B B A …, medians and ranges, resumable |
+| Fixtures and the judged run | `fleet.py save-fixture` archives a stopped aged fleet; `judged.py` restores a fresh copy, records a refusal (with Work-admission bytes) or one 600 s window, and never modifies the fixture |
+| Speed flags | `make diesis-speed-flags`: the node's built speed flags all off against all on, through `ab.py` |
+| Idle stretch | `diesis-idle.py` / `make diesis-idle`: per `DIESIS_IDLE_STRETCH` arm, CPU % per validator over an idle window, blocks and consensus rounds per second, idle block intervals, and submit→first block, receipt and finalized for single transfers after long idle gaps, with every validator's idle-mode exit, head progress and hash agreement |
 | Verdicts | `generator_bound` and `chain_saturated` per run |
 
 Fixes made along the way:
