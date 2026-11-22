@@ -60,6 +60,9 @@ KEEP = ("reth_sync_checkpoint", "reth_diesis_horizon_committed_transactions_tota
         "reth_diesis_checkpoint_control_inbound_rejected_total")
 TIMELINE_TARGETS = ("diesis_round_timeline", "diesis_mpt_vote_timeline")
 INF = float("inf")
+# Spot-book trade fills (ExchangeTradeFillV2): topics[2] is the maker order id.
+SPOT_BOOK = "0xD1E515000000000000000000000000000000590D"
+TRADE_FILL_TOPIC = "0x74eea602401da7376b8e69a8401c0164dea612f7370c6d2ed8f016e86b19e5e2"
 
 
 def rpc(url, method, params=(), timeout=5):
@@ -70,6 +73,50 @@ def rpc(url, method, params=(), timeout=5):
     if "error" in data:
         raise RuntimeError(f"{method}: {data['error']}")
     return data["result"]
+
+
+def parse_receipts(raw):
+    """hash -> status (1/0), gas used and the spot-book maker order ids it filled, from one block's
+    eth_getBlockReceipts result."""
+    out = {}
+    for r in raw or ():
+        makers = [l["topics"][2] for l in r.get("logs") or ()
+                  if l.get("address", "").lower() == SPOT_BOOK.lower() and len(l.get("topics") or ()) > 2
+                  and l["topics"][0].lower() == TRADE_FILL_TOPIC]
+        out[r["transactionHash"].lower()] = dict(status=int(r["status"], 16), gas=int(r["gasUsed"], 16),
+                                                 makers=makers)
+    return out
+
+
+def fetch_receipts(numbers, errors, workers=8):
+    """Receipts for the given blocks from node 1, read after the drain so the window carries no
+    extra RPC load. A block whose receipts cannot be read leaves its hashes status-unknown."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(n):
+        try:
+            return parse_receipts(rpc(RPC_URLS[0], "eth_getBlockReceipts", [hex(n)], 30))
+        except Exception as error:
+            errors.append(f"receipts {n}: {str(error)[:120]}")
+            return {}
+
+    receipts = {}
+    with ThreadPoolExecutor(workers) as pool:
+        for part in pool.map(one, sorted(numbers)):
+            receipts.update(part)
+    return receipts
+
+
+def read_submit_log(path):
+    """(hash, submit wall seconds, method) rows; logs written before the method column read as
+    method "unknown"."""
+    rows = []
+    with open(path) as f:
+        next(f, None)
+        for line in f:
+            parts = line.rstrip().split(",")
+            rows.append((parts[0].lower(), int(parts[1]) / 1e6, parts[2] if len(parts) > 2 else "unknown"))
+    return rows
 
 
 def parse_prom(text, keep=KEEP):
@@ -304,17 +351,16 @@ class Observer:
         return threads
 
 
-def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_cap):
-    """Compute every metric for one run; pure over the observer's recorded state."""
-    rows = []
-    with open(submit_log) as f:
-        next(f, None)
-        for line in f:
-            h, us = line.rstrip().split(",")
-            rows.append((h, int(us) / 1e6))
+def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_cap, receipts=None):
+    """Compute every metric for one run; pure over the observer's recorded state.
+
+    With `receipts` (hash -> status, gas, makers), finalized TPS counts successful receipts only and
+    reverted transactions leave the latency populations (reported as `reverted_share`); without
+    them, the included basis applies. Per-type results key on the submit log's method column."""
+    rows = read_submit_log(submit_log)
     if not rows:
         raise SystemExit("Empty submit log")
-    load_start = min(t for _, t in rows)
+    load_start = min(t for _, t, _ in rows)
     start, end = load_start + warmup, load_start + duration
     window = end - start
     with obs.lock:
@@ -330,32 +376,57 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
              attempted_tps=attempted / submit_s, delivered_tps=accepted / submit_s)
     in_window = [b for b in blocks.values() if start <= b["seen"] <= end]
     txs = lambda b: len(b.get("hashes") or ())
-    r["finalized_tps"] = sum(txs(b) for b in blocks.values() if start <= b.get("finalized", -1) <= end) / window
+    receipts = receipts or {}
+    status = lambda h: receipts.get(h.lower(), {}).get("status")
+    finalized_hashes = [h.lower() for b in blocks.values() if start <= b.get("finalized", -1) <= end
+                        for h in (b.get("hashes") or ())]
+    reverted_n = sum(1 for h in finalized_hashes if status(h) == 0)
+    unknown_n = sum(1 for h in finalized_hashes if status(h) is None)
+    r["finalized_included_tps"] = len(finalized_hashes) / window
+    if receipts:
+        r["finalized_basis"] = "successful"
+        r["finalized_tps"] = (len(finalized_hashes) - reverted_n - unknown_n) / window
+    else:
+        r["finalized_basis"] = "included"
+        r["finalized_tps"] = r["finalized_included_tps"]
+    r["outcomes"] = dict(finalized_successful=len(finalized_hashes) - reverted_n - unknown_n if receipts else None,
+                         finalized_reverted=reverted_n if receipts else None,
+                         finalized_status_unknown=unknown_n if receipts else None,
+                         receipts_read=len(receipts))
     r["committed_tps"] = sum(txs(b) for b in in_window) / window
     r["all_four_latest_tps"] = sum(txs(b) for b in blocks.values() if start <= b.get("all4", -1) <= end) / window
-    where = {h: b for b in blocks.values() for h in (b.get("hashes") or ())}
-    receipt, final, no_receipt, no_final = [], [], 0, 0
-    for h, sub in rows:
+    where = {h.lower(): b for b in blocks.values() for h in (b.get("hashes") or ())}
+    receipt, final, no_receipt, no_final, reverted_window = [], [], 0, 0, 0
+    per_type = {}
+    for h, sub, method in rows:
         if not start <= sub <= end:
             continue
+        t = per_type.setdefault(method, dict(submitted_in_window=0, reverted_in_window=0, receipt=[], final=[]))
+        t["submitted_in_window"] += 1
         b = where.get(h)
+        if b is not None and status(h) == 0:
+            reverted_window += 1
+            t["reverted_in_window"] += 1
+            continue
         if b is None:
             no_receipt += 1
             no_final += 1
-            receipt.append(INF)
-            final.append(INF)
+            for target in (receipt, final, t["receipt"], t["final"]):
+                target.append(INF)
             continue
         receipt.append(b["seen"] - sub)
-        if "finalized" in b:
-            final.append(b["finalized"] - sub)
-        else:
-            no_final += 1
-            final.append(INF)
+        t["receipt"].append(b["seen"] - sub)
+        value = b["finalized"] - sub if "finalized" in b else INF
+        no_final += value == INF
+        final.append(value)
+        t["final"].append(value)
     n = len(final)
     r["submit_to_finalized_s"] = spread(final)
     r["submit_to_receipt_s"] = spread(receipt)
     r["unfinalized_share"] = no_final / n if n else None
     r["unreceipted_share"] = no_receipt / n if n else None
+    r["reverted_share"] = reverted_window / (n + reverted_window) if n + reverted_window else None
+    r["per_type"] = type_metrics(per_type, finalized_hashes, {h: m for h, _, m in rows}, receipts, window)
     lag = [b["finalized"] - b["seen"] for b in in_window if "finalized" in b for _ in range(txs(b))]
     r["latest_to_finalized_s"] = spread(lag)
     ordered = sorted(in_window, key=lambda b: b["seen"])
@@ -468,6 +539,40 @@ def window_metrics(obs, submit_log, report, target_tps, duration, warmup, pool_c
     r["validator_exits"] = obs.exited
     r["observer_errors"] = obs.errors
     return r
+
+
+def type_metrics(per_type, finalized_hashes, methods, receipts, window):
+    """Per method: successful finalized TPS and share, reverts, latency, gas used and spot-book fill
+    shape (fills per successful transaction; takers that filled exactly two distinct makers)."""
+    out = {}
+    for h in finalized_hashes:
+        method = methods.get(h, "unknown")
+        t = per_type.setdefault(method, dict(submitted_in_window=0, reverted_in_window=0, receipt=[], final=[]))
+        rec = receipts.get(h)
+        key = "status_unknown" if rec is None else ("successful" if rec["status"] == 1 else "reverted")
+        t[key] = t.get(key, 0) + 1
+        if rec is None:
+            continue
+        t.setdefault("gas_" + key, []).append(rec["gas"])
+        if rec["status"] == 1:
+            fills = t.setdefault("fills", {})
+            fills[str(len(rec["makers"]))] = fills.get(str(len(rec["makers"])), 0) + 1
+            t["two_distinct"] = t.get("two_distinct", 0) + (len(rec["makers"]) == 2 == len(set(rec["makers"])))
+    total = sum(t.get("successful", 0) for t in per_type.values())
+    mean = lambda xs: round(statistics.fmean(xs)) if xs else None
+    for method, t in sorted(per_type.items()):
+        ok = t.get("successful", 0)
+        out[method] = dict(
+            submitted_in_window=t["submitted_in_window"], reverted_in_window=t["reverted_in_window"],
+            finalized_successful=ok if receipts else None,
+            finalized_successful_tps=ok / window if receipts else None,
+            share_of_successful=ok / total if total else None,
+            finalized_reverted=t.get("reverted", 0) if receipts else None,
+            finalized_status_unknown=t.get("status_unknown", 0),
+            submit_to_finalized_s=spread(t["final"]), submit_to_receipt_s=spread(t["receipt"]),
+            gas_used_avg=mean(t.get("gas_successful")), gas_used_avg_reverted=mean(t.get("gas_reverted")),
+            fills=t.get("fills", {}), two_distinct_makers=t.get("two_distinct", 0))
+    return out
 
 
 def agreement(obs, start, end):
@@ -645,8 +750,15 @@ def watch(a):
             break
         time.sleep(2)
     report = json.loads((a.run_dir / "report.json").read_text())
+    rows = read_submit_log(a.run_dir / "submit-log.csv")
+    load_start = min(t for _, t, _ in rows) if rows else time.time()
+    with obs.lock:
+        numbers = [n for n, b in obs.blocks.items() if b.get("hashes") and b.get("seen", 0) >= load_start - 5]
+    receipt_errors = []
+    receipts = fetch_receipts(numbers, receipt_errors) if a.receipts else None
     metrics = window_metrics(obs, a.run_dir / "submit-log.csv", report, a.target_tps, a.duration, a.warmup,
-                             a.pool_cap)
+                             a.pool_cap, receipts=receipts)
+    metrics["receipt_errors"] = receipt_errors[:20]
     metrics["drain_s"] = time.time() - load_end
     metrics["finalized_agreement"] = agreement(obs, metrics["window_start"], metrics["window_end"])
     metrics["pool_pending_after_drain"] = pool
@@ -674,8 +786,12 @@ def print_summary(m):
     pb = m.get("per_block_median") or {}
     print("--- Diesis chain-side metrics (window "
           f"{m['window_s']:.0f} s after {m['warmup_s']:.0f} s warmup) ---")
-    print(f"  Finalized TPS:          {m['finalized_tps']:.1f}  (attempted {m['attempted_tps']:.1f}, "
-          f"target {m['target_tps']})")
+    print(f"  Finalized TPS:          {m['finalized_tps']:.1f}  ({m.get('finalized_basis', 'included')}; "
+          f"attempted {m['attempted_tps']:.1f}, target {m['target_tps']})")
+    o = m.get("outcomes") or {}
+    if o.get("finalized_reverted") is not None:
+        print(f"  Finalized outcomes:     successful {o['finalized_successful']}  reverted {o['finalized_reverted']}  "
+              f"status unknown {o['finalized_status_unknown']}  (included TPS {m['finalized_included_tps']:.1f})")
     print(f"  Submit->finalized s:    p50 {fmt(f['p50'])}  p95 {fmt(f['p95'])}  p99 {fmt(f['p99'])}  "
           f"(unfinalized {fmt(m['unfinalized_share'])})")
     print(f"  Submit->receipt s:      p50 {fmt(rc['p50'])}  p95 {fmt(rc['p95'])}  p99 {fmt(rc['p99'])}")
@@ -699,6 +815,14 @@ def print_summary(m):
           f"largest block {m.get('largest_block_txs')} tx  head spread p99 "
           f"{(m.get('validator_head_spread_blocks') or {}).get('p99')}  follower "
           f"{(m.get('follower_lag_blocks') or {}).get('p99') if m.get('follower_present') else 'none'}")
+    types_ = m.get("per_type") or {}
+    if len(types_) > 1 or "unknown" not in types_:
+        print("  Per type:               share  ok TPS  reverted  fin p50/p99 s  rcpt p50 s  gas used  fills")
+        for name, t in types_.items():
+            print(f"    {name:<20} {fmt(t['share_of_successful'])}  {fmt(t['finalized_successful_tps'])}  "
+                  f"{fmt(t['finalized_reverted'])}  {fmt(t['submit_to_finalized_s']['p50'])}/"
+                  f"{fmt(t['submit_to_finalized_s']['p99'])}  {fmt(t['submit_to_receipt_s']['p50'])}  "
+                  f"{fmt(t['gas_used_avg'])}  {t['fills']}")
     agree = m.get("finalized_agreement") or {}
     print(f"  Finalized agreement:    {agree.get('agree')} at heights "
           f"{[c['height'] for c in agree.get('heights', [])]}")
@@ -715,6 +839,8 @@ def main():
     w.add_argument("--drain", type=float, default=150)
     w.add_argument("--pool-cap", type=int, default=50000)
     w.add_argument("--keep-raw", action="store_true", help="Keep submit-log.csv")
+    w.add_argument("--no-receipts", dest="receipts", action="store_false",
+                   help="Skip the post-drain receipt pass (finalized TPS then counts included transactions)")
     s = sub.add_parser("summary")
     s.add_argument("--metrics", type=Path, required=True)
     a = p.parse_args()

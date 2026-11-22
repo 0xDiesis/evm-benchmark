@@ -4,8 +4,8 @@ use crate::metrics::MetricsExporter;
 use crate::signing::BatchSigner;
 use crate::submission::{BlockTracker, LatencyTracker, Submitter};
 use crate::types::{
-    SubmissionErrorSummary, SustainedResult, TestMode, WindowEntry, benchmark_validity,
-    merge_submission_error_summaries,
+    SubmissionErrorSummary, SustainedResult, TestMode, TransactionType, WindowEntry,
+    benchmark_validity, merge_submission_error_summaries,
 };
 use alloy_primitives::{Address, B256, U256};
 use alloy_signer_local::PrivateKeySigner;
@@ -65,7 +65,7 @@ fn presign_tx_count(target_tps: usize, duration_secs: u64, headroom: f64) -> usi
 /// Accepted transactions with their submission wall-clock time, written when
 /// `BENCH_SUBMIT_LOG` names a file, so an external observer can join each hash
 /// to the block that included it and the time that block finalized.
-type SubmitLog = Arc<std::sync::Mutex<Vec<(B256, u64)>>>;
+type SubmitLog = Arc<std::sync::Mutex<Vec<(B256, u64, TransactionType)>>>;
 
 fn unix_micros(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
@@ -73,12 +73,17 @@ fn unix_micros(time: SystemTime) -> u64 {
         .unwrap_or(0)
 }
 
-fn write_submit_log(path: &std::path::Path, entries: &[(B256, u64)]) -> std::io::Result<()> {
+/// Write every accepted transaction's hash, wall-clock submit time and method.
+/// The Diesis observer joins it with the chain's blocks and receipts.
+fn write_submit_log(
+    path: &std::path::Path,
+    entries: &[(B256, u64, TransactionType)],
+) -> std::io::Result<()> {
     use std::io::Write;
     let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
-    writeln!(out, "hash,submit_unix_us")?;
-    for (hash, micros) in entries {
-        writeln!(out, "{hash:?},{micros}")?;
+    writeln!(out, "hash,submit_unix_us,method")?;
+    for (hash, micros, method) in entries {
+        writeln!(out, "{hash:?},{micros},{method:?}")?;
     }
     out.flush()
 }
@@ -530,9 +535,12 @@ async fn run_worker(
                     }
                     if let Some(log) = &submit_log {
                         let micros = unix_micros(submit_wall);
-                        log.lock()
-                            .unwrap()
-                            .extend(result.accepted_txs.iter().map(|tx| (tx.hash, micros)));
+                        log.lock().unwrap().extend(
+                            result
+                                .accepted_txs
+                                .iter()
+                                .map(|tx| (tx.hash, micros, tx.method)),
+                        );
                     }
                     metrics.inc_transactions_submitted(accepted as u64);
                     sent_count.fetch_add(accepted, Ordering::SeqCst);
@@ -597,8 +605,8 @@ async fn update_timeline(
 mod tests {
     use super::*;
     use crate::config::{Config, SubmissionMethod};
+    use crate::types::SignedTxWithMetadata;
     use crate::types::{ExecutionMode, TestMode};
-    use crate::types::{SignedTxWithMetadata, TransactionType};
     use alloy_primitives::B256;
     use prometheus::Registry;
     use std::sync::atomic::Ordering;
@@ -1006,13 +1014,20 @@ mod tests {
     fn test_submit_log_writes_hash_and_micros() {
         let path =
             std::env::temp_dir().join(format!("evm-bench-submit-log-{}.csv", std::process::id()));
-        write_submit_log(&path, &[(B256::with_last_byte(7), 1_795_000_000_123_456)])
-            .expect("write");
+        write_submit_log(
+            &path,
+            &[(
+                B256::with_last_byte(7),
+                1_795_000_000_123_456,
+                TransactionType::ERC20Transfer,
+            )],
+        )
+        .expect("write");
         let text = std::fs::read_to_string(&path).expect("read");
         assert_eq!(
             text,
             format!(
-                "hash,submit_unix_us\n{:?},1795000000123456\n",
+                "hash,submit_unix_us,method\n{:?},1795000000123456,ERC20Transfer\n",
                 B256::with_last_byte(7)
             )
         );

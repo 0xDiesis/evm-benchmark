@@ -160,6 +160,90 @@ class ObserverMetrics(unittest.TestCase):
         self.assertEqual(observer.quantile(parsed, "0.5"), 9.5)
 
 
+FILL = observer.TRADE_FILL_TOPIC
+
+
+def with_methods(tmp):
+    """The synthetic run with a method column: every 4th hash a SpotTake, the rest ETHTransfer;
+    receipts mark every 10th ETHTransfer reverted, and SpotTakes fill makers 0xa and 0xb."""
+    obs, log = synthetic(tmp)
+    lines = log.read_text().splitlines()
+    out, receipts = [lines[0] + ",method"], {}
+    for i, line in enumerate(lines[1:]):
+        h = line.split(",")[0]
+        method = "SpotTake" if i % 4 == 0 else "ETHTransfer"
+        out.append(f"{line},{method}")
+        if h in ("0xfirst", "0xdead"):
+            continue
+        if method == "SpotTake":
+            receipts[h] = dict(status=1, gas=137908, makers=["0xa", "0xb"])
+        else:
+            receipts[h] = dict(status=0 if i % 10 == 1 else 1, gas=21000, makers=[])
+    log.write_text("\n".join(out) + "\n")
+    return obs, log, receipts
+
+
+class ObserverOutcomes(unittest.TestCase):
+    def metrics(self, drop_receipts=0):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log, receipts = with_methods(tmp)
+            for h in list(receipts)[40000:40000 + drop_receipts]:
+                receipts.pop(h)
+            return observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000, receipts=receipts), receipts
+
+    def test_finalized_tps_counts_successful_receipts_only(self):
+        m, receipts = self.metrics()
+        included = m["finalized_included_tps"] * m["window_s"]
+        reverted = m["outcomes"]["finalized_reverted"]
+        self.assertEqual(m["finalized_basis"], "successful")
+        self.assertGreater(reverted, 0)
+        self.assertAlmostEqual(m["finalized_tps"] * m["window_s"], included - reverted)
+        self.assertEqual(m["outcomes"]["finalized_status_unknown"], 0)
+
+    def test_per_type_success_latency_gas_and_fills(self):
+        m, _ = self.metrics()
+        take, transfer = m["per_type"]["SpotTake"], m["per_type"]["ETHTransfer"]
+        self.assertEqual(take["finalized_reverted"], 0)
+        self.assertGreater(transfer["finalized_reverted"], 0)
+        self.assertEqual(take["gas_used_avg"], 137908)
+        self.assertEqual(transfer["gas_used_avg"], 21000)
+        self.assertEqual(take["fills"], {"2": take["finalized_successful"]})
+        self.assertEqual(take["two_distinct_makers"], take["finalized_successful"])
+        self.assertEqual(transfer["fills"], {"0": transfer["finalized_successful"]})
+        self.assertEqual(take["submit_to_finalized_s"]["p50"], 3.0)
+        shares = sum(t["share_of_successful"] for t in m["per_type"].values())
+        self.assertAlmostEqual(shares, 1.0)
+        # Reverted transfers leave the latency population and show as a share instead.
+        self.assertGreater(m["reverted_share"], 0)
+        self.assertLess(m["submit_to_finalized_s"]["n"], 91001)
+
+    def test_missing_receipts_are_status_unknown_not_success(self):
+        m, _ = self.metrics(drop_receipts=500)
+        self.assertGreater(m["outcomes"]["finalized_status_unknown"], 0)
+        self.assertAlmostEqual(
+            m["finalized_tps"] * m["window_s"],
+            m["finalized_included_tps"] * m["window_s"] - m["outcomes"]["finalized_reverted"]
+            - m["outcomes"]["finalized_status_unknown"])
+
+    def test_two_column_log_without_receipts_keeps_the_included_basis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            obs, log = synthetic(tmp)
+            m = observer.window_metrics(obs, log, REPORT, 1000, 57, 7, 50000)
+        self.assertEqual(m["finalized_basis"], "included")
+        self.assertEqual(set(m["per_type"]), {"unknown"})
+
+    def test_receipt_parse_reads_status_gas_and_distinct_makers(self):
+        book = observer.SPOT_BOOK.lower()
+        raw = [dict(transactionHash="0x01", status="0x1", gasUsed="0x21aa4", logs=[
+                    dict(address=book, topics=[FILL, "0xm", "0xmaker1", "0xt"]),
+                    dict(address=book, topics=[FILL, "0xm", "0xmaker2", "0xt"]),
+                    dict(address=book, topics=["0xother", "0xm", "0xmaker3", "0xt"])]),
+               dict(transactionHash="0x02", status="0x0", gasUsed="0x5208", logs=[])]
+        parsed = observer.parse_receipts(raw)
+        self.assertEqual(parsed["0x01"], dict(status=1, gas=137892, makers=["0xmaker1", "0xmaker2"]))
+        self.assertEqual(parsed["0x02"], dict(status=0, gas=21000, makers=[]))
+
+
 class Fleet(unittest.TestCase):
     def test_profiles_exist_and_capped_is_the_run_rule(self):
         capped = fleet.read_profile("capped")
