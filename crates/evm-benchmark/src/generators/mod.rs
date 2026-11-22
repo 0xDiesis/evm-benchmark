@@ -2,8 +2,12 @@
 pub mod contract_deploy;
 /// EVM mixed-workload transaction generator.
 pub mod evm_mix;
+/// The pinned judged mixed-EVM workload for Diesis speed runs.
+pub mod judged_mix;
 /// Simple ETH transfer generator.
 pub mod simple_transfer;
+/// Direct EVM calls to the Diesis exchange precompiles.
+pub mod spot_book;
 
 #[allow(unused_imports)]
 pub use contract_deploy::{EvmContracts, deploy_contracts};

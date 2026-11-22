@@ -24,7 +24,7 @@ pub enum SignMode {
     Presigned,
 }
 
-#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash)]
 pub enum TransactionType {
     /// Simple ETH value transfer (21k gas).
     SimpleTransfer,
@@ -40,6 +40,12 @@ pub enum TransactionType {
     NFTMint,
     /// Plain ETH transfer within an EVM mix (distinct from [`SimpleTransfer`]).
     ETHTransfer,
+    /// Spot-book resting limit placement (1 lot, non-crossing).
+    SpotPlace,
+    /// Spot-book `cancelOrder` of a live resting order.
+    SpotCancel,
+    /// Spot-book crossing limit order filling two makers.
+    SpotTake,
 }
 
 // Per-transaction tracking
