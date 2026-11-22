@@ -274,6 +274,10 @@ class AB(unittest.TestCase):
             ab.parse_side("profile=fast")
         with self.assertRaises(SystemExit):
             ab.parse_side("env=PATH=/x")
+        self.assertEqual(ab.parse_side("outcome=hybrid,name=pq")["outcome"], "hybrid")
+        self.assertNotIn("outcome", ab.parse_side("profile=uncapped"))
+        with self.assertRaises(SystemExit):
+            ab.parse_side("outcome=ml-dsa")
 
     def test_probe_step_and_overload(self):
         plan = dict(rates=[1000], duration=300, warmup=0, probe="2:30", max_load=40)

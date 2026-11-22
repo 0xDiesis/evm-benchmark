@@ -121,7 +121,8 @@ Fixes made along the way:
   BLS-only also the epoch-zero artifact signed for that genesis. The rule is recorded in the
   provenance, and an aged fleet keeps the rule it was built with. `hybrid` selects the
   production genesis. Checkouts without `docker/epoch/epoch-zero-4v-bls-only.calldata`
-  predate the control and get neither key.
+  predate the control and get neither key. `ab.py` takes `outcome=hybrid|bls-only` per side,
+  so one image can be compared under both rules.
 - **Port blocks.** Each fleet takes the first free block: block k adds 200·k to the published
   RPC (18545–18575), WS (18546), metrics (19101–19104) and Prometheus (19090) ports, and owns
   subnet `10.100.(100+k).0/24`. A port is busy when anything listens on it or Docker publishes

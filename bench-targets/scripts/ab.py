@@ -9,6 +9,8 @@ A side is a comma list of:
   image=<tag>               diesis-node-e2e tag (DIESIS_IMAGE_TAG); default: checkout HEAD-release
   repo=<path>               node checkout to render (must match the image); default DIESIS_REPO_DIR
   env=K=V+K=V               validator overrides (BENCH_DIESIS_ENV)
+  outcome=hybrid|bls-only   genesis outcome signature rule (BENCH_DIESIS_OUTCOME_RULE); default:
+                            the harness default for the checkout
   name=<short>              label in the summary
 With --b the arms run A B B A A B ... until each side has --arms; without it, A repeats.
 Each arm runs one sustained bench.sh step per rate (fresh genesis per step, or a restart of
@@ -46,11 +48,13 @@ def parse_side(text):
     side = {}
     for part in [p for p in text.split(",") if p]:
         key, sep, value = part.partition("=")
-        if not sep or key not in {"profile", "image", "repo", "env", "name"}:
+        if not sep or key not in {"profile", "image", "repo", "env", "outcome", "name"}:
             raise SystemExit(f"Bad side field {part!r}")
         side[key] = value
     if side.get("profile", "capped") not in {"capped", "uncapped"}:
         raise SystemExit("profile must be capped or uncapped")
+    if side.get("outcome", "hybrid") not in {"hybrid", "bls-only"}:
+        raise SystemExit("outcome must be hybrid or bls-only")
     side.setdefault("profile", "capped")
     side["env"] = [e for e in side.get("env", "").split("+") if e]
     for item in side["env"]:
@@ -163,7 +167,7 @@ def summarize(out, plan):
     for key, data in summary.items():
         c = data["config"]
         lines += [f"## {key.upper()}: {c.get('name') or c['profile']} — {c['profile']} image={c.get('image') or 'HEAD'} "
-                  f"{' '.join(c['env'])}", "",
+                  f"{'outcome=' + c['outcome'] + ' ' if c.get('outcome') else ''}{' '.join(c['env'])}", "",
                   "| offered | " + " | ".join(cols) + " | gen-bound | saturated | pool full | agree | functional-only |",
                   "|---" * (len(cols) + 6) + "|"]
         for rate, row in data["rates"].items():
@@ -188,6 +192,8 @@ def run_step(out, i, key, side, step, plan, log, external=False):
         env["DIESIS_IMAGE_TAG"] = side["image"]
     if side.get("repo"):
         env["DIESIS_REPO_DIR"] = side["repo"]
+    if side.get("outcome"):
+        env["BENCH_DIESIS_OUTCOME_RULE"] = side["outcome"]
     if plan.get("aged"):
         env["DIESIS_AGED_TAG"] = plan["aged"]
     if external:
