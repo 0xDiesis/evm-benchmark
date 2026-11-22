@@ -11,8 +11,9 @@ Arms run the stretch values interleaved (4,1 with --arms 2 runs 4 1 1 4), each o
      finalized heads are read at the window's start and end only, so RPC polling stays out of the
      CPU window: blocks and consensus rounds per second per node (the stretch multiplies the DAG
      round delay) and whether all four latest and finalized heads moved;
-  2. --probes times: wait --probe-idle seconds idle, polling node 1's head every 50 ms over the
-     gap's last --cadence seconds (idle block intervals), then submit one signed transfer from the
+  2. --probes times: wait --probe-idle seconds idle, sampling CPU and heads over the gap's quiet part
+     (idle after activity) and polling node 1's head every 50 ms over the gap's last --cadence
+     seconds (idle block intervals), then submit one signed transfer from the
      dev key to node 1 and time submit->first new block and submit->receipt on node 1, and
      submit->finalized (every validator's `finalized` head passing the receipt block);
   3. per probe, whether each validator logged leaving idle mode when it arrived; at the end, every
@@ -164,6 +165,21 @@ def idle_cpu(containers, seconds, sock):
                 peak_memory_bytes=peaks, host_load_1m=dict(median=statistics.median(loads), max=max(loads)))
 
 
+def gap_summary(windows):
+    """The quiet part of every probe gap (after activity, before the cadence polling): per validator
+    the median CPU % over the gaps, blocks per second, and whether every head advanced in every gap."""
+    if not windows:
+        return None
+    cpu = {name: statistics.median(w["cpu_pct"][name] for w in windows) for name in windows[0]["cpu_pct"]}
+    return dict(windows=len(windows), seconds=sum(w["seconds"] for w in windows), cpu_pct=cpu,
+                cpu_pct_median=statistics.median(cpu.values()),
+                blocks_per_s=median([median(w["heads"]["blocks_per_s"]) for w in windows]),
+                all_advanced=all(w["heads"]["all_advanced"] for w in windows),
+                host_load_1m=dict(median=median([w["host_load_1m"]["median"] for w in windows]),
+                                  max=max(w["host_load_1m"]["max"] for w in windows)),
+                gaps=windows)
+
+
 def probe(urls, chain_id):
     """One transfer: submit->first new block and submit->receipt on node 1, and submit->every
     validator's finalized head passing the receipt block, in seconds."""
@@ -245,14 +261,22 @@ def run_arm(number, value, a, out, sock):
         arm["idle"] = idle_cpu(ports["containers"], a.idle, sock)
         arm["idle_heads"] = advance(start, heads(urls))
         arm["idle_rounds_per_s"] = per_second(round_start, rounds(metrics), arm["idle_heads"]["seconds"])
-        probes, gaps = [], []
+        probes, gaps, quiet = [], [], []
         for _ in range(a.probes):
-            time.sleep(max(0, a.probe_idle - a.cadence))
+            rest = max(0, a.probe_idle - a.cadence)
+            if rest >= 10:
+                before = heads(urls)
+                window = idle_cpu(ports["containers"], rest, sock)
+                window["heads"] = advance(before, heads(urls))
+                quiet.append(window)
+            else:
+                time.sleep(rest)
             gaps += intervals(urls[0], min(a.cadence, a.probe_idle))
             result = probe(urls, chain_id)
             result["idle_exits"] = idle_exits(ports["containers"], result["submitted"] - 5)
             probes.append(result)
         arm["probes"] = probes
+        arm["gap_idle"] = gap_summary(quiet)
         arm["idle_interval_ms"] = observer.spread(gaps, (50, 90, 99))
         for key in ("first_block_s", "receipt_s", "finalized_s"):
             arm[key] = spread([x[key] for x in probes])
@@ -303,6 +327,19 @@ def report(record):
                      f"{fmt((arm['first_block_s'] or {}).get('median'))} | {fmt((arm['receipt_s'] or {}).get('median'))} | "
                      f"{fmt(f.get('median'))} ({fmt(f.get('min'))}–{fmt(f.get('max'))}, n={f.get('n', 0)}) | "
                      f"{live(arm)} | {modes or '-'} | {i['host_load_1m']['median']:.1f}/{i['host_load_1m']['max']:.1f} |")
+    lines += ["", "After activity: the quiet part of each probe gap (before the cadence polling), medians over the "
+              "gaps. Blank for arms run before this was recorded.", "",
+              "| arm | stretch | CPU % per validator | median CPU % | blocks/s | every head advanced | "
+              "host load median/max |", "|---" * 7 + "|"]
+    for arm in record["arms"]:
+        g = arm.get("gap_idle") if arm.get("result") == "completed" else None
+        if not g:
+            lines.append(f"| {arm['arm']} | {arm['stretch']} | - | - | - | - | - |")
+            continue
+        per = ", ".join(f"{v:.1f}" for v in g["cpu_pct"].values())
+        lines.append(f"| {arm['arm']} | {arm['stretch']} | {per} | {g['cpu_pct_median']:.1f} | {fmt(g['blocks_per_s'])} | "
+                     f"{'yes' if g['all_advanced'] else 'NO'} | {fmt(g['host_load_1m']['median'], 1)}/"
+                     f"{fmt(g['host_load_1m']['max'], 1)} |")
     lines += ["", "| stretch | arms | median CPU % (min–max validator) | idle blocks/s | idle rounds/s | "
               "idle interval p50/p99 ms | submit→first block s | submit→receipt s | "
               "submit→finalized s (median, min–max) | live arms |", "|---" * 10 + "|"]

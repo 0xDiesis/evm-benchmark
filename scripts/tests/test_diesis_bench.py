@@ -397,7 +397,14 @@ class Idle(unittest.TestCase):
     def test_report_has_a_row_per_arm_and_medians_per_stretch(self):
         arms = [idle_arm(1, 4, 10.0, 1.0), idle_arm(2, 1, 30.0, 4.0), idle_arm(3, 1, 32.0, 4.0),
                 idle_arm(4, 4, 12.0, 1.0), dict(arm=5, stretch=4, result="failed: x")]
+        windows = [dict(seconds=90.0, cpu_pct={"n0": c, "n1": c + 2}, host_load_1m=dict(median=5.0, max=6.0),
+                        heads=dict(blocks_per_s=[b, b], all_advanced=True)) for c, b in ((10.0, 0.5), (14.0, 0.7))]
+        arms[0]["gap_idle"] = idle.gap_summary(windows)
+        self.assertEqual(arms[0]["gap_idle"]["cpu_pct"], {"n0": 12.0, "n1": 14.0})
+        self.assertIsNone(idle.gap_summary([]))
         md = idle.report(dict(profile="capped", idle_s=300, probes=1, probe_idle_s=120, arms=arms))
+        self.assertIn("| 1 | 4 | 12.0, 14.0 | 13.0 | 0.60 | yes | 5.0/6.0 |", md)
+        self.assertIn("| 2 | 1 | - | - | - | - | - |", md)
         self.assertIn("| 1 | 4 | 10.0, 11.0, 12.0, 13.0 | 11.5 | 1.00 | 2.00 | 1000/1200 | 0.50 | 0.90 | "
                       "1.50 (1.50–1.50, n=1) | yes; agree True | 1/1, 1/1, 1/1, 1/1 | 3.0/4.0 |", md)
         self.assertIn("| 5 | 4 | failed: x |", md)
