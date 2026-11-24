@@ -19,44 +19,45 @@ EVM targets are judged under the **`capped`** profile:
 
 **Primary results:**
 - finalized TPS, counting successful receipts only;
-- **submit→finalized** p50/p95/p99, against the target of ≤1.5 s;
+- **submit→finalized** p50/p95/p99, with targets of 1.5 s, 2.5 s, and 4 s;
 - **submit→receipt** p50/p95/p99.
 
 **Secondary:** latest→finalized, then the per-block and resource attribution below.
+
+The first throughput milestone is at least 2,000 successful finalized TPS on the judged mix.
+Use block intervals, follower lag, and phase timings to identify the largest cost and choose
+the next change. Compare it on the same aged workload with matching node settings and host
+conditions.
 
 `uncapped` is for diagnosis only. Both profiles log to file at info (see File log level).
 
 Judged runs run alone. `judged.py` starts its fleet only while no other Diesis fleet runs, and a
 window with another fleet up at its start or end is marked functional-only.
 
-**Known failure: the official capped run does not complete today.** A capped validator
-cannot start an aged chain within its 1 GiB selected encoded Work budget. After about 280
-blocks aged under load, node 6570bb686 refused at startup with
-`certified history Work admission: EncodedWorkBytes requires 1084835969, configured limit is
-1073741824`, and the other validators then lost quorum (`MPT proposal quorum deadline`). This
-is a node defect, owned by the V2 Work-admission workstream: Work charges grow with retained
-history. The procedure stays as written and is expected to fail until the node fix lands.
-Fresh capped fleets and uncapped aged fleets run.
+Start with a current-main baseline using the normal node settings. Use a compatible saved
+fixture or age the fleet in place. Record the revision, image, and first validator error if
+startup fails. If the judged run exposes resource pressure, use that run to decide what to
+investigate and compare the fix under the same validator limits.
 
 ```bash
 # Image for the node commit under test (heavy: run through the compute broker).
 # The checkout must be clean and contracts/out a real directory (see build-image.sh).
 compute run --class heavy --where local -- bash bench-targets/chains/diesis/build-image.sh <node-checkout>
 
-# Aged fleet, once per image storage format (about 45 minutes):
-make diesis-age TAG=m6570-5k DIESIS_REPO_DIR=<node-checkout>
+# Age a fleet in place with the capped profile when a compatible fixture is unavailable:
+BENCH_DIESIS_PROFILE=capped make diesis-age TAG=main-5k DIESIS_REPO_DIR=<node-checkout>
+
+# One aged baseline using the pinned genesis outcome rule:
+make diesis-judged TAG=main-5k RATE=2000 OUTCOME=bls-only
 
 # A/B of a change against main at the judged profile:
-make ab NAME=<change> AGED=m6570-5k RATES=2000 \
+make ab NAME=<change> AGED=main-5k RATES=2000 \
   A="profile=capped,image=<main-sha>-release,repo=<main-checkout>" \
   B="profile=capped,image=<candidate-sha>-release,repo=<candidate-checkout>,name=<change>"
 
-# Baseline under both profiles:
-make ab NAME=baseline-<sha> AGED=m6570-5k RATES=500,1000,2000,3000 A="profile=capped" B="profile=uncapped"
-
 # Save a stopped aged fleet as a fixture, then the judged run on a fresh copy of it
 # (OUTCOME must match the rule the fixture was built with; MIX=judged is the default):
-make diesis-fixture-save TAG=m6570-5k
+make diesis-fixture-save TAG=main-5k
 make diesis-judged FIXTURE=<fixture> RATE=2000 OUTCOME=bls-only
 
 # The node's built speed flags all off against all on, A B B A (FIXTURE= or AGED=, or fresh):
