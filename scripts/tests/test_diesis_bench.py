@@ -520,6 +520,56 @@ class Fleet(unittest.TestCase):
             self.assertEqual({k: c["services"][name]["environment"][k] for k in env}, env)
 
 
+class FleetPacking(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.repo = Path(tmp.name)
+        self.epoch = self.repo / "docker" / "epoch"
+        self.epoch.mkdir(parents=True)
+        (self.epoch / "epoch-zero-4v-bls-only.calldata").write_text("0x00\n")
+        (self.repo / "docker" / "docker-compose.e2e.yml").write_text("")
+        services = {name: {"environment": {}} for name in fleet.NODES}
+        services["prometheus"] = {}
+        output = {"git": "test-revision\n", "docker": json.dumps(dict(services=services, networks={}))}
+        shell = mock.patch.object(fleet, "sh", side_effect=lambda command, **_: types.SimpleNamespace(
+            stdout=output[command[0]]))
+        self.sh = shell.start()
+        self.addCleanup(shell.stop)
+
+    def render(self, packing, rule="bls-only"):
+        environ = {"BENCH_DIESIS_OUTCOME_RULE": rule}
+        if packing is not None:
+            environ["BENCH_DIESIS_ENV"] = f"DIESIS_DEV_EXECUTOR_PACKING={packing}"
+        return fleet.render(self.repo, "sha256:abc", "test-tag", "capped", environ=environ)[0]
+
+    def assert_calldata(self, compose, artifact):
+        for name in fleet.NODES:
+            env = compose["services"][name]["environment"]
+            self.assertEqual(env["DIESIS_EPOCH_ZERO_CALLDATA_FILE"], f"/etc/diesis/epoch/{artifact}")
+
+    def test_true_selects_packing_artifact(self):
+        artifact = "epoch-zero-4v-bls-only-packing.calldata"
+        (self.epoch / artifact).write_text("0x01\n")
+        self.assert_calldata(self.render("true"), artifact)
+
+    def test_missing_packing_artifact_fails_before_compose(self):
+        with self.assertRaisesRegex(SystemExit, r"missing .*epoch-zero-4v-bls-only-packing\.calldata"):
+            self.render("true")
+        self.sh.assert_not_called()
+
+    def test_unset_or_false_selects_standard_artifact(self):
+        (self.epoch / "epoch-zero-4v-bls-only-packing.calldata").write_text("0x01\n")
+        for packing in (None, "false", "True"):
+            with self.subTest(packing=packing):
+                self.assert_calldata(self.render(packing), "epoch-zero-4v-bls-only.calldata")
+
+    def test_hybrid_packing_fails_before_compose(self):
+        with self.assertRaisesRegex(SystemExit, "no hybrid packing epoch-zero artifact"):
+            self.render("true", "hybrid")
+        self.sh.assert_not_called()
+
+
 class AB(unittest.TestCase):
     def test_schedule_interleaves(self):
         self.assertEqual(ab.schedule(3, True), list("abbaab"))
