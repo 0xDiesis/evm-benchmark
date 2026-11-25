@@ -243,14 +243,14 @@ Fixes made along the way:
   environment) go to `$BENCH_RESULTS_BASE/fleet/<project>/`. `bench.sh` copies the
   provenance to `fleet-provenance.json` in each run directory.
 - **Outcome signature rule.** Fleets run a BLS-only genesis by default
-  (`BENCH_DIESIS_OUTCOME_RULE=bls-only`): the node's live validator path does not yet sign
-  the ML-DSA halves that hybrid outcome messages need, so a hybrid fleet stops within a few
-  blocks. The fleet sets `DIESIS_DEV_OUTCOME_SIGNATURE_RULE` on every validator, and for
-  BLS-only also the epoch-zero artifact signed for that genesis. The rule is recorded in the
-  provenance, and an aged fleet keeps the rule it was built with. `hybrid` selects the
-  production genesis. Checkouts without `docker/epoch/epoch-zero-4v-bls-only.calldata`
-  predate the control and get neither key. `ab.py` takes `outcome=hybrid|bls-only` per side,
-  so one image can be compared under both rules.
+  (`BENCH_DIESIS_OUTCOME_RULE=bls-only`). Select `hybrid` to measure a development fleet
+  whose node revision signs Horizon outcomes with both BLS and ML-DSA-65. The fleet sets
+  `DIESIS_DEV_OUTCOME_SIGNATURE_RULE` on every validator and selects the matching epoch-zero
+  artifact for BLS-only. An aged fleet keeps its genesis rule, which is recorded in the run
+  provenance. `ab.py` takes `outcome=hybrid|bls-only` per side. Use compatible fixtures for
+  each rule and record the node revision and image before comparing results. The current
+  executor-packing fixture is BLS-only. On checkouts that predate the rule control, leave
+  `BENCH_DIESIS_OUTCOME_RULE` unset.
 - **Port blocks.** Each fleet takes the first free block: block k adds 200·k to the published
   RPC (18545–18575), WS (18546), metrics (19101–19104) and Prometheus (19090) ports, and owns
   subnet `10.100.(100+k).0/24`. A port is busy when anything listens on it or Docker publishes

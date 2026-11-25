@@ -22,10 +22,8 @@ Inputs (environment):
   BENCH_DIESIS_FLEET    this user's fresh fleet name (default diesis-bench); concurrent users
                         on one host pick distinct names
   BENCH_DIESIS_OUTCOME_RULE  genesis outcome signature rule: bls-only (default) or hybrid. The
-                        node's live validator path does not yet sign the ML-DSA halves hybrid
-                        outcomes need, so a hybrid fleet stops within a few blocks. Checkouts
-                        without docker/epoch/epoch-zero-4v-bls-only.calldata predate the
-                        control and get no rule keys (their strict configuration refuses them)
+                        hybrid rule needs a node revision that signs Horizon outcomes with
+                        ML-DSA. Leave unset for checkouts that predate the rule control
   BENCH_DIESIS_MAX_FLEETS  start only while fewer than N other Diesis fleets (any user's, one per
                         compose project) run on this host; otherwise wait, polling every 30 s,
                         up to BENCH_DIESIS_SLOT_WAIT_S seconds (default 7200)
