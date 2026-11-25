@@ -37,6 +37,7 @@ Inputs (environment):
                         idle minutes on one node and inflates CPU figures; debug is an explicit
                         override for diagnostic arms
   BENCH_DIESIS_ENV      "K=V K=V" validator overrides (win over the profile), for any node flag
+                        DIESIS_DEV_EXECUTOR_PACKING=true requires the BLS-only packing artifact
   E2E_<NAME>            node-Makefile spellings, applied as DIESIS_<NAME> overrides
   DIESIS_*              ambient values only feed the compose's own ${...} interpolation; they
                         are never injected (workspace tooling exports DIESIS_* names the
@@ -90,11 +91,12 @@ OWNER_LABEL = "local.bench.fleet"
 DEV_KEY = "0x" + "0" * 63 + "1"
 RESERVED = {"DIESIS_REPO_DIR", "DIESIS_RPC", "DIESIS_WS", "DIESIS_CHAIN_ID", "DIESIS_IMAGE_TAG", "DIESIS_AGED_TAG",
             "DIESIS_IMAGE_PROFILE", "DIESIS_SOURCE_REVISION"}
-# Genesis outcome signature rule. Each rule has its own genesis hash, so the epoch-zero
-# calldata the validators load must be the artifact signed for that rule's genesis.
+# The epoch-zero calldata must be signed for the genesis that matches the outcome rule
+# and executor packing setting.
 OUTCOME_RULES = ("bls-only", "hybrid")
 DEFAULT_OUTCOME_RULE = "bls-only"
 BLS_ONLY_EPOCH_ZERO = "epoch-zero-4v-bls-only.calldata"
+BLS_ONLY_PACKING_EPOCH_ZERO = "epoch-zero-4v-bls-only-packing.calldata"
 OUTCOME_RULE_KEYS = ("DIESIS_DEV_OUTCOME_SIGNATURE_RULE", "DIESIS_EPOCH_ZERO_CALLDATA_FILE")
 
 
@@ -276,20 +278,30 @@ def file_log_filter_record(value):
     return dict(file_log_filter=value, file_log_filter_source="fleet")
 
 
-def outcome_rule_env(repo, environ, default=DEFAULT_OUTCOME_RULE):
+def outcome_rule_env(repo, environ, default=DEFAULT_OUTCOME_RULE, *, packing=False):
     """Validator keys selecting the genesis outcome signature rule, and the rule (None when the
     checkout predates the control). The rule and its epoch-zero artifact always travel together."""
     requested = environ.get("BENCH_DIESIS_OUTCOME_RULE") or None
     rule = requested or default
     if rule not in OUTCOME_RULES:
         raise SystemExit(f"BENCH_DIESIS_OUTCOME_RULE must be one of {', '.join(OUTCOME_RULES)}, not {rule!r}")
-    if not (Path(repo) / "docker" / "epoch" / BLS_ONLY_EPOCH_ZERO).is_file():
+    epoch = Path(repo) / "docker" / "epoch"
+    artifact = BLS_ONLY_EPOCH_ZERO
+    if packing:
+        if rule == "hybrid":
+            raise SystemExit("DIESIS_DEV_EXECUTOR_PACKING=true requires BENCH_DIESIS_OUTCOME_RULE=bls-only "
+                             "because no hybrid packing epoch-zero artifact exists")
+        artifact = BLS_ONLY_PACKING_EPOCH_ZERO
+        if not (epoch / artifact).is_file():
+            raise SystemExit(f"DIESIS_DEV_EXECUTOR_PACKING=true requires a Diesis checkout with {artifact}. "
+                             f"This checkout is missing {epoch / artifact}")
+    elif not (epoch / artifact).is_file():
         if requested:
             raise SystemExit(f"{repo} predates the genesis outcome rule control; unset BENCH_DIESIS_OUTCOME_RULE")
         return {}, None
     env = {"DIESIS_DEV_OUTCOME_SIGNATURE_RULE": rule}
     if rule == "bls-only":
-        env["DIESIS_EPOCH_ZERO_CALLDATA_FILE"] = f"/etc/diesis/epoch/{BLS_ONLY_EPOCH_ZERO}"
+        env["DIESIS_EPOCH_ZERO_CALLDATA_FILE"] = f"/etc/diesis/epoch/{artifact}"
     return env, rule
 
 
@@ -301,7 +313,8 @@ def render(repo, image_id, tag, profile_name, environ=None, project=DEFAULT_FLEE
     clash = sorted(set(OUTCOME_RULE_KEYS) & set(env))
     if clash:
         raise SystemExit(f"Select the outcome rule with BENCH_DIESIS_OUTCOME_RULE, not {', '.join(clash)}")
-    rule_env, rule = outcome_rule_env(repo, environ, outcome_rule)
+    rule_env, rule = outcome_rule_env(repo, environ, outcome_rule,
+                                     packing=env.get("DIESIS_DEV_EXECUTOR_PACKING") == "true")
     env.update(rule_env)
     files = ["-f", repo / "docker" / "docker-compose.e2e.yml"]
     signing = repo / "docker" / "docker-compose.mpt-signing.yml"
