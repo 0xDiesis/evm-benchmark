@@ -1,15 +1,21 @@
 """Joltzu target registration and safe devnet ownership boundaries."""
 
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 LAUNCHER = ROOT / "bench-targets/chains/joltzu/devnet.py"
+METRICS = LAUNCHER.with_name("metrics.py")
 
 
 class JoltzuTargetTests(unittest.TestCase):
@@ -40,6 +46,7 @@ class JoltzuTargetTests(unittest.TestCase):
             JOLTZU_DEVNET_DIR=str(self.data),
             CALLS=str(self.calls),
         )
+        self.env.pop("JOLTZU_PROMETHEUS", None)
 
     def run_target(self, command):
         return subprocess.run(
@@ -95,6 +102,7 @@ class JoltzuTargetTests(unittest.TestCase):
         self.assertEqual(second.returncode, 0, second.stderr)
         calls = self.recorded_calls()
         self.assertEqual([call[0] for call in calls], ["init", "start", "start"])
+        self.assertTrue(all(call[2:] == [] for call in calls[1:]))
         self.assertEqual(
             calls[0],
             [
@@ -117,6 +125,59 @@ class JoltzuTargetTests(unittest.TestCase):
             [x[0] for x in self.recorded_calls()],
             ["init", "start", "clean", "init", "start"],
         )
+
+    def test_prometheus_is_opt_in_and_survives_reset(self):
+        self.env["JOLTZU_PROMETHEUS"] = "1"
+        self.assertEqual(self.run_target("up").returncode, 0)
+        self.assertEqual(self.run_target("reset").returncode, 0)
+        self.assertEqual(
+            [call[2:] for call in self.recorded_calls() if call[0] == "start"],
+            [["--prometheus"], ["--prometheus"]],
+        )
+
+    def test_benchmark_keeps_both_snapshots_after_harness_failure(self):
+        commands = self.root / "commands"
+        commands.mkdir()
+        target = self.root / "target"
+        (target / "release").mkdir(parents=True)
+        harness = target / "release" / "evm-benchmark"
+        harness.write_text("#!/bin/sh\nexit 17\n")
+        harness.chmod(0o755)
+        metadata = shlex.quote(json.dumps({"target_directory": str(target)}))
+        for name, body in {
+            "cargo": f'printf "%s\\n" {metadata}\n',
+            "curl": "exit 0\n",
+            "python3": (
+                'case "$1" in\n'
+                '  */joltzu/metrics.py) printf "{}\\n" > "$3" ;;\n'
+                f'  *) exec {shlex.quote(sys.executable)} "$@" ;;\n'
+                'esac\n'
+            ),
+        }.items():
+            command = commands / name
+            command.write_text(f"#!/bin/sh\n{body}")
+            command.chmod(0o755)
+        output = self.root / "run"
+        result = subprocess.run(
+            [
+                "bash",
+                str(ROOT / "bench-targets/scripts/bench.sh"),
+                "--chain", "joltzu", "--mode", "burst", "--no-fund", "--out", str(output),
+            ],
+            env=dict(
+                self.env,
+                PATH=f"{commands}:{os.environ['PATH']}",
+                BENCH_RESULTS_BASE=str(self.root / "results"),
+                BENCH_PROMETHEUS_CAPTURE="true",
+                JOLTZU_PROMETHEUS="1",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+        for phase in ("before", "after"):
+            self.assertTrue((output / f"joltzu-metrics-{phase}.json").is_file())
 
     def test_refuses_existing_unowned_directory(self):
         self.data.mkdir()
@@ -145,6 +206,87 @@ class JoltzuTargetTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("source", result.stderr)
         self.assertTrue((self.repo / "tools/devnet.sh").exists())
+
+
+class JoltzuMetricsTests(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location("joltzu_metrics", METRICS)
+        self.metrics = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.metrics)
+
+    def test_scrapes_bounded_http_response_and_keeps_exact_counters(self):
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == "/metrics" else 404)
+                self.end_headers()
+                self.wfile.write(
+                    b"# TYPE joltzu_finalized_height gauge\n"
+                    b"joltzu_finalized_height 12\n"
+                    b"joltzu_mailbox_dropped_frames_total 9007199254740993\n"
+                    b"joltzu_peer_send_timeouts_total 0\n"
+                    b"joltzu_signer_seconds_total 0.0012\n"
+                    b'unrelated{ignored="true"} 1\n'
+                )
+
+            def log_message(self, *_):
+                pass
+
+        with HTTPServer(("127.0.0.1", 0), Handler) as server:
+            server.timeout = 2
+            worker = threading.Thread(target=server.handle_request)
+            worker.start()
+            try:
+                samples = self.metrics.scrape(server.server_port)
+            finally:
+                worker.join(timeout=3)
+        self.assertEqual(samples["joltzu_finalized_height"], 12)
+        self.assertEqual(samples["joltzu_mailbox_dropped_frames_total"], 9007199254740993)
+        self.assertEqual(samples["joltzu_peer_send_timeouts_total"], 0)
+        self.assertEqual(samples["joltzu_signer_seconds_total"], 0.0012)
+        self.assertNotIn("unrelated", samples)
+
+    def test_required_metrics_are_not_replaced_with_zero(self):
+        with self.assertRaisesRegex(ValueError, "missing.*finalized_height"):
+            self.metrics.parse_samples("joltzu_peer_send_timeouts_total 0\n")
+
+    def test_rejects_bad_status_or_oversized_response(self):
+        with patch.object(self.metrics, "HTTPConnection") as connection:
+            response = connection.return_value.getresponse.return_value.__enter__.return_value
+            response.status = 302
+            with self.assertRaisesRegex(ValueError, "HTTP 302"):
+                self.metrics.scrape(30400)
+            response.read.assert_not_called()
+            response.status = 200
+            response.read.return_value = b"x" * (self.metrics.MAX_RESPONSE_BYTES + 1)
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                self.metrics.scrape(30400)
+            response.read.assert_called_once_with(self.metrics.MAX_RESPONSE_BYTES + 1)
+            connection.return_value.close.assert_called()
+
+    def test_invalid_and_duplicate_samples_are_rejected(self):
+        for text in (
+            "joltzu_finalized_height 1\njoltzu_finalized_height 2\n",
+            "joltzu_finalized_height 1.5\n",
+            "joltzu_signer_seconds_total NaN\n",
+            "joltzu_durable_commit_seconds_total -1\n",
+        ):
+            with self.subTest(text=text), self.assertRaisesRegex(ValueError, "sample"):
+                self.metrics.parse_samples(text)
+
+    def test_partial_scrape_records_node_errors_and_custom_ports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "metrics.json"
+            with patch.object(
+                self.metrics,
+                "scrape",
+                side_effect=[{"height": 1}, OSError("refused"), {}, {}, {}],
+            ) as scrape:
+                self.assertEqual(self.metrics.main(["--base-port", "31000", "--out", str(output)]), 1)
+            nodes = json.loads(output.read_text())["nodes"]
+        self.assertEqual([call.args[0] for call in scrape.call_args_list], list(range(31100, 31105)))
+        self.assertEqual(nodes["observer"]["samples"], {"height": 1})
+        self.assertEqual(nodes["node1"]["error"], "refused")
+        self.assertIn("http://127.0.0.1:31104/metrics", nodes["node4"]["url"])
 
 
 if __name__ == "__main__":

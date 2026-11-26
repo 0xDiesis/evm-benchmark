@@ -72,7 +72,7 @@ def main():
             with marker.open("x") as output:
                 json.dump(identity, output, indent=2)
                 output.write("\n")
-        run("start")
+        run("start", *(["--prometheus"] if os.environ.get("JOLTZU_PROMETHEUS") == "1" else []))
     else:
         run("stop" if command == "down" else "status")
 

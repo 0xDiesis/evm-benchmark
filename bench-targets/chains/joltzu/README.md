@@ -57,6 +57,22 @@ batches to that limit. Start with four for compatibility with the node's shared
 state-read budget. The observer adds a forwarding/following stage; record whether
 comparative runs submit through observers or validator endpoints.
 
+## Metrics
+
+With a node build that supports `devnet.sh start --prometheus`, set
+`JOLTZU_PROMETHEUS=1` for a fresh run. The launcher enables loopback metrics on
+all five processes. The orchestrator writes `joltzu-metrics-before.json` and
+`joltzu-metrics-after.json` in the run directory. Each snapshot records each
+node's finalized height, mailbox drops, send timeouts, and any available signer
+and durable-commit timing counters. Failed scrapes are recorded per node and do
+not interrupt the workload.
+
+Run `python3 bench-targets/chains/joltzu/metrics.py --out /path/to/metrics.json`
+to sample a running devnet directly. Compare counter differences on the same
+node process. A restart, including a ceiling run that restarts between steps,
+resets the counters. Heights in the snapshots describe observed progress.
+Use the receipt and canonical-block checks below to establish finality.
+
 ## Shared EVM smoke check
 
 The shared probe sends transactions only with either the public Hardhat account
@@ -76,6 +92,28 @@ python3 bench-targets/scripts/evm-smoke.py \
 Stop and start the same devnet, then pass `--verify` with that result and a new
 `--out` path to check persisted storage and receipts. Verification sends no new
 transactions and checks the original chain ID and genesis hash.
+
+## Isolated memory experiment
+
+Use Docker with cgroup v2 and a local Linux image containing Bash, Python 3,
+curl, ps, GNU timeout, and OpenSSL 3. Supply prebuilt node binaries, solc 0.8.37,
+and Foundry cast for the image's architecture. The runnable toolchain image from
+`cpp-node/deploy/docker/Dockerfile` supplies the system tools.
+
+```sh
+python3 bench-targets/chains/joltzu/memory-check.py \
+  --image joltzu-toolchain --node-repo "$JOLTZU_REPO_DIR" \
+  --node-build "$JOLTZU_LINUX_BUILD" --solc "$LINUX_SOLC" --cast "$LINUX_CAST" \
+  --baseline-mib 1024 --pressure-mib "$PRESSURE_MIB" --cpus 2 \
+  --out /path/to/new-memory-run
+```
+
+The script runs the same workload twice in separate containers with no external
+network and no swap, then verifies the receipts and stored state after restarting
+each devnet. The baseline must stay below its cap. Choose the lower cap based
+on the baseline's measured peak. The pressure run succeeds only when the kernel
+records a cap event, no out-of-memory event occurs, and the smoke and restart
+checks pass. Per-stage reports include memory, CPU time, and elapsed time.
 
 ## Comparison scope
 
