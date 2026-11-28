@@ -415,10 +415,13 @@ bench-targets/results/
 │       ├── <value>/report.json        # Per-value run
 │       └── best -> <value>/           # Symlink to best performer
 │
-└── index.json                         # Machine-readable catalog of all runs
+└── index.json                         # Machine-readable catalog of recorded results
 ```
 
-Each run directory also maintains `latest` symlinks at every level for quick access.
+A completed harness run updates the index and `latest` links. Check the
+report's `valid` field before comparing results. On a harness error, the run
+directory keeps the console and any captured metrics, and the previous
+indexed result stays available.
 
 ### Metadata
 
