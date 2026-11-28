@@ -1,6 +1,8 @@
 """Focused checks for the isolated Joltzu cgroup experiment."""
 
+from contextlib import redirect_stderr
 import importlib.util
+from io import StringIO
 import json
 from pathlib import Path
 import subprocess
@@ -91,6 +93,7 @@ class JoltzuMemoryCheckTests(unittest.TestCase):
 
     def test_checks_finality_everywhere_before_and_after_restarting_same_state(self):
         with (
+            patch.dict("os.environ", {"no_proxy": "example.test", "NO_PROXY": "other.test"}),
             patch.object(memory_check, "CGROUP", self.cgroup),
             patch.object(memory_check, "OUTPUT", self.output),
             patch.object(memory_check.subprocess, "run") as run,
@@ -103,6 +106,8 @@ class JoltzuMemoryCheckTests(unittest.TestCase):
         commands = [call.args[0] for call in calls]
         scratch = {call.kwargs["env"]["JOLTZU_DEVNET_DIR"] for call in calls}
         self.assertEqual(scratch, {"/output/run/devnet"})
+        for variable in ("no_proxy", "NO_PROXY"):
+            self.assertEqual({call.kwargs["env"][variable] for call in calls}, {"*"})
         self.assertEqual(commands[1].count("--rpc"), 5)
         self.assertEqual(commands[4].count("--rpc"), 5)
         self.assertEqual(commands[1][2:12], commands[4][2:12])
@@ -129,6 +134,22 @@ class JoltzuMemoryCheckTests(unittest.TestCase):
         self.assertEqual(run.call_count, 3)
         self.assertEqual(run.call_args.args[0][-1], "down")
 
+    def test_interrupted_smoke_keeps_failed_profile_and_stops(self):
+        with (
+            patch.object(memory_check, "CGROUP", self.cgroup),
+            patch.object(memory_check, "OUTPUT", self.output),
+            patch.object(
+                memory_check.subprocess, "run", side_effect=[None, KeyboardInterrupt, None]
+            ) as run,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            memory_check.worker(128, self.args.openssl)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_args.args[0][-1], "down")
+        report = json.loads((self.output / "profile.json").read_text())
+        self.assertEqual(list(report["stages"]), ["start", "smoke", "stop"])
+        self.assertEqual(report["status"], "failed")
+
     def test_hashes_exact_input_bytes(self):
         payload = self.root / "tool"
         payload.write_bytes(b"abc")
@@ -154,23 +175,51 @@ class JoltzuMemoryCheckTests(unittest.TestCase):
         profile["status"] = "failed"
         self.assertEqual(memory_check.assess(profile, True), "oom")
 
-    def test_timeout_forces_cleanup_of_the_named_container(self):
-        with patch.object(
-            memory_check.subprocess,
-            "run",
-            side_effect=[subprocess.TimeoutExpired("docker", 45), None],
-        ) as run:
-            self.assertEqual(
-                memory_check.run_profile(self.args, "sha256:example", "baseline", 128),
-                "timeout",
-            )
-        invocation, cleanup = [call.args[0] for call in run.call_args_list]
-        container_name = next(
-            argument.split("=", 1)[1]
-            for argument in invocation
-            if argument.startswith("--name=")
-        )
-        self.assertEqual(cleanup, ["docker", "rm", "-f", container_name])
+    def test_timeout_removes_the_named_container_or_reports_cleanup_failure(self):
+        for cleanup in ("removed", "absent", "daemon error", "cleanup timeout"):
+            with self.subTest(cleanup=cleanup):
+                self.args.out = self.output / cleanup
+                self.args.out.mkdir()
+
+                def docker(command, *, timeout, **options):
+                    if command[1] == "run":
+                        options["stdout"].write("smoke output before timeout\n")
+                        if cleanup == "absent":
+                            return subprocess.CompletedProcess(command, 124)
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    if cleanup == "cleanup timeout":
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    detail = {
+                        "absent": f"Error response from daemon: No such container: {command[-1]}",
+                        "daemon error": "Cannot connect to the Docker daemon",
+                    }.get(cleanup, "")
+                    return subprocess.CompletedProcess(command, int(bool(detail)), stderr=detail)
+
+                stderr = StringIO()
+                with (
+                    patch.object(memory_check.subprocess, "run", side_effect=docker) as run,
+                    redirect_stderr(stderr),
+                ):
+                    self.assertEqual(
+                        memory_check.run_profile(self.args, "sha256:example", "baseline", 128),
+                        "timeout",
+                    )
+                invocation, removal = run.call_args_list
+                container = next(
+                    argument.split("=", 1)[1]
+                    for argument in invocation.args[0]
+                    if argument.startswith("--name=")
+                )
+                self.assertEqual(removal.args[0], ["docker", "rm", "-f", container])
+                self.assertEqual(removal.kwargs["timeout"], 15)
+                console = (self.args.out / "baseline/console.log").read_text()
+                self.assertTrue(console.startswith("smoke output before timeout\n"))
+                if cleanup in ("removed", "absent"):
+                    self.assertEqual(stderr.getvalue(), "")
+                else:
+                    message = f"cleanup failed for {container}"
+                    self.assertIn(message, stderr.getvalue())
+                    self.assertIn(message, console)
 
 
 if __name__ == "__main__":

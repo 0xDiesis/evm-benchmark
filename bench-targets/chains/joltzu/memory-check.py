@@ -75,6 +75,7 @@ def worker(cap_mib, openssl):
         JOLTZU_PROMETHEUS="0",
         OPENSSL=openssl,
         BENCH_KEY=PUBLIC_KEY,
+        no_proxy="*",
         NO_PROXY="*",
     )
     launcher = [sys.executable, str(targets / "chains/joltzu/devnet.py")]
@@ -82,7 +83,7 @@ def worker(cap_mib, openssl):
     # Submit through validator one and check finality on all validators and the observer.
     for port in (30401, 30402, 30403, 30404, 30400):
         smoke.extend(("--rpc", f"http://127.0.0.1:{port}"))
-    result = {"status": "passed", "before": sample_memory(CGROUP), "stages": {}}
+    result = {"status": "failed", "before": sample_memory(CGROUP), "stages": {}}
 
     def run(stage, command):
         start = time.monotonic()
@@ -95,6 +96,7 @@ def worker(cap_mib, openssl):
             }
 
     before_restart = str(OUTPUT / "smoke.json")
+    verified = False
     try:
         run("start", [*launcher, "up"])
         run("smoke", [*smoke, "--solc", "/tools/solc", "--out", before_restart])
@@ -105,13 +107,18 @@ def worker(cap_mib, openssl):
             [*smoke, "--verify", before_restart, "--out", str(OUTPUT / "restart.json")],
         )
     except (OSError, subprocess.SubprocessError) as error:
-        result.update(status="failed", error=str(error))
+        result["error"] = str(error)
+    else:
+        verified = True
     finally:
         try:
             run("stop", [*launcher, "down"])
+            if verified:
+                result["status"] = "passed"
         except (OSError, subprocess.SubprocessError) as error:
-            result.update(status="failed", stop_error=str(error))
-        write_report(OUTPUT / "profile.json", result)
+            result["stop_error"] = str(error)
+        finally:
+            write_report(OUTPUT / "profile.json", result)
     return int(result["status"] != "passed")
 
 
@@ -183,6 +190,31 @@ def container_command(args, image, name, cap_mib, output):
     ]
 
 
+def remove_container(name, log):
+    try:
+        outcome = subprocess.run(
+            ["docker", "rm", "-f", name],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        detail = str(error)
+    else:
+        if outcome.returncode == 0:
+            return True
+        detail = outcome.stderr.strip()
+        # Docker may have already removed the container because of --rm.
+        if detail == f"Error response from daemon: No such container: {name}":
+            return True
+        detail = detail or f"Docker exited with code {outcome.returncode}"
+    message = f"memory-check: Docker cleanup failed for {name} ({detail})"
+    print(message, file=sys.stderr)
+    print(f"\n{message}", file=log)
+    return False
+
+
 def run_profile(args, image, profile, cap_mib):
     output = args.out / profile
     output.mkdir()
@@ -201,20 +233,14 @@ def run_profile(args, image, profile, cap_mib):
             return "timeout"
         finally:
             # A timed-out Docker client can leave its container running.
-            subprocess.run(
-                ["docker", "rm", "-f", name],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=15,
-                check=False,
-            )
+            removed = remove_container(name, log)
     result_path = output / "profile.json"
     if outcome.returncode == 124:
         return "timeout"
     if not result_path.is_file():
         return "failed"
     status = assess(json.loads(result_path.read_text()), profile == "pressure")
-    return "failed" if outcome.returncode and status == "passed" else status
+    return "failed" if (outcome.returncode or not removed) and status == "passed" else status
 
 
 def main():

@@ -557,17 +557,29 @@ if [[ "${PROMETHEUS_CAPTURED}" == "true" ]]; then
     if python3 "${PROMETHEUS_DIAGNOSTICS}" snapshot \
         --url "${PROMETHEUS_URL}" \
         --out "${RUN_DIR}/prometheus-after.json" >/dev/null; then
-        python3 "${PROMETHEUS_DIAGNOSTICS}" delta \
-            --before "${RUN_DIR}/prometheus-before.json" \
-            --after "${RUN_DIR}/prometheus-after.json" \
-            --out "${RUN_DIR}/prometheus-delta.json" \
-            --report "${RUN_DIR}/report.json" >/dev/null || true
+        DELTA_ARGS=(
+            --before "${RUN_DIR}/prometheus-before.json"
+            --after "${RUN_DIR}/prometheus-after.json"
+            --out "${RUN_DIR}/prometheus-delta.json"
+        )
+        if [[ "${HARNESS_EXIT}" -eq 0 ]]; then
+            DELTA_ARGS+=(--report "${RUN_DIR}/report.json")
+        fi
+        python3 "${PROMETHEUS_DIAGNOSTICS}" delta "${DELTA_ARGS[@]}" >/dev/null || true
         echo "Prometheus deltas:"
         python3 "${PROMETHEUS_DIAGNOSTICS}" summary \
             --delta "${RUN_DIR}/prometheus-delta.json" || true
     else
         echo "WARNING: Prometheus after snapshot failed; continuing without deltas." >&2
     fi
+fi
+
+# Leave any existing report and result pointers alone on failure. The EXIT
+# trap clears the topology without replacing the harness exit status.
+if [[ "${HARNESS_EXIT}" -ne 0 ]]; then
+    echo ""
+    echo "Run directory: ${RUN_DIR}"
+    exit "${HARNESS_EXIT}"
 fi
 
 # ── Clear topology if applied ────────────────────────────────────────────
@@ -652,4 +664,4 @@ fi
 # ── Done ─────────────────────────────────────────────────────────────────
 echo ""
 echo "Run directory: ${RUN_DIR}"
-exit "${HARNESS_EXIT:-0}"
+exit 0

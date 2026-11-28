@@ -135,7 +135,7 @@ class JoltzuTargetTests(unittest.TestCase):
             [["--prometheus"], ["--prometheus"]],
         )
 
-    def test_benchmark_keeps_both_snapshots_after_harness_failure(self):
+    def run_failing_benchmark(self, output=None):
         commands = self.root / "commands"
         commands.mkdir()
         target = self.root / "target"
@@ -148,36 +148,85 @@ class JoltzuTargetTests(unittest.TestCase):
             "cargo": f'printf "%s\\n" {metadata}\n',
             "curl": "exit 0\n",
             "python3": (
-                'case "$1" in\n'
-                '  */joltzu/metrics.py) printf "{}\\n" > "$3" ;;\n'
-                f'  *) exec {shlex.quote(sys.executable)} "$@" ;;\n'
-                'esac\n'
+                'case "$1:$2" in\n'
+                '  */joltzu/metrics.py:--out) printf "{}\\n" > "$3"; exit ;;\n'
+                '  */prometheus-diagnostics.py:snapshot) printf "{}\\n" > "$6"; exit ;;\n'
+                "esac\n"
+                f'exec {shlex.quote(sys.executable)} "$@"\n'
             ),
         }.items():
             command = commands / name
             command.write_text(f"#!/bin/sh\n{body}")
             command.chmod(0o755)
-        output = self.root / "run"
-        result = subprocess.run(
-            [
-                "bash",
-                str(ROOT / "bench-targets/scripts/bench.sh"),
-                "--chain", "joltzu", "--mode", "burst", "--no-fund", "--out", str(output),
-            ],
+        args = [
+            "bash", str(ROOT / "bench-targets/scripts/bench.sh"),
+            "--chain", "joltzu", "--mode", "burst", "--no-fund",
+        ]
+        if output is not None:
+            args.extend(("--out", str(output)))
+        return subprocess.run(
+            args,
             env=dict(
                 self.env,
                 PATH=f"{commands}:{os.environ['PATH']}",
                 BENCH_RESULTS_BASE=str(self.root / "results"),
+                BENCH_PROMETHEUS_URL="http://127.0.0.1:9090",
                 BENCH_PROMETHEUS_CAPTURE="true",
+                BENCH_PROMETHEUS_AFTER_SETTLE_SECS="0",
                 JOLTZU_PROMETHEUS="1",
             ),
             capture_output=True,
             text=True,
             timeout=10,
         )
+
+    def test_failed_benchmark_keeps_snapshots_without_publishing_old_report(self):
+        results = self.root / "results"
+        runs = results / "runs"
+        chain = runs / "joltzu"
+        mode = chain / "burst"
+        output = mode / "reused"
+        output.mkdir(parents=True)
+        pointers = {
+            mode / "latest": "previous",
+            chain / "latest": "sustained",
+            runs / "latest": "diesis",
+        }
+        for link, destination in pointers.items():
+            (link.parent / destination).mkdir()
+            link.symlink_to(destination, target_is_directory=True)
+        index = results / "index.json"
+        prior_index = json.dumps([{"path": str(mode / "previous")}]) + "\n"
+        index.write_text(prior_index)
+        report = output / "report.json"
+        prior_report = json.dumps({"results": {
+            "confirmed": 1,
+            "confirmed_tps": 1,
+            "latency": {"p50": 1, "p95": 1, "p99": 1},
+        }}) + "\n"
+        report.write_text(prior_report)
+
+        result = self.run_failing_benchmark(output)
         self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
         for phase in ("before", "after"):
             self.assertTrue((output / f"joltzu-metrics-{phase}.json").is_file())
+            self.assertTrue((output / f"prometheus-{phase}.json").is_file())
+        self.assertTrue((output / "prometheus-delta.json").is_file())
+        for link, destination in pointers.items():
+            with self.subTest(link=link):
+                self.assertEqual(os.readlink(link), destination)
+        self.assertEqual(index.read_text(), prior_index)
+        self.assertEqual(report.read_text(), prior_report)
+
+    def test_failed_benchmark_with_default_output_keeps_latest(self):
+        mode = self.root / "results/runs/joltzu/burst"
+        (mode / "previous").mkdir(parents=True)
+        latest = mode / "latest"
+        latest.symlink_to("previous", target_is_directory=True)
+
+        result = self.run_failing_benchmark()
+        self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+        self.assertEqual(os.readlink(latest), "previous")
 
     def test_refuses_existing_unowned_directory(self):
         self.data.mkdir()

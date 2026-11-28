@@ -113,7 +113,14 @@ network and no swap, then verifies the receipts and stored state after restartin
 each devnet. The baseline must stay below its cap. Choose the lower cap based
 on the baseline's measured peak. The pressure run succeeds only when the kernel
 records a cap event, no out-of-memory event occurs, and the smoke and restart
-checks pass. Per-stage reports include memory, CPU time, and elapsed time.
+checks pass. If Docker cannot confirm removal, the script records the container
+name and cleanup error in the profile's `console.log` and on standard error.
+
+Each `cpu_usec` sample is cumulative CPU time in microseconds for the entire
+container cgroup. Subtract consecutive samples to find the CPU time between
+them. Each `peak_bytes` sample is the highest memory usage since the cgroup was
+created, through the time of that sample. It is `null` when the kernel does not
+expose `memory.peak`. Each stage reports its own wall-clock `elapsed_seconds`.
 
 ## Comparison scope
 
