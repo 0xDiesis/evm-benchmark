@@ -419,6 +419,16 @@ fi
 BENCH_PROMETHEUS_AFTER_SETTLE_SECS="${BENCH_PROMETHEUS_AFTER_SETTLE_SECS:-5}"
 export BENCH_PROMETHEUS_AFTER_SETTLE_SECS
 PROMETHEUS_CAPTURED="false"
+joltzu_snapshot() {
+    if [[ "${CHAIN}" == "joltzu" && "${JOLTZU_PROMETHEUS:-0}" == "1" &&
+          "${BENCH_PROMETHEUS_CAPTURE:-true}" == "true" ]]; then
+        echo "Capturing Joltzu metrics ($1)..."
+        python3 "${BENCH_TARGETS_DIR}/chains/joltzu/metrics.py" \
+            --out "${RUN_DIR}/joltzu-metrics-$1.json" ||
+            echo "WARNING: Joltzu metrics snapshot ($1) incomplete." >&2
+    fi
+}
+joltzu_snapshot before
 if [[ "${BENCH_PROMETHEUS_CAPTURE:-true}" == "true" && -n "${PROMETHEUS_URL}" && -x "${PROMETHEUS_DIAGNOSTICS}" ]]; then
     echo "Capturing Prometheus before snapshot: ${PROMETHEUS_URL}"
     if python3 "${PROMETHEUS_DIAGNOSTICS}" snapshot \
@@ -517,14 +527,15 @@ echo "  Latency: ${LATENCY_BASIS}"
 echo "  Output:  ${RUN_DIR}/report.json"
 echo ""
 
+HARNESS_EXIT=0
 if [[ -n "${CHAIN_KEYS:-}" ]]; then
     BENCH_KEY="${CHAIN_KEYS}" "${HARNESS}" "${HARNESS_ARGS[@]}" 2>&1 \
-        | tee "${RUN_DIR}/console.log"
+        | tee "${RUN_DIR}/console.log" || HARNESS_EXIT=$?
 else
     "${HARNESS}" "${HARNESS_ARGS[@]}" 2>&1 \
-        | tee "${RUN_DIR}/console.log"
+        | tee "${RUN_DIR}/console.log" || HARNESS_EXIT=$?
 fi
-HARNESS_EXIT=${PIPESTATUS[0]}
+joltzu_snapshot after
 
 if [[ -n "${OBSERVER_PID}" ]]; then
     echo "Waiting for the chain-side observer (finality drain up to ${BENCH_DIESIS_DRAIN_SECS:-150}s)..."
@@ -546,17 +557,29 @@ if [[ "${PROMETHEUS_CAPTURED}" == "true" ]]; then
     if python3 "${PROMETHEUS_DIAGNOSTICS}" snapshot \
         --url "${PROMETHEUS_URL}" \
         --out "${RUN_DIR}/prometheus-after.json" >/dev/null; then
-        python3 "${PROMETHEUS_DIAGNOSTICS}" delta \
-            --before "${RUN_DIR}/prometheus-before.json" \
-            --after "${RUN_DIR}/prometheus-after.json" \
-            --out "${RUN_DIR}/prometheus-delta.json" \
-            --report "${RUN_DIR}/report.json" >/dev/null || true
+        DELTA_ARGS=(
+            --before "${RUN_DIR}/prometheus-before.json"
+            --after "${RUN_DIR}/prometheus-after.json"
+            --out "${RUN_DIR}/prometheus-delta.json"
+        )
+        if [[ "${HARNESS_EXIT}" -eq 0 ]]; then
+            DELTA_ARGS+=(--report "${RUN_DIR}/report.json")
+        fi
+        python3 "${PROMETHEUS_DIAGNOSTICS}" delta "${DELTA_ARGS[@]}" >/dev/null || true
         echo "Prometheus deltas:"
         python3 "${PROMETHEUS_DIAGNOSTICS}" summary \
             --delta "${RUN_DIR}/prometheus-delta.json" || true
     else
         echo "WARNING: Prometheus after snapshot failed; continuing without deltas." >&2
     fi
+fi
+
+# Leave any existing report and result pointers alone on failure. The EXIT
+# trap clears the topology without replacing the harness exit status.
+if [[ "${HARNESS_EXIT}" -ne 0 ]]; then
+    echo ""
+    echo "Run directory: ${RUN_DIR}"
+    exit "${HARNESS_EXIT}"
 fi
 
 # ── Clear topology if applied ────────────────────────────────────────────
@@ -641,4 +664,4 @@ fi
 # ── Done ─────────────────────────────────────────────────────────────────
 echo ""
 echo "Run directory: ${RUN_DIR}"
-exit "${HARNESS_EXIT:-0}"
+exit 0

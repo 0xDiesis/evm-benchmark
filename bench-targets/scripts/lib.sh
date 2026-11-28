@@ -417,7 +417,6 @@ make_run_dir() {
     [ -n "$tag" ] && suffix="${ts}_${tag}"
     local dir="${RESULTS_BASE}/runs/${chain}/${mode}/${suffix}"
     mkdir -p "$dir"
-    update_latest_symlink "$dir"
     echo "$dir"
 }
 
